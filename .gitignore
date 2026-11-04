@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.venv/
+__pycache__/
+*.pyc
+
+# Build output
+target/
+dist/
+*.tsbuildinfo
+.pytest_cache/
+.ruff_cache/
+
+# Generated at build time (spec section 8.2)
+registry.generated.json
+apps/desktop/src-tauri/gen/
+
+# Local environment
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test documents never belong in git unless they are synthetic fixtures (spec section 14.4)
+/scratch/

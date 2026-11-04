@@ -1,0 +1,31 @@
+[project]
+name = "converter-workspace"
+version = "0.1.0"
+description = "Workspace root for the converter's Python workers and adapters"
+requires-python = ">=3.12,<3.14"
+license = "AGPL-3.0-only"
+dependencies = []
+
+[dependency-groups]
+dev = ["converter-sdk", "pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+converter-sdk = { workspace = true }
+
+[tool.uv.workspace]
+members = ["workers/sdk"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["workers", "adapters"]

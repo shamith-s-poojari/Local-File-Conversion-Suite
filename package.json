@@ -1,0 +1,16 @@
+{
+  "name": "converter-workspace",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @converter/desktop tauri dev",
+    "build": "pnpm --filter @converter/desktop tauri build",
+    "typecheck": "pnpm --filter @converter/desktop typecheck",
+    "test": "pnpm --filter @converter/desktop test",
+    "check": "pnpm typecheck && pnpm test && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && uv run ruff check . && uv run pytest"
+  }
+}
