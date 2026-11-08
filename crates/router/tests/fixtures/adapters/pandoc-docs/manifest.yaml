@@ -1,0 +1,18 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: pandoc-docs
+kind: conversion
+title: Fixture pandoc-docs
+workerClass: pdf
+edges:
+  - { from: [md, txt], to: docx, tier: H }
+  - { from: [md], to: pptx, tier: R }
+  - { from: [md, txt], to: html, tier: H }
+  - { from: [txt], to: md, tier: H }
+  - { from: [html], to: docx, tier: R }
+  - { from: [html, docx], to: md, tier: R }
+  - { from: [docx], to: html, tier: R }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pandoc]

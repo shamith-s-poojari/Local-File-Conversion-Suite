@@ -1,0 +1,13 @@
+# Spec section 8.2's example manifest, verbatim apart from this comment.
+id: pdf-merge
+kind: operation            # or "conversion"
+title: Merge PDFs
+workerClass: pdf           # Scheduler pool
+inputs: { formats: [pdf], min: 2, max: 200 }
+outputs: { format: pdf, cardinality: one }   # or "many"
+fidelity: E
+fidelityNotes: [FORMS_FLATTENED, TAGS_DROPPED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 120, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pikepdf]

@@ -1,0 +1,9 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "order": { "type": "array", "items": { "type": "string" }, "x-ui": "fileOrder" },
+    "bookmarks": { "enum": ["keep", "perFile", "none"], "default": "perFile" }
+  }
+}

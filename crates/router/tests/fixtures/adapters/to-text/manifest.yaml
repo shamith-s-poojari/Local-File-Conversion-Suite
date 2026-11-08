@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: to-text
+kind: conversion
+title: Fixture to-text
+workerClass: pdf
+edges:
+  - { from: [docx, pptx, xlsx, md, html], to: txt, tier: L }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pandoc, python-pptx, openpyxl]

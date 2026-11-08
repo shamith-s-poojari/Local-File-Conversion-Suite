@@ -1,0 +1,14 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: pdf-to-text
+kind: conversion
+title: Fixture pdf-to-text
+workerClass: pdf
+edges:
+  - { from: [pdf], to: txt, tier: R }
+  - { from: [pdf], to: md, tier: R }
+  - { from: [pdf], to: html, tier: R }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pymupdf]

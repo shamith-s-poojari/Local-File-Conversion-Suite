@@ -1,0 +1,15 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: heic-convert
+kind: conversion
+title: Fixture heic-convert
+workerClass: image
+edges:
+  - { from: [heic], to: pdf, tier: H }
+  - { from: [heic], to: png, tier: H }
+  - { from: [heic], to: jpg, tier: L }
+  - { from: [heic], to: webp, tier: L }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow-heif, pillow, img2pdf]

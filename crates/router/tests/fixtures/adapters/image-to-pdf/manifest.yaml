@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: image-to-pdf
+kind: conversion
+title: Fixture image-to-pdf
+workerClass: image
+edges:
+  - { from: [png, jpg, webp], to: pdf, tier: E }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [img2pdf, pillow]

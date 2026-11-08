@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: pdf-to-pptx
+kind: conversion
+title: Fixture pdf-to-pptx
+workerClass: pdf
+edges:
+  - { from: [pdf], to: pptx, tier: R, cost: 5 }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [python-pptx, pymupdf]

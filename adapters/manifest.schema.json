@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "manifest.schema.json",
+  "title": "Adapter manifest",
+  "description": "adapters/<id>/manifest.yaml (spec section 8.2, blueprint section 3.4, change C5). An operation declares inputs and outputs; a conversion declares edges in the conversion graph. Checked by `pnpm registry`, which also enforces the cross-file rules this schema can't express.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "title", "workerClass", "limits", "params", "platforms", "requires"],
+  "properties": {
+    "id": {
+      "description": "Must equal the adapter's folder name, and be unique.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "kind": { "enum": ["operation", "conversion"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "devOnly": {
+      "description": "Development and test adapters. Left out of the registry unless the generator runs with --include-dev, so they never ship.",
+      "type": "boolean",
+      "default": false
+    },
+    "workerClass": {
+      "description": "Scheduler pool (blueprint section 5.1).",
+      "enum": ["pdf", "image", "render", "office", "ocr"]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formats", "min", "max"],
+      "properties": {
+        "formats": { "$ref": "#/definitions/formatList" },
+        "min": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "max": { "type": "integer", "minimum": 1, "maximum": 2000 }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "cardinality"],
+      "properties": {
+        "format": { "$ref": "#/definitions/format" },
+        "cardinality": { "enum": ["one", "many"] }
+      }
+    },
+    "fidelity": { "$ref": "#/definitions/tier" },
+    "edges": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "tier"],
+        "properties": {
+          "from": { "$ref": "#/definitions/formatList" },
+          "to": { "$ref": "#/definitions/format" },
+          "tier": { "$ref": "#/definitions/tier" },
+          "cost": {
+            "description": "Relative cost units, the last tie-breaker when ranking plans (blueprint section 3.3 rule 4).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 1
+          }
+        }
+      }
+    },
+    "fidelityNotes": {
+      "description": "Every warning code the adapter may emit. Each must be in the catalog (spec section 13.1).",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+      "default": []
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeoutBaseS", "timeoutSPerMb", "noProgressS", "diskFactor"],
+      "properties": {
+        "timeoutBaseS": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "timeoutSPerMb": { "type": "number", "minimum": 0, "maximum": 3600 },
+        "noProgressS": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "diskFactor": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "params": {
+      "description": "Path to the parameter schema, relative to the manifest. It must stay inside the adapter folder.",
+      "type": "string",
+      "pattern": "^\\./[A-Za-z0-9_-][A-Za-z0-9._-]*\\.json$"
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["windows", "macos", "linux"] }
+    },
+    "requires": {
+      "description": "Engines the adapter needs. Each must be approved in engines/engines.yaml.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": { "kind": { "const": "operation" } },
+      "required": ["inputs", "outputs", "fidelity"],
+      "not": { "required": ["edges"] }
+    },
+    {
+      "properties": { "kind": { "const": "conversion" } },
+      "required": ["edges"],
+      "allOf": [
+        { "not": { "required": ["inputs"] } },
+        { "not": { "required": ["outputs"] } },
+        { "not": { "required": ["fidelity"] } }
+      ]
+    }
+  ],
+  "definitions": {
+    "format": { "enum": ["pdf", "docx", "pptx", "xlsx", "md", "html", "txt", "png", "jpg", "webp", "svg", "heic"] },
+    "formatList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/format" }
+    },
+    "tier": {
+      "description": "Fidelity tier (blueprint section 3.1): Exact, High, Reconstructed, Lossy.",
+      "enum": ["E", "H", "R", "L"]
+    }
+  }
+}

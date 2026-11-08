@@ -12,6 +12,7 @@
     "generate": "pnpm --filter @converter/protocol generate",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "check": "pnpm --filter @converter/protocol check-generated && pnpm typecheck && pnpm test && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && uv run ruff check . && uv run pytest"
+    "check": "pnpm --filter @converter/protocol check-generated && pnpm typecheck && pnpm test && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo run -q -p converter-router --bin registry-gen -- --check --include-dev && uv run ruff check . && uv run pytest",
+    "registry": "cargo run -q -p converter-router --bin registry-gen"
   }
 }

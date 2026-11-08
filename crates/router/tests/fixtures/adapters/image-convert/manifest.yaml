@@ -1,0 +1,16 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: image-convert
+kind: conversion
+title: Fixture image-convert
+workerClass: image
+edges:
+  - { from: [png], to: jpg, tier: L }
+  - { from: [png], to: webp, tier: E }
+  - { from: [jpg, webp], to: png, tier: E }
+  - { from: [jpg], to: webp, tier: L }
+  - { from: [webp], to: jpg, tier: L }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow]
