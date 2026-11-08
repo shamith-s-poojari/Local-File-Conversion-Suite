@@ -1,0 +1,16 @@
+# Development-only adapter for the walking skeleton (spec section 3, week 3),
+# the conformance kit and supervisor tests. It must never be listed in a
+# release build: `devOnly` tells the registry generator (T07) to drop it.
+id: dev-fake
+kind: operation
+title: Fake operation (development only)
+devOnly: true
+workerClass: pdf
+inputs: { formats: [pdf], min: 1, max: 10 }
+outputs: { format: pdf, cardinality: one }
+fidelity: E
+fidelityNotes: []
+limits: { timeoutBaseS: 30, timeoutSPerMb: 1, noProgressS: 10, diskFactor: 1.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: []
