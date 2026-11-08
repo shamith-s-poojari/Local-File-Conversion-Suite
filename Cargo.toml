@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["apps/desktop/src-tauri", "crates/protocol"]
+members = ["apps/desktop/src-tauri", "crates/protocol", "crates/sniffer"]
+exclude = ["crates/sniffer/fuzz"]
 
 [workspace.package]
 version = "0.1.0"

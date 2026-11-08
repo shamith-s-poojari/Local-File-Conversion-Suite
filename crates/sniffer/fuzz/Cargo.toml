@@ -1,0 +1,24 @@
+[package]
+name = "converter-sniffer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+converter-sniffer = { path = ".." }
+
+# Kept out of the main workspace: it needs a nightly toolchain.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,29 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-sniffer:
+    name: Fuzz the sniffer (spec section 6)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz for 10 minutes
+        working-directory: crates/sniffer
+        run: cargo +nightly fuzz run sniff -- -max_total_time=600 -max_len=262144
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sniffer-fuzz-artifacts
+          path: crates/sniffer/fuzz/artifacts/

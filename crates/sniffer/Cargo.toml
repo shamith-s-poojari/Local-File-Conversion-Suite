@@ -1,0 +1,16 @@
+[package]
+name = "converter-sniffer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "File format sniffer (spec section 6): reads only the head, tail and ZIP central directory"
+
+[dependencies]
+getrandom = "0.3"
+# Inflates `[Content_Types].xml` only, with a hard output limit.
+miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+miniz_oxide = "0.8"
+serde_json = "1"
