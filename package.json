@@ -9,8 +9,9 @@
   "scripts": {
     "dev": "pnpm --filter @converter/desktop tauri dev",
     "build": "pnpm --filter @converter/desktop tauri build",
-    "typecheck": "pnpm --filter @converter/desktop typecheck",
-    "test": "pnpm --filter @converter/desktop test",
-    "check": "pnpm typecheck && pnpm test && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && uv run ruff check . && uv run pytest"
+    "generate": "pnpm --filter @converter/protocol generate",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "check": "pnpm --filter @converter/protocol check-generated && pnpm typecheck && pnpm test && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && uv run ruff check . && uv run pytest"
   }
 }

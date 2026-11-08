@@ -1,0 +1,981 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://local-file-conversion-suite.invalid/protocol/v1/protocol.schema.json",
+  "title": "Message",
+  "description": "One line of the worker protocol (spec section 7). Every line on the wire is exactly one of these messages, encoded as UTF-8 JSON, at most 1 MiB.",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/CoreMessage"
+    },
+    {
+      "$ref": "#/definitions/WorkerMessage"
+    }
+  ],
+  "definitions": {
+    "CoreMessage": {
+      "description": "A message the core sends to a worker on its stdin.",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/Inspect"
+        },
+        {
+          "$ref": "#/definitions/Validate"
+        },
+        {
+          "$ref": "#/definitions/Estimate"
+        },
+        {
+          "$ref": "#/definitions/Execute"
+        },
+        {
+          "$ref": "#/definitions/Render"
+        },
+        {
+          "$ref": "#/definitions/PageText"
+        },
+        {
+          "$ref": "#/definitions/Cancel"
+        }
+      ]
+    },
+    "WorkerMessage": {
+      "description": "A message a worker sends to the core on its protocol channel. Everything in it is untrusted (spec section 7.4).",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/Hello"
+        },
+        {
+          "$ref": "#/definitions/Stage"
+        },
+        {
+          "$ref": "#/definitions/Progress"
+        },
+        {
+          "$ref": "#/definitions/WorkerWarning"
+        },
+        {
+          "$ref": "#/definitions/WorkerError"
+        },
+        {
+          "$ref": "#/definitions/InspectResult"
+        },
+        {
+          "$ref": "#/definitions/ValidateResult"
+        },
+        {
+          "$ref": "#/definitions/EstimateResult"
+        },
+        {
+          "$ref": "#/definitions/ExecuteResult"
+        },
+        {
+          "$ref": "#/definitions/RenderResult"
+        },
+        {
+          "$ref": "#/definitions/PageTextResult"
+        }
+      ]
+    },
+    "ProtocolVersion": {
+      "description": "The protocol version this schema describes. App and workers ship together, so they must match exactly (spec section 7.5).",
+      "type": "integer",
+      "const": 1
+    },
+    "JobId": {
+      "description": "Opaque job identifier chosen by the core.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "JobPath": {
+      "description": "A path relative to the job directory, using forward slashes. No absolute paths, drive letters, backslashes, empty segments, or segments starting with a dot (so no '.' or '..'). The core still resolves and checks every path on disk.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}){0,7}$"
+    },
+    "OutputPath": {
+      "description": "A JobPath that must be inside out/.",
+      "type": "string",
+      "pattern": "^out(/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}){1,7}$"
+    },
+    "PageNumber": {
+      "description": "1-based page number.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "Count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "Sha256": {
+      "description": "Lowercase hex SHA-256 digest.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Fidelity": {
+      "description": "Fidelity tier (blueprint section 3.1): Exact, High, Reconstructed, Lossy.",
+      "type": "string",
+      "enum": [
+        "E",
+        "H",
+        "R",
+        "L"
+      ]
+    },
+    "AdapterId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "StageName": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$"
+    },
+    "Params": {
+      "description": "Adapter parameters. The core validates them against the adapter's own params.schema.json before sending.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Detail": {
+      "description": "Structured detail for a warning or error. Untrusted: render as plain text only, and length-limit it.",
+      "type": "object",
+      "additionalProperties": true,
+      "maxProperties": 32
+    },
+    "Secrets": {
+      "description": "Passwords for this request. This is the only place secrets may appear (spec section 7.3). Never log this object.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "password": {
+          "description": "Password to open an encrypted input.",
+          "type": "string",
+          "format": "password",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "userPassword": {
+          "description": "Open password to set on a protected output (pdf-protect).",
+          "type": "string",
+          "format": "password",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "ownerPassword": {
+          "description": "Owner password to set on a protected output (pdf-protect).",
+          "type": "string",
+          "format": "password",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "WarningCode": {
+      "description": "Warning codes in the catalog (spec section 13.1). Workers may send other codes; the core shows those as a generic warning, so the wire format accepts any WarningCodeString.",
+      "type": "string",
+      "enum": [
+        "FORMS_FLATTENED",
+        "XFA_UNSUPPORTED",
+        "SIGNATURE_INVALIDATED",
+        "TAGS_DROPPED",
+        "OUTLINE_DROPPED",
+        "ACTIVE_CONTENT_FOUND",
+        "NO_TEXT_LAYER",
+        "REDACTED_TEXT_REMAINS_ELSEWHERE",
+        "GLYPH_UNSUPPORTED",
+        "W_LARGE_JOB"
+      ]
+    },
+    "WarningCodeString": {
+      "description": "A warning code as sent on the wire. Unknown codes are allowed here and handled by the core.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "ErrorCode": {
+      "description": "Error codes in the catalog (spec section 13.1). A worker sending any other code fails the schema, which the core treats as E_PROTOCOL.",
+      "type": "string",
+      "enum": [
+        "E_INPUT_CORRUPT",
+        "E_PASSWORD_REQUIRED",
+        "E_PASSWORD_WRONG",
+        "E_LIMIT_EXCEEDED",
+        "E_RESOURCE_MEMORY",
+        "E_RESOURCE_DISK",
+        "E_TIMEOUT",
+        "E_CANCELLED",
+        "E_PROTOCOL",
+        "E_OUTPUT_INVALID",
+        "E_SANDBOX_UNAVAILABLE",
+        "E_INSTALL_CORRUPT",
+        "E_REDACTION_VERIFICATION_FAILED",
+        "E_INTERNAL"
+      ]
+    },
+    "WarningItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/WarningCodeString"
+        },
+        "detail": {
+          "$ref": "#/definitions/Detail"
+        }
+      }
+    },
+    "Encryption": {
+      "description": "Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password.",
+      "type": "string",
+      "enum": [
+        "none",
+        "permissionsOnly",
+        "openPassword"
+      ]
+    },
+    "Inspect": {
+      "description": "Read-only facts about one input file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "input"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "inspect"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "input": {
+          "$ref": "#/definitions/JobPath"
+        },
+        "secrets": {
+          "$ref": "#/definitions/Secrets"
+        }
+      }
+    },
+    "Validate": {
+      "description": "Adapter-specific checks of inputs and params.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "inputs",
+        "params"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "validate"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/definitions/JobPath"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        },
+        "secrets": {
+          "$ref": "#/definitions/Secrets"
+        }
+      }
+    },
+    "Estimate": {
+      "description": "Resource estimate, using the metadata returned by validate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "inputs",
+        "params",
+        "metadata"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "estimate"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/definitions/JobPath"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        },
+        "metadata": {
+          "$ref": "#/definitions/Detail"
+        }
+      }
+    },
+    "Execute": {
+      "description": "Do the work. Outputs go only to outDir, scratch files only to workDir.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "inputs",
+        "outDir",
+        "workDir",
+        "params"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "execute"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/definitions/JobPath"
+          }
+        },
+        "outDir": {
+          "type": "string",
+          "const": "out"
+        },
+        "workDir": {
+          "type": "string",
+          "const": "work"
+        },
+        "params": {
+          "$ref": "#/definitions/Params"
+        },
+        "secrets": {
+          "$ref": "#/definitions/Secrets"
+        }
+      }
+    },
+    "Render": {
+      "description": "Render one page to PNG for preview.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "input",
+        "page",
+        "dpi",
+        "out"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "render"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "input": {
+          "$ref": "#/definitions/JobPath"
+        },
+        "page": {
+          "$ref": "#/definitions/PageNumber"
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 18,
+          "maximum": 600
+        },
+        "out": {
+          "$ref": "#/definitions/OutputPath"
+        },
+        "secrets": {
+          "$ref": "#/definitions/Secrets"
+        }
+      }
+    },
+    "PageText": {
+      "description": "Word boxes on one page, for redaction search and display.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "input",
+        "page"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "pageText"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "input": {
+          "$ref": "#/definitions/JobPath"
+        },
+        "page": {
+          "$ref": "#/definitions/PageNumber"
+        },
+        "secrets": {
+          "$ref": "#/definitions/Secrets"
+        }
+      }
+    },
+    "Cancel": {
+      "description": "Stop cooperatively. The worker answers with an E_CANCELLED error.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "cancel"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        }
+      }
+    },
+    "Hello": {
+      "description": "Handshake, sent within 10 s of launch. v and protocolVersion are plain integers here, not the const, so that a mismatch is reported as E_INSTALL_CORRUPT rather than a schema failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "adapterId",
+        "protocolVersion",
+        "pid"
+      ],
+      "properties": {
+        "v": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "type": {
+          "type": "string",
+          "const": "hello"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "adapterId": {
+          "$ref": "#/definitions/AdapterId"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "Stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "name",
+        "index",
+        "of"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "stage"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "name": {
+          "$ref": "#/definitions/StageName"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "of": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "Progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "stage",
+        "done"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "progress"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "stage": {
+          "$ref": "#/definitions/StageName"
+        },
+        "done": {
+          "$ref": "#/definitions/Count"
+        },
+        "total": {
+          "$ref": "#/definitions/Count"
+        }
+      }
+    },
+    "WorkerWarning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "code"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "warning"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "code": {
+          "$ref": "#/definitions/WarningCodeString"
+        },
+        "detail": {
+          "$ref": "#/definitions/Detail"
+        }
+      }
+    },
+    "WorkerError": {
+      "description": "The request failed. Ends the current request.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "code",
+        "retryable"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "detail": {
+          "$ref": "#/definitions/Detail"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "InspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "pages",
+        "encryption"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "inspectResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "pages": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "encryption": {
+          "$ref": "#/definitions/Encryption"
+        },
+        "signed": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/WarningItem"
+          }
+        }
+      }
+    },
+    "ValidateResult": {
+      "description": "Validation outcome. Non-empty errors means the job must not run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "errors",
+        "warnings",
+        "metadata"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "validateResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "errors": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "title": "ValidationIssue",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/definitions/ErrorCode"
+              },
+              "input": {
+                "$ref": "#/definitions/JobPath"
+              },
+              "param": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "detail": {
+                "$ref": "#/definitions/Detail"
+              }
+            }
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/WarningItem"
+          }
+        },
+        "metadata": {
+          "$ref": "#/definitions/Detail"
+        }
+      }
+    },
+    "EstimateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "ramBytes",
+        "diskBytes",
+        "costUnits"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "estimateResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "ramBytes": {
+          "$ref": "#/definitions/Count"
+        },
+        "diskBytes": {
+          "$ref": "#/definitions/Count"
+        },
+        "costUnits": {
+          "$ref": "#/definitions/Count"
+        }
+      }
+    },
+    "ExecuteResult": {
+      "description": "Success. The core re-checks every claim here against the files on disk.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "outputs",
+        "fidelity"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "executeResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "title": "ExecuteOutput",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "suggestedName",
+              "sizeBytes",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "#/definitions/OutputPath"
+              },
+              "suggestedName": {
+                "description": "Untrusted. The core sanitizes it before use.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "sizeBytes": {
+                "$ref": "#/definitions/Count"
+              },
+              "sha256": {
+                "$ref": "#/definitions/Sha256"
+              }
+            }
+          }
+        },
+        "fidelity": {
+          "$ref": "#/definitions/Fidelity"
+        }
+      }
+    },
+    "RenderResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "out",
+        "widthPx",
+        "heightPx",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "renderResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "out": {
+          "$ref": "#/definitions/OutputPath"
+        },
+        "widthPx": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "heightPx": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "sizeBytes": {
+          "$ref": "#/definitions/Count"
+        },
+        "sha256": {
+          "$ref": "#/definitions/Sha256"
+        }
+      }
+    },
+    "PageTextResult": {
+      "description": "Word boxes in PDF points, origin top-left of the displayed page (after /Rotate and CropBox).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "jobId",
+        "page",
+        "width",
+        "height",
+        "words"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "type": {
+          "type": "string",
+          "const": "pageTextResult"
+        },
+        "jobId": {
+          "$ref": "#/definitions/JobId"
+        },
+        "page": {
+          "$ref": "#/definitions/PageNumber"
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 200000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 200000
+        },
+        "words": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": {
+            "title": "WordBox",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text",
+              "x0",
+              "y0",
+              "x1",
+              "y1"
+            ],
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "x0": {
+                "type": "number"
+              },
+              "y0": {
+                "type": "number"
+              },
+              "x1": {
+                "type": "number"
+              },
+              "y1": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

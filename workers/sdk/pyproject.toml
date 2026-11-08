@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Adapter SDK for converter workers (task T06 fills this in)"
 requires-python = ">=3.12,<3.14"
 license = "AGPL-3.0-only"
-dependencies = []
+dependencies = [
+    "pydantic>=2.10,<3",
+]
 
 [build-system]
 requires = ["hatchling"]

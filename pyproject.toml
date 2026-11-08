@@ -7,7 +7,12 @@ license = "AGPL-3.0-only"
 dependencies = []
 
 [dependency-groups]
-dev = ["converter-sdk", "pytest>=8", "ruff>=0.6"]
+dev = [
+    "converter-sdk",
+    "datamodel-code-generator[ruff]==0.91.0",
+    "pytest>=8",
+    "ruff>=0.6",
+]
 
 [tool.uv]
 package = false
@@ -26,6 +31,8 @@ select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101"]
+# Written by packages/protocol/scripts/generate.mjs; long schema descriptions stay on one line.
+"**/protocol/_generated.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["workers", "adapters"]

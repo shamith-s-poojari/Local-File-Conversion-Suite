@@ -49,7 +49,7 @@ pnpm dev
 |---|---|
 | `apps/desktop/` | React UI, and the Tauri shell in `src-tauri/` |
 | `crates/` | Rust libraries, added as their tasks begin |
-| `packages/protocol/` | Worker protocol schemas (task T02) |
+| `packages/protocol/` | Worker protocol schema, fixtures and code generator. See its [README](packages/protocol/README.md) |
 | `workers/` | Adapter SDK and conformance kit |
 | `adapters/` | One folder per adapter |
 | `docs/` | Blueprint, specs, ADRs, spike reports |
