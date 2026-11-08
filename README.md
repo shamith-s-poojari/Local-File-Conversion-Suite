@@ -6,6 +6,7 @@ A privacy-first file converter and PDF toolkit. All processing happens on your m
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
 - [Phase 1 specification](docs/specs/phase-1.md) (wins wherever it differs from the blueprint)
+- [Architecture decision records](docs/adr/)
 
 ## Prerequisites
 
