@@ -412,6 +412,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "converter-scheduler"
+version = "0.1.0"
+dependencies = [
+ "converter-jobstore",
+ "converter-protocol",
+ "converter-sniffer",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "converter-sniffer"
 version = "0.1.0"
 dependencies = [

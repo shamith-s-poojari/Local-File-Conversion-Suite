@@ -5,6 +5,7 @@ members = [
     "crates/jobstore",
     "crates/protocol",
     "crates/router",
+    "crates/scheduler",
     "crates/sniffer",
 ]
 exclude = ["crates/sniffer/fuzz"]
