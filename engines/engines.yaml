@@ -1,0 +1,30 @@
+# Approved engines. An adapter's `requires` may name only engines listed here;
+# `pnpm registry` fails otherwise (spec section 8.2). Adding an engine needs
+# Core review and, for anything outside the blueprint, an ADR (ADR 0001 lists
+# engines that are explicitly NOT approved, such as Calibre, pyHanko and ezdxf).
+#
+# `license` is the category from the blueprint's license audit (section 4.4).
+# Versions are pinned, with checksums, when each engine is packaged
+# (spec section 17, item 7); until then `version` is null.
+
+engines:
+  pikepdf:      { license: weak-copyleft, version: null }   # with qpdf
+  qpdf:         { license: permissive, version: null }
+  pymupdf:      { license: agpl, version: null }
+  pypdfium2:    { license: permissive, version: null }
+  reportlab:    { license: permissive, version: null }
+  ghostscript:  { license: agpl, version: null }
+  ocrmypdf:     { license: weak-copyleft, version: null }
+  tesseract:    { license: permissive, version: null }
+  libreoffice:  { license: weak-copyleft, version: null }
+  pandoc:       { license: gpl-separate-process, version: null }
+  weasyprint:   { license: permissive, version: null }
+  pdf2docx:     { license: agpl, version: null }             # AGPL in practice, via PyMuPDF
+  pdfplumber:   { license: permissive, version: null }
+  openpyxl:     { license: permissive, version: null }
+  python-pptx:  { license: permissive, version: null }
+  img2pdf:      { license: weak-copyleft, version: null }
+  pillow:       { license: permissive, version: null }
+  pillow-heif:  { license: weak-copyleft, version: null }    # libheif is LGPL
+  resvg:        { license: permissive, version: null }
+  svg2pdf:      { license: permissive, version: null }

@@ -1,7 +1,7 @@
 [project]
 name = "converter-sdk"
 version = "0.1.0"
-description = "Adapter SDK for converter workers (task T06 fills this in)"
+description = "Adapter SDK for converter workers"
 requires-python = ">=3.12,<3.14"
 license = "AGPL-3.0-only"
 dependencies = [

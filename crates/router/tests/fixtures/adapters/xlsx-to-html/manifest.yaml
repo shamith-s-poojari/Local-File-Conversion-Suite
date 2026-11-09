@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: xlsx-to-html
+kind: conversion
+title: Fixture xlsx-to-html
+workerClass: office
+edges:
+  - { from: [xlsx], to: html, tier: R, cost: 10 }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [libreoffice]

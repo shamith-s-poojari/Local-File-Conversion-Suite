@@ -11,6 +11,7 @@ dev = [
     "converter-sdk",
     "datamodel-code-generator[ruff]==0.91.0",
     "pytest>=8",
+    "pyyaml>=6.0.3",
     "ruff>=0.6",
 ]
 
@@ -30,9 +31,11 @@ line-length = 100
 select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101"]
+"**/tests/**" = ["S101", "S105", "S106"]
 # Written by packages/protocol/scripts/generate.mjs; long schema descriptions stay on one line.
 "**/protocol/_generated.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["workers", "adapters"]
+# Every adapter has tests/test_adapter.py; importlib mode keeps them from colliding.
+addopts = "--import-mode=importlib"

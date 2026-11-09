@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Spec section 11.4: no fs, shell, http or updater plugins. App commands are added here by name.",
+  "description": "Spec section 11.4: no fs, shell, http or updater plugins. App commands are added here by name. Navigation and new windows are blocked in src/navigation.rs.",
   "windows": ["main"],
   "permissions": []
 }

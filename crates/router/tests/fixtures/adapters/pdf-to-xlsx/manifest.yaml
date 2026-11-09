@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: pdf-to-xlsx
+kind: conversion
+title: Fixture pdf-to-xlsx
+workerClass: pdf
+edges:
+  - { from: [pdf], to: xlsx, tier: R, cost: 5 }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pdfplumber, openpyxl]

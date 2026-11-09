@@ -1,0 +1,15 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: pdf-to-image
+kind: conversion
+title: Fixture pdf-to-image
+workerClass: render
+edges:
+  - { from: [pdf], to: png, tier: H, cost: 2 }
+  - { from: [pdf], to: svg, tier: H, cost: 2 }
+  - { from: [pdf], to: jpg, tier: L, cost: 2 }
+  - { from: [pdf], to: webp, tier: L, cost: 2 }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pymupdf]

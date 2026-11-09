@@ -1,0 +1,12 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: svg-to-pdf
+kind: conversion
+title: Fixture svg-to-pdf
+workerClass: image
+edges:
+  - { from: [svg], to: pdf, tier: H }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [svg2pdf]

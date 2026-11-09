@@ -92,6 +92,7 @@ dev = [
     { name = "converter-sdk" },
     { name = "datamodel-code-generator", extra = ["ruff"] },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -102,6 +103,7 @@ dev = [
     { name = "converter-sdk", editable = "workers/sdk" },
     { name = "datamodel-code-generator", extras = ["ruff"], specifier = "==0.91.0" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", specifier = ">=0.6" },
 ]
 

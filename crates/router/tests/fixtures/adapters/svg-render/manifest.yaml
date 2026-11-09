@@ -1,0 +1,14 @@
+# Test fixture modelled on blueprint section 4.2; not a real adapter.
+id: svg-render
+kind: conversion
+title: Fixture svg-render
+workerClass: image
+edges:
+  - { from: [svg], to: png, tier: H }
+  - { from: [svg], to: webp, tier: H }
+  - { from: [svg], to: jpg, tier: L }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 60, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [resvg, pillow]

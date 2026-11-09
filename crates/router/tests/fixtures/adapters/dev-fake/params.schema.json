@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dev-fake parameters",
+  "description": "Knobs that make the fake adapter behave like a real one, or misbehave on purpose for supervisor and conformance tests.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "pages": {
+      "description": "Simulated pages to process.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 5
+    },
+    "delayMs": {
+      "description": "Simulated work per page.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000,
+      "default": 20
+    },
+    "warn": {
+      "description": "Emit this warning code once during execute.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "failWith": {
+      "description": "Fail execute with this catalog error code after the first page.",
+      "type": "string",
+      "enum": ["E_INPUT_CORRUPT", "E_LIMIT_EXCEEDED", "E_RESOURCE_MEMORY", "E_RESOURCE_DISK", "E_INTERNAL"]
+    },
+    "crash": {
+      "description": "Raise an unexpected exception after the first page.",
+      "type": "boolean",
+      "default": false
+    },
+    "hang": {
+      "description": "Ignore cancel and never finish, so the supervisor's watchdog must kill the worker.",
+      "type": "boolean",
+      "default": false
+    },
+    "noise": {
+      "description": "print() to stdout during execute, to prove stray output can't corrupt the protocol.",
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
