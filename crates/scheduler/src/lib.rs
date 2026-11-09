@@ -29,5 +29,5 @@ pub use runner::{
 pub use verify::verify_outputs;
 pub use worker::{
     retryable, CancelToken, LaunchSpec, Launcher, RequestKind, Timing, Watchdog, Worker,
-    WorkerEvent, MAX_MESSAGES_PER_SECOND, STDERR_BUFFER_BYTES,
+    WorkerEvent, MAX_MESSAGES_PER_SECOND, SANDBOX_SETUP_FAILED_EXIT, STDERR_BUFFER_BYTES,
 };

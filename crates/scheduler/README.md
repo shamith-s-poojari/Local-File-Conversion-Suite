@@ -35,7 +35,7 @@ Admission scheduler, worker supervisor and watchdog ([spec sections 7.4, 10.2 an
 
 ## Not here
 
-- The sandbox. `Launcher` is implemented by T09 and T10; if it can't apply the sandbox the job fails with `E_SANDBOX_UNAVAILABLE`, with no way to run unsandboxed. The tests use an unsandboxed launcher of their own.
+- The sandbox. `Launcher` is implemented by `converter-sandbox` (Windows done in T09; Linux and macOS are T10). If it can't apply the sandbox, or the launcher process exits with `SANDBOX_SETUP_FAILED_EXIT` before `hello`, the job fails with `E_SANDBOX_UNAVAILABLE`, with no way to run unsandboxed. These tests use an unsandboxed launcher of their own.
 - Preview render priority and superseding (T16).
 - Tauri commands and the event bridge to the UI.
 

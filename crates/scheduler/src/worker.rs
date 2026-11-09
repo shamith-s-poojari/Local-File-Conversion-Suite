@@ -29,6 +29,12 @@ pub const STDERR_BUFFER_BYTES: usize = 256 * 1024;
 /// More messages than this in one second kills the worker.
 pub const MAX_MESSAGES_PER_SECOND: u32 = 1000;
 
+/// Exit code of a launcher process that couldn't apply the sandbox. A
+/// worker that exits with it before `hello` fails the job with
+/// `E_SANDBOX_UNAVAILABLE` rather than `E_INSTALL_CORRUPT`. (A worker could
+/// fake it, but that only changes which error the user sees.)
+pub const SANDBOX_SETUP_FAILED_EXIT: i32 = 97;
+
 /// What a launcher needs to start a worker.
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
@@ -289,7 +295,12 @@ impl Worker {
             Ok(Incoming::Line(l)) => l,
             Ok(Incoming::TooLong) => return Err(self.kill_with("E_PROTOCOL")),
             Ok(Incoming::Closed) | Err(RecvTimeoutError::Disconnected) => {
-                return Err(self.kill_with("E_INSTALL_CORRUPT"))
+                let code = if self.exited_with(SANDBOX_SETUP_FAILED_EXIT) {
+                    "E_SANDBOX_UNAVAILABLE"
+                } else {
+                    "E_INSTALL_CORRUPT"
+                };
+                return Err(self.kill_with(code));
             }
             Err(RecvTimeoutError::Timeout) => return Err(self.kill_with("E_TIMEOUT")),
         };
@@ -477,6 +488,18 @@ impl Worker {
         }
         self.rate_count += 1;
         self.rate_count <= MAX_MESSAGES_PER_SECOND
+    }
+
+    /// Waits briefly for the process to exit and checks its exit code.
+    fn exited_with(&mut self, expected: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status.code() == Some(expected),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                _ => return false,
+            }
+        }
     }
 
     fn kill_with(&mut self, code: &str) -> JobFailure {
