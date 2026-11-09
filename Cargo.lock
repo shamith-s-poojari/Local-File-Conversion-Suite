@@ -368,6 +368,7 @@ dependencies = [
 name = "converter-desktop"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "tauri",
  "tauri-build",
 ]
@@ -408,6 +409,16 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+]
+
+[[package]]
+name = "converter-sniffer"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "miniz_oxide 0.8.9",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
