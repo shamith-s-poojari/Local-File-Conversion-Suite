@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Add watermark",
+  "description": "A watermark is a label. It doesn't stop anyone from removing it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["text"],
+  "properties": {
+    "type": {
+      "title": "Type",
+      "description": "Image watermarks are the first cut in the week 6 checkpoint rule and aren't implemented yet.",
+      "enum": ["text"],
+      "default": "text"
+    },
+    "text": { "title": "Text", "type": "string", "minLength": 1, "maxLength": 500 },
+    "fontSize": { "title": "Font size (pt)", "type": "number", "minimum": 4, "maximum": 400, "default": 48 },
+    "color": { "title": "Color", "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "default": "#808080" },
+    "opacity": { "title": "Opacity", "type": "number", "minimum": 0.05, "maximum": 1.0, "default": 0.3 },
+    "rotation": { "title": "Rotation (degrees, counter-clockwise)", "type": "number", "minimum": -180, "maximum": 180, "default": 45 },
+    "position": {
+      "title": "Position",
+      "enum": ["center", "topLeft", "topRight", "bottomLeft", "bottomRight", "tile"],
+      "default": "center"
+    },
+    "layer": { "title": "Layer", "enum": ["over", "under"], "default": "over" },
+    "pages": { "title": "Pages", "description": "Empty means all pages", "type": "string", "maxLength": 10000, "x-ui": "pageRanges" }
+  }
+}

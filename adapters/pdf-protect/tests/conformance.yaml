@@ -1,0 +1,17 @@
+cases:
+  - name: protect
+    inputs: [text-3]
+    params: { mode: protect, permissions: { copy: false } }
+    secrets: { userPassword: "pässwörd-ü" }
+    expect: { pages: [3], password: "pässwörd-ü" }
+  - name: unlock-permissions-only
+    inputs: [permissions-only]
+    params: { mode: unlock, confirmRights: true }
+    expect: { pages: [2] }
+negative:
+  params: { mode: protect }
+  secrets: { userPassword: "x" }
+cancel:
+  inputs: [heavy]
+  params: { mode: protect }
+  secrets: { userPassword: "x" }
