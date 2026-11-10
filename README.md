@@ -2,11 +2,13 @@
 
 A privacy-first file converter and PDF toolkit. All processing happens on your machine: no file or metadata is uploaded anywhere.
 
-**Status:** Phase 1, week 1. The app launches but has no tools yet.
+**Status:** Phase 1. On macOS, the app runs six PDF tools (merge, split, organize, protect or unlock, watermark, redact) end to end in a per-job sandbox. Windows has no sandbox yet, so processing is off there; Linux is untested. There are no installers yet. See [known limits](docs/known-limits.md).
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
 - [Phase 1 specification](docs/specs/phase-1.md) (wins wherever it differs from the blueprint)
 - [Architecture decision records](docs/adr/)
+- [Privacy](docs/privacy.md): what "processed on your device" means, and how it's tested
+- [Known limits](docs/known-limits.md)
 
 ## Prerequisites
 

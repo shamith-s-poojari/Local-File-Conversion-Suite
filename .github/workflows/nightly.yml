@@ -27,3 +27,24 @@ jobs:
         with:
           name: sniffer-fuzz-artifacts
           path: crates/sniffer/fuzz/artifacts/
+
+  network-test:
+    name: Network test with packet capture (spec 14.5), ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace bubblewrap tcpdump libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: uv sync --locked
+      - name: Capture and attribute traffic
+        run: sudo -E env "PATH=$PATH" tools/network-test/capture.sh

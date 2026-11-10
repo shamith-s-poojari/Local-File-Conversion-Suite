@@ -23,3 +23,7 @@ tempfile = "3"
 [[test]]
 name = "end_to_end"
 harness = false
+
+[[test]]
+name = "network"
+harness = false
