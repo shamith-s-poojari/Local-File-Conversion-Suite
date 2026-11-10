@@ -238,7 +238,9 @@ export function Configure({
     () => ({ files: ctx.files, pages: first?.inspect?.pages ?? 0, reference: first?.file?.fileId ?? "", api }),
     [ctx.files, first, api],
   );
-  const missing = adapter ? missingRequired(adapter.paramsSchema, ctx.params) : ["operation"];
+  const missing = adapter
+    ? missingRequired(adapter.paramsSchema, ctx.params, widgetCtx.pages)
+    : ["operation"];
   const encrypted = ctx.files.some((f) => f.inspect && f.inspect.encryption !== "none");
   const visible = (targets ?? []).filter((t) => ctx.showBestEffort || !t.bestEffort);
   const invalid = ctx.error?.issues?.map((i) => i.path) ?? [];

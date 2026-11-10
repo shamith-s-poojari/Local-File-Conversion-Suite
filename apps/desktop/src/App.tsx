@@ -6,7 +6,7 @@ import { Cancelled, Configure, Failed, Home, ProgressScreen, Result, Review, Sav
 import { appMachine, type FileView } from "./machines/app";
 
 /** Inspects files four at a time: each starts a sandboxed worker. */
-async function inspectAll(api: Api, files: FileView[]): Promise<FileView[]> {
+export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[]> {
   const out = [...files];
   let next = 0;
   const one = async (i: number) => {
@@ -25,7 +25,13 @@ async function inspectAll(api: Api, files: FileView[]): Promise<FileView[]> {
       return;
     }
     try {
-      out[i] = { ...f, inspect: await api.inspectFile(f.file.fileId), needs: undefined, error: undefined };
+      const info = await api.inspectFile(f.file.fileId);
+      // Without its password a file can't be opened, so inspect can only say
+      // that it needs one (0 pages). Ask for it.
+      const locked = info.encryption === "openPassword" && info.pages === 0;
+      out[i] = locked
+        ? { ...f, needs: "password", error: undefined }
+        : { ...f, inspect: info, needs: undefined, error: undefined };
     } catch (e) {
       const code = isCommandError(e) ? e.code : "E_INTERNAL";
       if (code === "E_SANDBOX_UNAVAILABLE") throw e;

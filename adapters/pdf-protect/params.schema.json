@@ -1,25 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Protect or unlock PDF",
-  "description": "Passwords are entered in password widgets and travel only in the request's secrets, never in params (spec section 7.3).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["mode"],
+  "required": [
+    "mode"
+  ],
   "properties": {
-    "mode": { "title": "Action", "enum": ["protect", "unlock"], "default": "protect" },
+    "mode": {
+      "title": "Action",
+      "enum": [
+        "protect",
+        "unlock"
+      ],
+      "default": "protect"
+    },
     "userPassword": {
       "title": "Password to open",
-      "description": "Collected by the form and moved into secrets.userPassword by the core. The adapter rejects it as a param.",
       "type": "string",
       "writeOnly": true,
-      "x-ui": "password"
+      "x-ui": "password",
+      "$comment": "Collected by the form and moved into secrets.userPassword by the core. The adapter rejects it as a param.",
+      "x-when": {
+        "mode": "protect"
+      },
+      "description": "Needed to open the file. It can't be recovered if lost."
     },
     "ownerPassword": {
       "title": "Permissions password (optional)",
-      "description": "Moved into secrets.ownerPassword by the core. If absent, a random one is generated and never stored or shown.",
       "type": "string",
       "writeOnly": true,
-      "x-ui": "password"
+      "x-ui": "password",
+      "$comment": "Moved into secrets.ownerPassword by the core. If absent, a random one is generated and never stored or shown.",
+      "description": "Lets someone change the permissions later. If you leave it empty, a random one is used and never shown.",
+      "x-when": {
+        "mode": "protect"
+      }
     },
     "permissions": {
       "title": "Allow",
@@ -27,17 +43,36 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "print": { "type": "boolean", "default": true },
-        "copy": { "type": "boolean", "default": true },
-        "modify": { "type": "boolean", "default": true },
-        "annotate": { "type": "boolean", "default": true }
+        "print": {
+          "type": "boolean",
+          "default": true
+        },
+        "copy": {
+          "type": "boolean",
+          "default": true
+        },
+        "modify": {
+          "type": "boolean",
+          "default": true
+        },
+        "annotate": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "x-when": {
+        "mode": "protect"
       }
     },
     "confirmRights": {
       "title": "I have the right to remove these restrictions",
       "description": "Required to unlock a file that has only a permissions password.",
       "type": "boolean",
-      "default": false
+      "default": false,
+      "x-when": {
+        "mode": "unlock"
+      }
     }
-  }
+  },
+  "$comment": "Passwords are entered in password widgets and travel only in the request's secrets, never in params (spec section 7.3)."
 }

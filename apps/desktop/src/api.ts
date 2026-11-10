@@ -106,6 +106,8 @@ export interface JsonSchema {
   readOnly?: boolean;
   writeOnly?: boolean;
   "x-ui"?: string;
+  /** Show this field only while other params have these values. */
+  "x-when"?: Record<string, unknown>;
 }
 
 export interface AdapterEntry {

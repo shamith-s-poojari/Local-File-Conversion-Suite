@@ -6,31 +6,41 @@
   "properties": {
     "order": {
       "title": "File order",
-      "description": "File IDs in the order to merge. The core passes inputs to the worker in this order, so the adapter itself never sees file IDs.",
       "type": "array",
-      "items": { "type": "string", "maxLength": 64 },
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      },
       "maxItems": 200,
-      "x-ui": "fileOrder"
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in the order to merge. The core passes inputs to the worker in this order, so the adapter itself never sees file IDs."
     },
     "bookmarks": {
       "title": "Bookmarks",
-      "enum": ["perFile", "keep", "none"],
+      "enum": [
+        "perFile",
+        "keep",
+        "none"
+      ],
       "default": "perFile"
     },
     "metadataFrom": {
       "title": "Document properties from",
-      "description": "Index of the input (in merge order) whose title, author and other properties the result keeps, or -1 for none.",
+      "description": "Which file's title, author and other properties the result keeps: 0 is the first file in the order below, 1 the second, and -1 keeps none.",
       "type": "integer",
       "minimum": -1,
       "maximum": 199,
       "default": 0
     },
     "fileTitles": {
-      "description": "Bookmark title for each input, in merge order. Filled in by the core from the file names; not shown in the form.",
       "type": "array",
-      "items": { "type": "string", "maxLength": 255 },
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
       "maxItems": 200,
-      "readOnly": true
+      "readOnly": true,
+      "$comment": "Bookmark title for each input, in merge order. Filled in by the core from the file names; not shown in the form."
     }
   }
 }

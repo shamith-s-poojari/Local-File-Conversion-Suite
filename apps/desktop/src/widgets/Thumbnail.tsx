@@ -42,7 +42,7 @@ export function Thumbnail({
   }, [api, reference, page, dpi]);
   return (
     <div ref={ref} className={`thumb rot-${rotate}`}>
-      {src ? <img src={src} alt={alt} draggable={false} /> : <span className="thumb-placeholder">{failed ? "!" : page}</span>}
+      {src ? <img src={src} alt={alt} draggable={false} /> : <span className="thumb-placeholder">{failed ? "No preview" : page}</span>}
     </div>
   );
 }

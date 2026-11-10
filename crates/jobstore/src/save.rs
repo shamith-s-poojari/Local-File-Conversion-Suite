@@ -282,9 +282,16 @@ fn copy_to_temp(out: &Path, output: &OutputFile, folder: &Path) -> Result<NamedT
         return Err(JobError::InvalidOutput("output is not a regular file"));
     }
     let mut src = File::open(&src_path).map_err(JobError::io("reading an output"))?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".lfcs-")
-        .suffix(".tmp")
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".lfcs-").suffix(".tmp");
+    // A saved result is the user's file: give it the permissions any new
+    // file gets (0666 less the umask), not tempfile's private 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let mut tmp = builder
         .tempfile_in(folder)
         .map_err(JobError::io("creating a file in the save folder"))?;
     let copied =

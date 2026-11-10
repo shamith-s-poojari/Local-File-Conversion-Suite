@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import type { JsonSchema } from "../api";
 import { FileOrder } from "../widgets/FileOrder";
 import { PageOrganizer } from "../widgets/PageOrganizer";
+import { parsePageRanges } from "../widgets/pageRanges";
 import { PageRangesInput } from "../widgets/PageRangesInput";
 import { Password } from "../widgets/Password";
 import { RedactionCanvas } from "../widgets/RedactionCanvas";
@@ -33,9 +34,30 @@ export function defaults(schema: JsonSchema): Record<string, unknown> {
   return out;
 }
 
-/** Client-side checks for START; the core validates again, authoritatively. */
-export function missingRequired(schema: JsonSchema, params: Record<string, unknown>): string[] {
-  return (schema.required ?? []).filter((k) => params[k] === undefined || params[k] === "");
+/** Client-side checks for START; the core validates again, authoritatively.
+ * Returns the params that are missing or that a widget knows are invalid. */
+export function missingRequired(
+  schema: JsonSchema,
+  params: Record<string, unknown>,
+  pages = 0,
+): string[] {
+  const missing = (schema.required ?? []).filter((k) => params[k] === undefined || params[k] === "");
+  for (const [k, s] of Object.entries(schema.properties ?? {})) {
+    const v = params[k];
+    if (s["x-ui"] === "pageRanges" && typeof v === "string" && v.trim() && pages > 0) {
+      if (!parsePageRanges(v, pages).ok) missing.push(k);
+    }
+  }
+  return missing;
+}
+
+/** `x-when`: every named param (or its default) has the given value. */
+function matches(
+  when: Record<string, unknown>,
+  params: Record<string, unknown>,
+  props: Record<string, JsonSchema>,
+): boolean {
+  return Object.entries(when).every(([k, v]) => (params[k] ?? props[k]?.default) === v);
 }
 
 function humanize(key: string): string {
@@ -69,6 +91,8 @@ export function SchemaForm({
       {schema.description && <p className="hint">{schema.description}</p>}
       {Object.entries(props).map(([key, s]) => {
         if (HIDDEN.has(key) || s.readOnly) return null;
+        if (s["x-when"] && !matches(s["x-when"], params, props)) return null;
+        if (s.enum && s.enum.length === 1) return null; // nothing to choose
         if (hasCanvas && key === "terms") return null; // edited inside the canvas
         const id = `param-${key}`;
         const label = s.title ?? humanize(key);
