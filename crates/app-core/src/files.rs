@@ -28,6 +28,8 @@ pub(crate) struct FileEntry {
     pub descriptor: FileDescriptor,
     pub password: Option<Zeroizing<String>>,
     pub worker: Option<FileWorker>,
+    /// For closing the least recently used worker first.
+    pub last_used: std::time::Instant,
 }
 
 impl FileEntry {
@@ -37,6 +39,7 @@ impl FileEntry {
             descriptor,
             password: None,
             worker: None,
+            last_used: std::time::Instant::now(),
         }
     }
 

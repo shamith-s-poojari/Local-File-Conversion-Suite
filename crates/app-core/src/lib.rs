@@ -40,6 +40,9 @@ pub use files::{InspectInfo, PageText, Preview};
 
 /// Most files in one selection (blueprint section 6.2 default).
 pub const MAX_FILES: usize = 200;
+/// Most file workers alive at once. Each is a Python process with the PDF
+/// engines loaded (about 50 MB), so a 200-file selection must not start 200.
+pub const MAX_LIVE_FILE_WORKERS: usize = 4;
 /// Preview resolutions the UI may ask for.
 pub const PREVIEW_DPI: &[u32] = &[48, 72, 96, 144];
 
@@ -366,6 +369,14 @@ impl App {
         result
     }
 
+    /// How many file workers are running (bounded by [`MAX_LIVE_FILE_WORKERS`]).
+    pub fn live_file_workers(&self) -> usize {
+        lock(&self.files)
+            .values()
+            .filter(|e| e.worker.is_some())
+            .count()
+    }
+
     /// Page count, encryption and warnings, from the file's sandboxed worker.
     pub fn inspect_file(&self, file_id: &str) -> CommandResult<InspectInfo> {
         self.require_sandbox()?;
@@ -407,9 +418,28 @@ impl App {
         f: impl FnOnce(&mut FileWorker, Option<&Secrets>) -> CommandResult<T>,
     ) -> CommandResult<T> {
         let mut files = lock(&self.files);
-        let entry = files
-            .get_mut(file_id)
-            .ok_or_else(|| CommandError::new("E_UNKNOWN_FILE", "unknownFile"))?;
+        let needs_worker = files
+            .get(file_id)
+            .ok_or_else(|| CommandError::new("E_UNKNOWN_FILE", "unknownFile"))?
+            .worker
+            .is_none();
+        if needs_worker {
+            // Close the least recently used workers to stay under the cap.
+            let mut live: Vec<(std::time::Instant, String)> = files
+                .iter()
+                .filter(|(id, e)| e.worker.is_some() && id.as_str() != file_id)
+                .map(|(id, e)| (e.last_used, id.clone()))
+                .collect();
+            live.sort();
+            let excess = (live.len() + 1).saturating_sub(MAX_LIVE_FILE_WORKERS);
+            for (_, id) in live.into_iter().take(excess) {
+                if let Some(w) = files.get_mut(&id).and_then(|e| e.worker.take()) {
+                    self.close_worker(w);
+                }
+            }
+        }
+        let entry = files.get_mut(file_id).expect("checked above");
+        entry.last_used = std::time::Instant::now();
         if !entry.descriptor.actionable {
             return Err(CommandError::new("E_INTERNAL", "notActionable"));
         }

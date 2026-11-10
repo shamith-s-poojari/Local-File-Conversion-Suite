@@ -242,6 +242,29 @@ fn scenario(python: &Path) {
         "the output needs exactly the given password"
     );
 
+    // Opening many files keeps at most MAX_LIVE_FILE_WORKERS workers alive,
+    // and an evicted file still works (its worker restarts).
+    let many: Vec<PathBuf> = (0..6)
+        .map(|i| {
+            let p = tmp.path().join(format!("many-{i}.pdf"));
+            make_pdf(python, &p, 1);
+            p
+        })
+        .collect();
+    let added = app.add_paths(many).unwrap();
+    let many_ids: Vec<String> = added
+        .iter()
+        .map(|r| r.file.as_ref().unwrap().file_id.clone())
+        .collect();
+    for id in &many_ids {
+        assert_eq!(app.inspect_file(id).unwrap().pages, 1);
+        assert!(app.live_file_workers() <= converter_app_core::MAX_LIVE_FILE_WORKERS);
+    }
+    assert_eq!(app.inspect_file(&many_ids[0]).unwrap().pages, 1);
+    for id in &many_ids {
+        app.remove_file(id).unwrap();
+    }
+
     // Bad params are refused before anything runs.
     let bad = app
         .create_job("pdf-split", &ids[..1], json!({"mode": "nonsense"}))
