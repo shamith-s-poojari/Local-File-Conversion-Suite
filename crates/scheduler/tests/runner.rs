@@ -289,12 +289,15 @@ fn large_job_warns_and_runs_alone() {
     let py = need_python!();
     let e = env();
     let id = e.staged_job();
+    // A 600-byte user setting caps the budget (the 60% term has a 512 MB
+    // floor), so any estimate exceeds it.
+    let mut cfg = config();
+    cfg.user_memory_limit = Some(600);
     let runner = Runner::new(
         e.store.clone(),
         Arc::new(fake(&py)),
-        // Budget of 600 bytes: any estimate exceeds it.
         Arc::new(FixedMemory(1000)),
-        config(),
+        cfg,
     );
     runner
         .start(spec(&id, "dev-fake", json!({"pages": 1, "delayMs": 1})))
