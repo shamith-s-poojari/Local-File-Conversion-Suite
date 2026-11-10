@@ -1,0 +1,25 @@
+[package]
+name = "converter-app-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "App logic behind the Tauri commands (spec section 11), with no Tauri dependency"
+
+[dependencies]
+converter-jobstore = { path = "../jobstore" }
+converter-protocol = { path = "../protocol" }
+converter-router = { path = "../router" }
+converter-sandbox = { path = "../sandbox" }
+converter-scheduler = { path = "../scheduler" }
+converter-sniffer = { path = "../sniffer" }
+jsonschema = { version = "0.61", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "end_to_end"
+harness = false

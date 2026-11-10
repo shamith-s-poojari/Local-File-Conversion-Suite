@@ -365,6 +365,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "converter-app-core"
+version = "0.1.0"
+dependencies = [
+ "converter-jobstore",
+ "converter-protocol",
+ "converter-router",
+ "converter-sandbox",
+ "converter-scheduler",
+ "converter-sniffer",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "converter-desktop"
 version = "0.1.0"
 dependencies = [

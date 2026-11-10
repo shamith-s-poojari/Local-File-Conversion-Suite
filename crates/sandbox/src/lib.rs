@@ -31,6 +31,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod probe;
+pub mod runner;
 
 /// Memory ceiling before admission (validate and estimate), when the
 /// scheduler hasn't set one.
@@ -50,8 +51,10 @@ pub struct SandboxConfig {
     pub exec_roots: Vec<PathBuf>,
     /// `adapters/`, holding one folder per adapter.
     pub adapters_dir: PathBuf,
-    /// The `converter-sandbox-run` binary.
+    /// The runner: `converter-sandbox-run`, or the app's own executable.
     pub runner: PathBuf,
+    /// Arguments before the runner's own, e.g. `--sandbox-run` for the app.
+    pub runner_args: Vec<OsString>,
 }
 
 impl SandboxConfig {
@@ -96,6 +99,7 @@ impl SandboxConfig {
             exec_roots: vec![exec_root],
             adapters_dir: canonical(adapters_dir)?,
             runner: runner.to_path_buf(),
+            runner_args: Vec::new(),
         })
     }
 
@@ -180,7 +184,8 @@ impl SandboxLauncher {
         };
         let sandboxed = platform_command(&inner)?;
         let mut cmd = Command::new(&self.config.runner);
-        cmd.arg("--memory-limit")
+        cmd.args(&self.config.runner_args)
+            .arg("--memory-limit")
             .arg(memory_limit.to_string())
             .arg("--job-id")
             .arg(job_id)
@@ -279,6 +284,7 @@ mod tests {
             exec_roots: vec![],
             adapters_dir: "/nonexistent".into(),
             runner: "/x".into(),
+            runner_args: vec![],
         };
         for bad in ["../x", "a/b", "", "-x", "A", "a.b"] {
             assert!(config.adapter_script(bad).is_err(), "{bad}");

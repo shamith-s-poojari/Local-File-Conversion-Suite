@@ -129,6 +129,7 @@ mod tests {
             exec_roots: vec!["/py".into()],
             adapters_dir: "/app/adapters".into(),
             runner: "/app/run".into(),
+            runner_args: vec![],
         };
         let inner = Inner {
             config: &config,
