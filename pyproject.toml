@@ -13,6 +13,7 @@ dev = [
     "datamodel-code-generator[ruff]==0.91.0",
     "pikepdf>=9.5,<10",
     "pillow>=11,<12",
+    "pymupdf>=1.24,<2",
     "pypdfium2>=4.30,<5",
     "pytest>=8",
     "pyyaml>=6.0.3",

@@ -251,5 +251,6 @@ def test_kit_covers_every_shipping_adapter() -> None:
         "pdf-organize",
         "pdf-protect",
         "pdf-watermark",
+        "pdf-redact",
     }
     assert sys.version_info >= (3, 12)

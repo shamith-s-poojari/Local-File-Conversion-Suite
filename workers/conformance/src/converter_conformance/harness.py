@@ -213,6 +213,8 @@ def load_adapter_class(adapter_dir: Path) -> type:
     spec = importlib.util.spec_from_file_location(name, adapter_dir / "adapter.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # Registered first: dataclasses resolve string annotations through sys.modules.
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     found = [
         v

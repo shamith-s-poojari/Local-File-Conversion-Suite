@@ -1,0 +1,14 @@
+cases:
+  - name: terms
+    inputs: [text-3]
+    params: { terms: ["Page 2"] }
+    expect: { pages: [3] }
+  - name: box-on-rotated-page
+    inputs: [rotated-90]
+    params: { boxes: [{ page: 1, x0: 0.1, y0: 0.1, x1: 0.5, y1: 0.3 }], fill: white }
+    expect: { pages: [2] }
+negative:
+  params: { terms: ["Page 1"] }
+cancel:
+  inputs: [big]
+  params: { terms: ["Page 3999"] }
