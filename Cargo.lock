@@ -412,6 +412,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "converter-sandbox"
+version = "0.1.0"
+dependencies = [
+ "converter-jobstore",
+ "converter-scheduler",
+ "converter-sniffer",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "converter-scheduler"
 version = "0.1.0"
 dependencies = [
