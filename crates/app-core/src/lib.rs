@@ -242,9 +242,15 @@ impl App {
     /// passes.
     pub fn self_test(&self, home: &Path) -> probe::ProbeReport {
         let scratch = self.store.data_root().path().join("selftest");
-        let report = probe::self_test(&self.launcher, &scratch, home).unwrap_or_else(|_| {
+        // A probe that couldn't run says why, for diagnostics and bug reports.
+        let report = probe::self_test(&self.launcher, &scratch, home).unwrap_or_else(|e| {
             probe::ProbeReport {
-                attempts: Vec::new(),
+                attempts: vec![probe::Attempt {
+                    name: "probe_ran".into(),
+                    expected: "allowed",
+                    outcome: e,
+                    passed: false,
+                }],
                 passed: false,
             }
         });

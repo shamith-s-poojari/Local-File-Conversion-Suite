@@ -105,7 +105,7 @@ pub fn self_test(
     )?;
     drop(listener);
     let report: BTreeMap<String, Value> = serde_json::from_slice(&access.stdout)
-        .map_err(|_| "the probe produced no report".to_string())?;
+        .map_err(|_| format!("the probe produced no report ({})", failure(&access)))?;
 
     let mut attempts = Vec::new();
     for (names, expected) in [(DENIED, "blocked"), (ALLOWED, "allowed")] {
@@ -172,9 +172,23 @@ fn run(
     let mut cmd = launcher.wrap(PROBE_JOB_ID, job, limit, argv)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     cmd.output()
         .map_err(|e| format!("can't start the probe: {e}"))
+}
+
+/// The exit status and the end of stderr, to say why a probe run failed.
+/// The probe handles no user data, so its stderr is safe to show.
+fn failure(output: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(6)..].join(" | ");
+    let mut text = format!("exit {:?}", output.status.code());
+    if !tail.is_empty() {
+        text.push_str(": ");
+        text.extend(tail.chars().take(800));
+    }
+    text
 }
 
 fn canonical(p: &Path) -> PathBuf {

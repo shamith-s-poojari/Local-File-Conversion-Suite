@@ -23,6 +23,33 @@ from converter_sdk import JobContext
 from converter_sdk.protocol import Secrets, parse_worker_message
 
 JOB_ID = "j_conformance"
+LINUX = sys.platform.startswith("linux")
+
+
+def _linux_peak(pid: int) -> int:
+    """The highest ``VmHWM`` of a process and its descendants, in bytes.
+
+    Linux carries the parent's high-water mark through exec into
+    ``ru_maxrss``, so a worker started from a large test process reports the
+    test process's memory. ``VmHWM`` belongs to the new program alone."""
+    peak, stack, seen = 0, [pid], set()
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            with open(f"/proc/{p}/status", encoding="ascii", errors="replace") as f:
+                for line in f:
+                    if line.startswith("VmHWM:"):
+                        peak = max(peak, int(line.split()[1]) * 1024)
+                        break
+            for tid in os.listdir(f"/proc/{p}/task"):
+                with open(f"/proc/{p}/task/{tid}/children", encoding="ascii") as f:
+                    stack.extend(int(c) for c in f.read().split())
+        except (OSError, ValueError):
+            continue
+    return peak
 
 
 def _engines() -> None:
@@ -97,9 +124,18 @@ class WorkerProcess:
             threading.Thread(target=self._read, daemon=True),
             threading.Thread(target=self._read_err, daemon=True),
         ]
+        self._linux_hwm = 0
+        if LINUX:
+            self._readers.append(threading.Thread(target=self._sample, daemon=True))
         for t in self._readers:
             t.start()
         self.peak_rss_bytes: int | None = None
+
+    def _sample(self) -> None:
+        """Track the worker's peak memory on Linux until it exits."""
+        while self.p.returncode is None and self._readers[0].is_alive():
+            self._linux_hwm = max(self._linux_hwm, _linux_peak(self.p.pid))
+            time.sleep(0.01)
 
     def _read(self) -> None:
         assert self.p.stdout is not None
@@ -142,6 +178,8 @@ class WorkerProcess:
 
     def finish(self, timeout: float = 5) -> None:
         """Close stdin, reap the process and record its peak RSS where the OS reports it."""
+        if LINUX:  # the job is done; take the final reading while it's alive
+            self._linux_hwm = max(self._linux_hwm, _linux_peak(self.p.pid))
         if self.p.stdin is not None and not self.p.stdin.closed:
             self.p.stdin.close()
         deadline = time.monotonic() + timeout
@@ -153,8 +191,11 @@ class WorkerProcess:
                     break
                 if pid:
                     self.p.returncode = os.waitstatus_to_exitcode(status)
-                    scale = 1 if sys.platform == "darwin" else 1024  # bytes vs KiB
-                    self.peak_rss_bytes = usage.ru_maxrss * scale
+                    if LINUX:
+                        self.peak_rss_bytes = self._linux_hwm or None
+                    else:
+                        scale = 1 if sys.platform == "darwin" else 1024  # bytes vs KiB
+                        self.peak_rss_bytes = usage.ru_maxrss * scale
                     break
                 time.sleep(0.02)
             else:
