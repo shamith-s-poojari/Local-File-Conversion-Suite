@@ -183,7 +183,27 @@
         "NO_TEXT_LAYER",
         "REDACTED_TEXT_REMAINS_ELSEWHERE",
         "GLYPH_UNSUPPORTED",
-        "W_LARGE_JOB"
+        "W_LARGE_JOB",
+        "TRANSPARENCY_FLATTENED",
+        "ANIMATION_FLATTENED",
+        "IMAGE_DOWNSCALED",
+        "COLORS_REDUCED",
+        "METADATA_DROPPED",
+        "AUDIO_RESAMPLED",
+        "AUDIO_DOWNMIXED",
+        "STREAMS_DROPPED",
+        "LAYOUT_APPROXIMATED",
+        "FORMULAS_DROPPED",
+        "SHEETS_SPLIT",
+        "ONLY_FIRST_SHEET",
+        "IMAGES_DROPPED",
+        "EMBEDDED_FONTS_MISSING",
+        "NESTED_DATA_FLATTENED",
+        "COMMENTS_DROPPED",
+        "REENCODED",
+        "KEPT_ORIGINAL",
+        "TARGET_NOT_REACHED",
+        "COLUMNS_MISMATCHED"
       ]
     },
     "WarningCodeString": {
@@ -208,6 +228,7 @@
         "E_SANDBOX_UNAVAILABLE",
         "E_INSTALL_CORRUPT",
         "E_REDACTION_VERIFICATION_FAILED",
+        "E_NO_TEXT",
         "E_INTERNAL"
       ]
     },
@@ -695,6 +716,9 @@
           "items": {
             "$ref": "#/definitions/WarningItem"
           }
+        },
+        "media": {
+          "$ref": "#/definitions/MediaInfo"
         }
       }
     },
@@ -974,6 +998,74 @@
               }
             }
           }
+        }
+      }
+    },
+    "MediaInfo": {
+      "description": "Facts about an image, audio or video input (ADR 0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "document"
+          ]
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "frames": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "videoCodec": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "audioCodec": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sampleRate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "bitrateKbps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "hasAudio": {
+          "type": "boolean"
+        },
+        "hasVideo": {
+          "type": "boolean"
         }
       }
     }

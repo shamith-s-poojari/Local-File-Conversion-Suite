@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Convert Markdown, text, HTML and EPUB",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": { "title": "Convert to", "enum": ["pdf", "html", "md", "txt"] },
+    "pageSize": {
+      "title": "Page size",
+      "type": "string",
+      "enum": ["a4", "letter"],
+      "default": "a4",
+      "x-labels": { "a4": "A4", "letter": "US Letter" },
+      "x-when": { "to": ["pdf"] }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

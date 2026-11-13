@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Add page numbers",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "style": {
+      "title": "Show",
+      "enum": ["n", "pageN", "nOfTotal", "pageNOfTotal"],
+      "default": "pageNOfTotal",
+      "x-labels": { "n": "3", "pageN": "Page 3", "nOfTotal": "3 of 10", "pageNOfTotal": "Page 3 of 10" }
+    },
+    "position": {
+      "title": "Position",
+      "enum": ["bottomCenter", "bottomRight", "bottomLeft", "topCenter", "topRight", "topLeft"],
+      "default": "bottomCenter",
+      "x-labels": {
+        "bottomCenter": "Bottom, centre",
+        "bottomRight": "Bottom, right",
+        "bottomLeft": "Bottom, left",
+        "topCenter": "Top, centre",
+        "topRight": "Top, right",
+        "topLeft": "Top, left"
+      }
+    },
+    "text": {
+      "title": "Text beside the number",
+      "description": "Optional, for example a title or “Confidential”.",
+      "type": "string",
+      "maxLength": 200,
+      "default": ""
+    },
+    "startAt": {
+      "title": "First number",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 99999,
+      "default": 1
+    },
+    "fontSize": {
+      "title": "Size",
+      "type": "integer",
+      "enum": [8, 10, 12, 14],
+      "default": 10,
+      "x-labels": { "8": "Small", "10": "Normal", "12": "Large", "14": "Larger" }
+    },
+    "pages": {
+      "title": "Pages to number",
+      "description": "Empty means all pages. Numbering counts the pages you choose, so a cover can be left out.",
+      "type": "string",
+      "maxLength": 10000,
+      "x-ui": "pageRanges"
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

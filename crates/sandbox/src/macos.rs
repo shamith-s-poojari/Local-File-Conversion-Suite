@@ -69,6 +69,32 @@ pub(crate) fn profile(inner: &Inner<'_>) -> Result<String, String> {
     for p in &inner.config.exec_roots {
         exec.push(quote(p)?);
     }
+    // Engine grants (ADR 0003): read and map the install, execute its binaries.
+    let mut engine_read = Vec::new();
+    let mut engine_exec = Vec::new();
+    let mut mach = Vec::new();
+    let mut listen = Vec::new();
+    if let Some(g) = inner.grant {
+        for (dir, name) in &g.listen {
+            let d = dir.to_str().ok_or("non-UTF-8 path")?;
+            if !dir.is_absolute() || name.contains(['"', '\n', '\0', '/']) {
+                return Err("unusable socket grant".into());
+            }
+            listen.push((quote(dir)?, format!("#\"^{}/{}$\"", regex_escape(d), name)));
+        }
+        for p in &g.read {
+            engine_read.push(quote(p)?);
+        }
+        for p in &g.exec {
+            engine_exec.push(quote(p)?);
+        }
+        for name in &g.mach {
+            mach.push(format!(
+                "(global-name \"{}\")",
+                name.replace(['\\', '"'], "")
+            ));
+        }
+    }
     let job = quote(&inner.job_dir)?;
     let devices: Vec<String> = DEVICES
         .iter()
@@ -80,6 +106,29 @@ pub(crate) fn profile(inner: &Inner<'_>) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(" ")
     };
+
+    let mut extra = String::new();
+    if !engine_read.is_empty() {
+        let r = subpaths(&engine_read);
+        extra.push_str(&format!(
+            "(allow file-read* {r})\n(allow file-map-executable {r})\n"
+        ));
+    }
+    if !engine_exec.is_empty() {
+        extra.push_str(&format!(
+            "(allow process-exec {})\n",
+            subpaths(&engine_exec)
+        ));
+    }
+    if !mach.is_empty() {
+        extra.push_str(&format!("(allow mach-lookup {})\n", mach.join(" ")));
+    }
+    for (dir, re) in &listen {
+        extra.push_str(&format!(
+            "(allow file-write* (literal {dir}) (regex {re}))\n\
+             (allow network-bind network-inbound (local unix-socket (regex {re})))\n"
+        ));
+    }
 
     Ok(format!(
         "(version 1)\n\
@@ -94,12 +143,26 @@ pub(crate) fn profile(inner: &Inner<'_>) -> Result<String, String> {
          (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n\
          (allow file-read* file-write* (subpath {job}))\n\
          (allow sysctl-read)\n\
-         (allow signal (target same-sandbox))\n",
+         (allow signal (target same-sandbox))\n\
+         {extra}",
         exec = subpaths(&exec),
         read = subpaths(&read),
         runtime = subpaths(&runtime),
         devices = devices.join(" "),
+        extra = extra,
     ))
+}
+
+/// A literal path inside an SBPL regex.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if ".[]()*+?^$|\\{}".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A path as an SBPL string literal. Paths must be absolute and canonical:
@@ -130,11 +193,14 @@ mod tests {
             adapters_dir: "/app/adapters".into(),
             runner: "/app/run".into(),
             runner_args: vec![],
+            interpreter_processes: 0,
+            grants: Default::default(),
         };
         let inner = Inner {
             config: &config,
             job_dir: PathBuf::from("/data/jobs/j_\"1"),
             argv: vec![],
+            grant: None,
         };
         let p = profile(&inner).unwrap();
         assert!(p.starts_with("(version 1)\n(deny default)\n"));
@@ -145,7 +211,80 @@ mod tests {
             config: &config,
             job_dir: PathBuf::from("jobs/x"),
             argv: vec![],
+            grant: None,
         };
         assert!(profile(&relative).is_err());
+    }
+
+    #[test]
+    fn engine_grants_add_only_their_paths() {
+        let config = SandboxConfig {
+            python: "/py/bin/python".into(),
+            runtime_read: vec!["/py".into()],
+            exec_roots: vec!["/py".into()],
+            adapters_dir: "/app/adapters".into(),
+            runner: "/app/run".into(),
+            runner_args: vec![],
+            interpreter_processes: 0,
+            grants: Default::default(),
+        };
+        let grant = crate::Grant {
+            read: vec!["/opt/ff".into()],
+            exec: vec!["/opt/ff/bin/ffmpeg".into()],
+            mach: vec!["com.apple.fonts".into()],
+            ..Default::default()
+        };
+        let inner = Inner {
+            config: &config,
+            job_dir: PathBuf::from("/data/jobs/j1"),
+            argv: vec![],
+            grant: Some(&grant),
+        };
+        let p = profile(&inner).unwrap();
+        assert!(p.contains("(allow process-exec (subpath \"/opt/ff/bin/ffmpeg\"))"));
+        assert!(p.contains("(allow file-read* (subpath \"/opt/ff\"))"));
+        assert!(p.contains("(allow mach-lookup (global-name \"com.apple.fonts\"))"));
+        assert!(!p.contains("network"));
+    }
+
+    #[test]
+    fn socket_grants_listen_but_never_connect() {
+        let config = SandboxConfig {
+            python: "/py/bin/python".into(),
+            runtime_read: vec!["/py".into()],
+            exec_roots: vec!["/py".into()],
+            adapters_dir: "/app/adapters".into(),
+            runner: "/app/run".into(),
+            runner_args: vec![],
+            interpreter_processes: 0,
+            grants: Default::default(),
+        };
+        let grant = crate::Grant {
+            listen: vec![("/private/tmp".into(), "OSL_PIPE_[0-9]+".into())],
+            ..Default::default()
+        };
+        let inner = Inner {
+            config: &config,
+            job_dir: PathBuf::from("/data/jobs/j1"),
+            argv: vec![],
+            grant: Some(&grant),
+        };
+        let p = profile(&inner).unwrap();
+        assert!(p.contains(
+            "(allow file-write* (literal \"/private/tmp\") (regex #\"^/private/tmp/OSL_PIPE_[0-9]+$\"))"
+        ));
+        assert!(p.contains(
+            "(allow network-bind network-inbound (local unix-socket (regex #\"^/private/tmp/OSL_PIPE_[0-9]+$\")))"
+        ));
+        assert!(!p.contains("network-outbound"));
+        let bad = crate::Grant {
+            listen: vec![("/private/tmp".into(), "x\")) (allow default".into())],
+            ..Default::default()
+        };
+        let inner = Inner {
+            grant: Some(&bad),
+            ..inner
+        };
+        assert!(profile(&inner).is_err());
     }
 }

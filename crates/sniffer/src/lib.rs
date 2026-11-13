@@ -1,6 +1,6 @@
 //! File format sniffer (spec section 6, blueprint section 2).
 //!
-//! The sniffer identifies the 12 planned formats from content, using the
+//! The sniffer identifies every supported format from content, using the
 //! extension only as a tie-breaker. It reads at most:
 //!
 //! - the first and last [`WINDOW_BYTES`] of the file,
@@ -15,6 +15,7 @@
 
 mod detect;
 mod ext;
+mod magic;
 mod placeholder;
 mod source;
 mod text;
@@ -38,41 +39,149 @@ pub const MAX_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
 /// Largest `[Content_Types].xml` the sniffer will read or inflate.
 pub const MAX_CONTENT_TYPES_BYTES: usize = 1024 * 1024;
 
-/// The 12 planned formats, plus `unknown`.
+/// Every format the suite reads or writes, plus `unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
     Pdf,
     Docx,
+    Doc,
+    Odt,
+    Rtf,
     Pptx,
+    Ppt,
+    Odp,
     Xlsx,
+    Xls,
+    Ods,
+    Csv,
     Md,
     Html,
     Txt,
+    Epub,
+    Json,
+    Yaml,
     Png,
     Jpg,
     Webp,
     Svg,
     Heic,
+    Gif,
+    Bmp,
+    Tiff,
+    Avif,
+    Ico,
+    Mp3,
+    Wav,
+    Flac,
+    Ogg,
+    Opus,
+    M4a,
+    Aac,
+    Aiff,
+    Mp4,
+    Mov,
+    Mkv,
+    Webm,
+    Avi,
     Unknown,
 }
 
 impl Format {
+    /// Every known format (not `Unknown`).
+    pub const KNOWN: [Format; 41] = [
+        Format::Pdf,
+        Format::Docx,
+        Format::Doc,
+        Format::Odt,
+        Format::Rtf,
+        Format::Pptx,
+        Format::Ppt,
+        Format::Odp,
+        Format::Xlsx,
+        Format::Xls,
+        Format::Ods,
+        Format::Csv,
+        Format::Md,
+        Format::Html,
+        Format::Txt,
+        Format::Epub,
+        Format::Json,
+        Format::Yaml,
+        Format::Png,
+        Format::Jpg,
+        Format::Webp,
+        Format::Svg,
+        Format::Heic,
+        Format::Gif,
+        Format::Bmp,
+        Format::Tiff,
+        Format::Avif,
+        Format::Ico,
+        Format::Mp3,
+        Format::Wav,
+        Format::Flac,
+        Format::Ogg,
+        Format::Opus,
+        Format::M4a,
+        Format::Aac,
+        Format::Aiff,
+        Format::Mp4,
+        Format::Mov,
+        Format::Mkv,
+        Format::Webm,
+        Format::Avi,
+    ];
+
+    /// The format with this wire name, if known.
+    pub fn parse(s: &str) -> Option<Format> {
+        Format::KNOWN.into_iter().find(|f| f.as_str() == s)
+    }
+
     /// Lowercase name, as serialized.
     pub fn as_str(self) -> &'static str {
         match self {
             Format::Pdf => "pdf",
             Format::Docx => "docx",
+            Format::Doc => "doc",
+            Format::Odt => "odt",
+            Format::Rtf => "rtf",
             Format::Pptx => "pptx",
+            Format::Ppt => "ppt",
+            Format::Odp => "odp",
             Format::Xlsx => "xlsx",
+            Format::Xls => "xls",
+            Format::Ods => "ods",
+            Format::Csv => "csv",
             Format::Md => "md",
             Format::Html => "html",
             Format::Txt => "txt",
+            Format::Epub => "epub",
+            Format::Json => "json",
+            Format::Yaml => "yaml",
             Format::Png => "png",
             Format::Jpg => "jpg",
             Format::Webp => "webp",
             Format::Svg => "svg",
             Format::Heic => "heic",
+            Format::Gif => "gif",
+            Format::Bmp => "bmp",
+            Format::Tiff => "tiff",
+            Format::Avif => "avif",
+            Format::Ico => "ico",
+            Format::Mp3 => "mp3",
+            Format::Wav => "wav",
+            Format::Flac => "flac",
+            Format::Ogg => "ogg",
+            Format::Opus => "opus",
+            Format::M4a => "m4a",
+            Format::Aac => "aac",
+            Format::Aiff => "aiff",
+            Format::Mp4 => "mp4",
+            Format::Mov => "mov",
+            Format::Mkv => "mkv",
+            Format::Webm => "webm",
+            Format::Avi => "avi",
             Format::Unknown => "unknown",
         }
     }
@@ -125,13 +234,14 @@ pub struct FileDescriptor {
     pub encryption_hint: EncryptionHint,
     pub macro_enabled: bool,
     pub cloud_placeholder: bool,
-    /// `true` only for unambiguous, local PDFs in Phase 1.
+    /// `true` for unambiguous, local files in a known format.
     pub actionable: bool,
 }
 
 impl FileDescriptor {
     fn new(display_name: String, size_bytes: u64, d: Detection, cloud_placeholder: bool) -> Self {
-        let actionable = d.format == Format::Pdf && d.candidates.is_empty() && !cloud_placeholder;
+        let actionable =
+            d.format != Format::Unknown && d.candidates.is_empty() && !cloud_placeholder;
         FileDescriptor {
             file_id: new_file_id(),
             display_name,

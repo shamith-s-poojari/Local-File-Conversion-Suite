@@ -1,0 +1,14 @@
+cases:
+  - name: all-pages
+    inputs: [text-3]
+    params: {}
+    expect: { pages: [3] }
+  - name: skip-cover-rotated
+    inputs: [rotated-90]
+    params: { pages: "2", style: n, position: topRight, text: "Report" }
+    expect: { pages: [2] }
+negative:
+  params: {}
+cancel:
+  inputs: [big]
+  params: {}

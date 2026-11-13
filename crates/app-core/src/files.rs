@@ -1,7 +1,8 @@
 //! Opened files and their long-lived sandboxed workers.
 //!
-//! A file worker is a `pdf-redact` worker (it implements `inspect`,
-//! `render` and `pageText`) running in the file's own staged job directory.
+//! A file worker runs the adapter that can inspect and preview the file's
+//! format (`pdf-redact` for PDFs, `image-convert` for images, and so on;
+//! see `preview_adapter`) in the file's own staged job directory.
 //! It stays up while the file is open, so preview pages come back quickly
 //! (spike S3 targets: page 1 in 3 s, then about 300 ms a page).
 
@@ -19,9 +20,6 @@ use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use crate::{CommandError, CommandResult};
-
-/// The adapter whose worker serves previews and page text.
-const FILE_WORKER_ADAPTER: &str = "pdf-redact";
 
 pub(crate) struct FileEntry {
     pub path: PathBuf,
@@ -58,6 +56,22 @@ pub struct InspectInfo {
     pub encryption: String,
     pub signed: Option<bool>,
     pub warnings: Vec<String>,
+    /// Image, audio or video facts (ADR 0003).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<Value>,
+}
+
+impl InspectInfo {
+    /// For formats no worker inspects (documents and data).
+    pub fn unknown() -> Self {
+        InspectInfo {
+            pages: 0,
+            encryption: "none".into(),
+            signed: None,
+            warnings: Vec::new(),
+            media: None,
+        }
+    }
 }
 
 /// Where the renderer loads a page image from: `preview://localhost/<path>`.
@@ -80,10 +94,13 @@ pub struct PageText {
 
 pub(crate) struct FileWorker {
     pub job: JobId,
+    /// The staged input, e.g. `in/0.png`.
+    pub input: String,
     worker: Worker,
     size_bytes: u64,
-    /// Preview token per DPI; each maps to `out/p<dpi>/`.
-    pub tokens: BTreeMap<u32, String>,
+    /// Preview token per input and DPI; each maps to its own folder of
+    /// `<page>.png`, so a job's outputs never overwrite each other's previews.
+    pub tokens: BTreeMap<(String, u32), String>,
     dir: PathBuf,
 }
 
@@ -91,12 +108,14 @@ impl FileWorker {
     pub fn start(
         launcher: &SandboxLauncher,
         codec: Arc<Codec>,
+        adapter: &str,
         job: JobId,
         dir: PathBuf,
+        input: String,
         size_bytes: u64,
     ) -> CommandResult<Self> {
         let spec = LaunchSpec {
-            adapter_id: FILE_WORKER_ADAPTER.into(),
+            adapter_id: adapter.into(),
             job_id: job.clone(),
             job_dir: dir.clone(),
             memory_limit: None,
@@ -113,6 +132,7 @@ impl FileWorker {
         .map_err(|f| CommandError::new(&f.code, "workerStart"))?;
         Ok(FileWorker {
             job,
+            input,
             worker,
             size_bytes,
             tokens: BTreeMap::new(),
@@ -142,7 +162,7 @@ impl FileWorker {
     pub fn inspect(&mut self, secrets: Option<&Secrets>) -> CommandResult<InspectInfo> {
         let r = self.request(
             RequestKind::Inspect,
-            json!({ "input": "in/0.pdf" }),
+            json!({ "input": self.input }),
             secrets,
         )?;
         Ok(InspectInfo {
@@ -157,6 +177,7 @@ impl FileWorker {
                         .collect()
                 })
                 .unwrap_or_default(),
+            media: r.get("media").filter(|m| m.is_object()).cloned(),
         })
     }
 
@@ -167,7 +188,8 @@ impl FileWorker {
         dpi: u32,
         register: &dyn Fn(PathBuf) -> String,
     ) -> CommandResult<Preview> {
-        self.render_with("in/0.pdf", secrets, page, dpi, register)
+        let input = self.input.clone();
+        self.render_with(&input, secrets, page, dpi, register)
     }
 
     pub fn render(
@@ -188,7 +210,11 @@ impl FileWorker {
         dpi: u32,
         register: &dyn Fn(PathBuf) -> String,
     ) -> CommandResult<Preview> {
-        let sub = format!("p{dpi}");
+        let tag: String = input
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let sub = format!("preview_{tag}_{dpi}");
         let folder = self.dir.join("out").join(&sub);
         std::fs::create_dir_all(&folder)
             .map_err(|_| CommandError::new("E_RESOURCE_DISK", "previewFolder"))?;
@@ -199,7 +225,7 @@ impl FileWorker {
         )?;
         let token = self
             .tokens
-            .entry(dpi)
+            .entry((input.to_owned(), dpi))
             .or_insert_with(|| register(folder))
             .clone();
         Ok(Preview {

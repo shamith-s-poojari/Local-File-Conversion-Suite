@@ -1,7 +1,7 @@
 use crate::ext::claimed_format;
 use crate::source::Source;
 use crate::{
-    text, zip, Confidence, Detection, EncryptionHint, Format, SniffError, PDF_MAGIC_WINDOW,
+    magic, text, zip, Confidence, Detection, EncryptionHint, Format, SniffError, PDF_MAGIC_WINDOW,
     WINDOW_BYTES,
 };
 
@@ -117,6 +117,16 @@ pub fn detect(display_name: &str, source: &mut impl Source) -> Result<Detection,
             confidence,
             offset: 0,
         });
+    } else if let Some(m) = magic::image(&head)
+        .or_else(|| magic::bmff(&head))
+        .or_else(|| magic::media(&head))
+    {
+        evidence.push(m.evidence);
+        hits.push(Hit {
+            format: refine(m.format, claimed),
+            confidence: m.confidence,
+            offset: 0,
+        });
     }
 
     // ZIP: either it starts with a local header, or an archive is appended (polyglot).
@@ -165,6 +175,20 @@ pub fn detect(display_name: &str, source: &mut impl Source) -> Result<Detection,
                     offset: 0,
                 });
             }
+        } else if let Some(m) = magic::legacy_office(source, &head, &tail) {
+            evidence.push(m.evidence);
+            hits.push(Hit {
+                format: m.format,
+                confidence: m.confidence,
+                offset: 0,
+            });
+        } else if let Some(f @ (Format::Doc | Format::Xls | Format::Ppt)) = claimed {
+            evidence.push("cfb:extension".into());
+            hits.push(Hit {
+                format: f,
+                confidence: Confidence::Guess,
+                offset: 0,
+            });
         }
     }
 
@@ -209,6 +233,12 @@ pub fn detect(display_name: &str, source: &mut impl Source) -> Result<Detection,
         Some(c) if !candidates.is_empty() => !candidates.contains(&c),
         // Markdown and plain text are interchangeable and always overridable.
         Some(Format::Md | Format::Txt) if matches!(format, Format::Md | Format::Txt) => false,
+        // MP4-family brands overlap: an `.m4v` or `.mp4` that is QuickTime is still playable.
+        Some(Format::Mp4 | Format::Mov | Format::M4a)
+            if matches!(format, Format::Mp4 | Format::Mov | Format::M4a) =>
+        {
+            false
+        }
         Some(c) => c != format,
     };
     if extension_mismatch {
@@ -224,6 +254,14 @@ pub fn detect(display_name: &str, source: &mut impl Source) -> Result<Detection,
         encryption_hint,
         macro_enabled,
     })
+}
+
+/// MP4 and M4A share brands: an MP4-branded file named `.m4a` is audio.
+fn refine(format: Format, claimed: Option<Format>) -> Format {
+    match (format, claimed) {
+        (Format::Mp4, Some(Format::M4a)) => Format::M4a,
+        _ => format,
+    }
 }
 
 /// ISO BMFF `ftyp` box with a HEIC brand.

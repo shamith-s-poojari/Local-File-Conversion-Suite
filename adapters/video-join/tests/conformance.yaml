@@ -1,0 +1,16 @@
+cases:
+  - name: matching-clips-copy
+    inputs: [video-mp4, video-mp4]
+    params: { to: mp4 }
+    expect: { outputs: 1 }
+  - name: mixed-clips-reencode
+    inputs: [video-mov, video-webm, video-silent-mp4]
+    params: { to: mkv }
+    expect: { outputs: 1 }
+negative:
+  params: { to: mp4 }
+  inputs: [video-mp4, video-mp4]
+  bad: [corrupt-mp4, truncated-mp4]
+cancel:
+  inputs: [video-long-mp4, video-long-mp4]
+  params: { to: webm }

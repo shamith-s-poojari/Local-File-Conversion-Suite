@@ -3,7 +3,7 @@
 
 import { describe, expect, test, vi } from "vitest";
 import { createActor, fromPromise, waitFor } from "xstate";
-import type { FileDescriptor, FileResult, JobEvent, JobSnapshot, SaveResult } from "../api";
+import type { FileDescriptor, FileResult, Format, JobEvent, JobSnapshot, SaveResult } from "../api";
 import { appMachine, type FileView } from "./app";
 
 const pdf = (id: string, extra: Partial<FileDescriptor> = {}): FileResult => ({
@@ -367,5 +367,32 @@ describe("reload recovery", () => {
     await at(actor, target);
     expect(actor.getSnapshot().context.job?.jobId).toBe("j_9");
     expect(actor.getSnapshot().context.lastSeq).toBe(40);
+  });
+});
+
+describe("conversions (ADR 0003)", () => {
+  test("choosing a format passes it to createJob, and choosing a tool clears it", async () => {
+    const inputs: unknown[] = [];
+    const machine = appMachine.provide({
+      actors: {
+        inspectAll: fromPromise(async ({ input }: { input: { files: FileView[] } }) => input.files),
+        createJob: fromPromise(async ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) => {
+          inputs.push(input);
+          return "j_9";
+        }),
+      },
+    });
+    const actor = createActor(machine).start();
+    actor.send({ type: "FILES_ADDED", results: [pdf("a")] });
+    await waitFor(actor, (s) => s.matches("configuring"));
+    actor.send({ type: "SELECT_CONVERSION", to: "png", adapter: "pdf-to-image", params: { dpi: 150 } });
+    expect(actor.getSnapshot().context.to).toBe("png");
+    expect(actor.getSnapshot().context.operation).toBe("pdf-to-image");
+    actor.send({ type: "SELECT_OPERATION", operation: "pdf-split", params: {} });
+    expect(actor.getSnapshot().context.to).toBeNull();
+    actor.send({ type: "SELECT_CONVERSION", to: "jpg", adapter: "pdf-to-image", params: {} });
+    actor.send({ type: "START" });
+    await waitFor(actor, (s) => s.matches("queued"));
+    expect(inputs[0]).toMatchObject({ operation: "pdf-to-image", to: "jpg", fileIds: ["a"] });
   });
 });

@@ -1,0 +1,16 @@
+cases:
+  - name: mixed-under-100kb
+    inputs: [image-jpg, image-png, image-webp]
+    params: { targetKb: 100, fileTitles: [a, b, c] }
+    expect: { outputs: 3 }
+  - name: big-png
+    inputs: [image-big-png]
+    params: { targetKb: 500 }
+    expect: { outputs: 1 }
+negative:
+  params: { targetKb: 100 }
+  inputs: [image-png]
+  bad: [corrupt-png, truncated-png]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { targetKb: 100 }

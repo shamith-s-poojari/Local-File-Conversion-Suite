@@ -16,6 +16,7 @@
     "allow-get-targets",
     "allow-get-registry",
     "allow-create-job",
+    "allow-create-conversion",
     "allow-cancel-job",
     "allow-request-preview",
     "allow-get-page-text",

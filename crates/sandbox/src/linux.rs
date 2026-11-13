@@ -56,6 +56,9 @@ pub(crate) fn command(inner: &Inner<'_>) -> Result<Vec<OsString>, String> {
     {
         argv.extend(["--ro-bind".into(), p.clone().into(), p.clone().into()]);
     }
+    for p in inner.grant.map(|g| g.read.as_slice()).unwrap_or_default() {
+        argv.extend(["--ro-bind".into(), p.clone().into(), p.clone().into()]);
+    }
     let job = inner.job_dir.clone().into_os_string();
     argv.extend([
         "--bind".into(),
@@ -65,16 +68,11 @@ pub(crate) fn command(inner: &Inner<'_>) -> Result<Vec<OsString>, String> {
         job,
     ]);
     // --clearenv wiped the runner's environment; set it again inside.
-    let work = inner.job_dir.join("work").into_os_string();
-    for (key, value) in [
-        ("PATH", OsString::from("/usr/bin:/bin")),
-        ("LANG", "C.UTF-8".into()),
-        ("TMPDIR", work.clone()),
-        ("HOME", work),
-        ("OMP_THREAD_LIMIT", "1".into()),
-        ("PYTHONDONTWRITEBYTECODE", "1".into()),
-    ] {
+    for (key, value) in crate::worker_env(&inner.job_dir) {
         argv.extend(["--setenv".into(), key.into(), value]);
+    }
+    for (key, value) in inner.grant.map(|g| g.env.as_slice()).unwrap_or_default() {
+        argv.extend(["--setenv".into(), key.into(), value.clone()]);
     }
     argv.push("--".into());
     argv.extend(inner.argv.iter().cloned());

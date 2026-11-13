@@ -1,0 +1,16 @@
+cases:
+  - name: rotate-mixed
+    inputs: [image-png, image-jpg, image-gif, image-webp]
+    params: { rotate: 90, fileTitles: [a, b, c, d] }
+    expect: { outputs: 4 }
+  - name: fit-and-gray
+    inputs: [image-tiff]
+    params: { resize: fit, width: 100, height: 100, grayscale: true }
+    expect: { outputs: 1 }
+negative:
+  params: { rotate: 180 }
+  inputs: [image-png]
+  bad: [corrupt-png, truncated-png]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { resize: percent, percent: 90 }

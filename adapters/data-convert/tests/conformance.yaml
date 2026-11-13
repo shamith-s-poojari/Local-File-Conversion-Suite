@@ -1,0 +1,24 @@
+cases:
+  - name: csv-to-json
+    inputs: [doc-csv]
+    params: { to: json }
+    expect: { outputs: 1 }
+  - name: csv-to-excel
+    inputs: [doc-csv]
+    params: { to: xlsx }
+  - name: json-to-yaml
+    inputs: [doc-json]
+    params: { to: yaml }
+  - name: yaml-to-csv
+    inputs: [doc-yaml]
+    params: { to: csv }
+  - name: excel-to-json
+    inputs: [doc-xlsx]
+    params: { to: json }
+negative:
+  params: { to: json }
+  inputs: [doc-xlsx]
+  bad: [corrupt-xlsx, truncated-xlsx]
+cancel:
+  inputs: [doc-csv-long]
+  params: { to: xlsx }

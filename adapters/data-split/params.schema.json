@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Split a spreadsheet",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "title": "Split",
+      "enum": ["rows", "column"],
+      "default": "rows",
+      "x-labels": { "rows": "Every so many rows", "column": "By the values in a column" }
+    },
+    "rows": {
+      "title": "Rows per file",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000,
+      "default": 1000,
+      "x-when": { "mode": ["rows"] }
+    },
+    "column": {
+      "title": "Column name",
+      "description": "Each different value gets a file of its own, for example one per city.",
+      "type": "string",
+      "maxLength": 255,
+      "default": "",
+      "x-when": { "mode": ["column"] }
+    },
+    "firstRowIsHeader": {
+      "title": "The first row holds column names",
+      "description": "The names are repeated at the top of every file.",
+      "type": "boolean",
+      "default": true
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

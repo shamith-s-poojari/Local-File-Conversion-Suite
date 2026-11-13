@@ -13,6 +13,10 @@ cases:                 # at least one; the first is also used for statelessness
     expect: { pages: [8], password: x }   # page count per output; password to read them
 negative:              # params (and optional secrets) used with corrupt, truncated and encrypted inputs
   params: {}
+  inputs: [doc-docx]               # optional: replaces the first case's inputs
+  bad: [corrupt-docx, truncated-docx]   # optional: the damaged inputs to use (default: corrupt, truncated PDFs)
+encrypted:             # optional: params for the encrypted-PDF checks, when PDFs are read on only some routes
+  params: { to: pptx }
 cancel:                # a job long enough to cancel mid-run
   inputs: [big]
   params: {}
@@ -34,4 +38,4 @@ cancel:                # a job long enough to cancel mid-run
 
 Workers run **without the sandbox** here. Sandbox enforcement is checked by the probe (spec section 9.3).
 
-`converter_conformance.corpus` generates every test PDF, so the kit needs no binary fixtures.
+`converter_conformance.corpus` generates every test PDF, and `converter_conformance.files` every other format (images, audio, video, office documents, Markdown, EPUB), so the kit needs no binary fixtures. Audio and video fixtures need FFmpeg; legacy and OpenDocument office files are saved by LibreOffice. Cases that need a missing engine are skipped.

@@ -4,8 +4,10 @@ import { FileOrder } from "../widgets/FileOrder";
 import { PageOrganizer } from "../widgets/PageOrganizer";
 import { parsePageRanges } from "../widgets/pageRanges";
 import { PageRangesInput } from "../widgets/PageRangesInput";
+import { ColorInput } from "../widgets/ColorInput";
 import { Password } from "../widgets/Password";
 import { RedactionCanvas } from "../widgets/RedactionCanvas";
+import { Slider } from "../widgets/Slider";
 import type { WidgetContext, WidgetProps } from "../widgets/types";
 
 // Forms are generated from each adapter's params schema, with named custom
@@ -21,15 +23,24 @@ const WIDGETS: Record<string, AnyWidget> = {
   pageOrganizer: PageOrganizer,
   redactionCanvas: RedactionCanvas,
   password: Password,
+  slider: Slider,
+  color: ColorInput,
 };
 
 /** Never shown: filled by the core, or only set by a later user decision. */
 const HIDDEN = new Set(["fileTitles", "rasterizeFallback"]);
 
-export function defaults(schema: JsonSchema): Record<string, unknown> {
+/** Whether a param stays out of the form. A conversion's `to` is chosen in
+ * the target picker; a tool's `to` (joining songs into one MP3 or FLAC,
+ * ADR 0004) is an ordinary field, so tools pass `showTo`. */
+function hidden(key: string, showTo: boolean): boolean {
+  return HIDDEN.has(key) || (key === "to" && !showTo);
+}
+
+export function defaults(schema: JsonSchema, showTo = false): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, s] of Object.entries(schema.properties ?? {})) {
-    if (s.default !== undefined && !HIDDEN.has(k)) out[k] = s.default;
+    if (s.default !== undefined && !hidden(k, showTo)) out[k] = s.default;
   }
   return out;
 }
@@ -51,13 +62,30 @@ export function missingRequired(
   return missing;
 }
 
-/** `x-when`: every named param (or its default) has the given value. */
-function matches(
+/** `x-when`: every named param (or its default) has the given value, or one
+ * of the values when a list is given. */
+export function matches(
   when: Record<string, unknown>,
   params: Record<string, unknown>,
   props: Record<string, JsonSchema>,
 ): boolean {
-  return Object.entries(when).every(([k, v]) => (params[k] ?? props[k]?.default) === v);
+  return Object.entries(when).every(([k, v]) => {
+    const actual = params[k] ?? props[k]?.default;
+    return Array.isArray(v) ? v.includes(actual) : actual === v;
+  });
+}
+
+/** Visible fields: what the form shows for these params. */
+export function visibleFields(
+  schema: JsonSchema,
+  params: Record<string, unknown>,
+  showTo = false,
+): string[] {
+  const props = schema.properties ?? {};
+  return Object.entries(props)
+    .filter(([key, s]) => !hidden(key, showTo) && !s.readOnly && !(s.enum && s.enum.length === 1))
+    .filter(([, s]) => !s["x-when"] || matches(s["x-when"], params, props))
+    .map(([key]) => key);
 }
 
 function humanize(key: string): string {
@@ -70,6 +98,7 @@ export function SchemaForm({
   onChange,
   ctx,
   invalid,
+  showTo = false,
 }: {
   schema: JsonSchema;
   params: Record<string, unknown>;
@@ -77,6 +106,8 @@ export function SchemaForm({
   ctx: WidgetContext;
   /** JSON pointers the core rejected, e.g. `/mode`. */
   invalid: string[];
+  /** Show a `to` field: true for tools, false for conversions. */
+  showTo?: boolean;
 }) {
   const props = schema.properties ?? {};
   const hasCanvas = Object.values(props).some((p) => p["x-ui"] === "redactionCanvas");
@@ -90,7 +121,7 @@ export function SchemaForm({
     <div className="form">
       {schema.description && <p className="hint">{schema.description}</p>}
       {Object.entries(props).map(([key, s]) => {
-        if (HIDDEN.has(key) || s.readOnly) return null;
+        if (hidden(key, showTo) || s.readOnly) return null;
         if (s["x-when"] && !matches(s["x-when"], params, props)) return null;
         if (s.enum && s.enum.length === 1) return null; // nothing to choose
         if (hasCanvas && key === "terms") return null; // edited inside the canvas
@@ -157,7 +188,7 @@ function Plain({
         }}>
           {schema.enum.map((v) => (
             <option key={String(v)} value={String(v)}>
-              {humanize(String(v))}
+              {schema["x-labels"]?.[String(v)] ?? humanize(String(v))}
             </option>
           ))}
         </select>

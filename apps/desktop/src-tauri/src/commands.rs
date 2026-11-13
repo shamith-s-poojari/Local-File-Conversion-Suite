@@ -129,6 +129,22 @@ pub async fn create_job(
     .await
 }
 
+/// Converts the files to `to` in one job (ADR 0003).
+#[tauri::command]
+pub async fn create_conversion(
+    core: State<'_, Core>,
+    file_ids: Vec<String>,
+    to: String,
+    params: Value,
+) -> Reply<String> {
+    let app = app(&core)?;
+    blocking(move || {
+        app.create_conversion(&file_ids, &to, params)
+            .map(|j| j.as_str().to_owned())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn cancel_job(core: State<'_, Core>, job_id: String) -> Reply<bool> {
     let app = app(&core)?;

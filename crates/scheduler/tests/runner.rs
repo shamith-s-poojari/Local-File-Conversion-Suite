@@ -105,17 +105,16 @@ fn config() -> RunnerConfig {
 }
 
 fn spec(job: &JobId, adapter_id: &str, params: Value) -> JobSpec {
-    JobSpec {
-        job: job.clone(),
-        adapter_id: adapter_id.into(),
-        pool: "pdf".into(),
-        output_format: Format::Pdf,
-        timeout_base_s: 30,
-        timeout_s_per_mb: 1.0,
-        no_progress_s: 10,
+    JobSpec::single(
+        job.clone(),
+        adapter_id,
+        "pdf",
+        Format::Pdf,
+        1,
+        (30, 1.0, 10),
         params,
-        secrets: None,
-    }
+        None,
+    )
 }
 
 impl Env {
@@ -216,6 +215,69 @@ fn dev_fake_runs_to_success_with_stray_stdout() {
     assert!(!dirs.work.exists());
 }
 
+/// A mixed selection runs as one job in parts (ADR 0003). Every worker
+/// numbers its outputs from 0, so each part's are renamed before the next.
+#[test]
+fn a_job_in_two_parts_keeps_both_parts_outputs() {
+    let py = need_python!();
+    let e = env();
+    let (id, _) = e.store.create_job().unwrap();
+    let input = InputSource {
+        path: e.input.clone(),
+        extension: "pdf".into(),
+    };
+    e.store
+        .stage_inputs(&id, &[input.clone(), input], 1.0)
+        .unwrap();
+    let mut s = spec(&id, "dev-fake", json!({"pages": 1, "delayMs": 1}));
+    let mut second = s.parts[0].clone();
+    s.parts[0].inputs = vec![0];
+    second.inputs = vec![1];
+    s.parts.push(second);
+    let job = e.run(fake(&py), config(), s);
+    assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
+    let paths: Vec<&str> = job.outputs.iter().map(|o| o.path.as_str()).collect();
+    assert_eq!(paths, ["p0-0.pdf", "p1-0.pdf"]);
+    let dirs = e.store.job_dirs(&id).unwrap();
+    for o in &job.outputs {
+        assert_eq!(std::fs::read(dirs.out.join(&o.path)).unwrap(), PDF);
+    }
+}
+
+#[test]
+fn each_part_is_checked_against_its_own_format() {
+    let py = need_python!();
+    let e = env();
+    let (id, _) = e.store.create_job().unwrap();
+    let input = InputSource {
+        path: e.input.clone(),
+        extension: "pdf".into(),
+    };
+    e.store
+        .stage_inputs(&id, &[input.clone(), input], 1.0)
+        .unwrap();
+    let mut s = spec(&id, "dev-fake", json!({"pages": 1, "delayMs": 1}));
+    let mut second = s.parts[0].clone();
+    s.parts[0].inputs = vec![0];
+    second.inputs = vec![1];
+    // The fake always writes a PDF, so a part that promises PNG must fail.
+    second.output_format = Format::Png;
+    s.parts.push(second);
+    let job = e.run(fake(&py), config(), s);
+    assert_eq!(error_code(&job), Some("E_OUTPUT_INVALID"));
+}
+
+#[test]
+fn a_part_naming_an_input_that_isnt_staged_fails() {
+    let py = need_python!();
+    let e = env();
+    let id = e.staged_job();
+    let mut s = spec(&id, "dev-fake", json!({}));
+    s.parts[0].inputs = vec![0, 1];
+    let job = e.run(fake(&py), config(), s);
+    assert_eq!(error_code(&job), Some("E_INTERNAL"));
+}
+
 #[test]
 fn adapter_errors_and_crashes_fail_the_job() {
     let py = need_python!();
@@ -250,7 +312,7 @@ fn watchdog_kills_a_hung_worker() {
     let e = env();
     let id = e.staged_job();
     let mut s = spec(&id, "dev-fake", json!({"hang": true}));
-    s.no_progress_s = 1;
+    s.parts[0].no_progress_s = 1;
     let started = std::time::Instant::now();
     let job = e.run(fake(&py), config(), s);
     assert_eq!(job.state, JobState::Failed);
@@ -434,7 +496,7 @@ fn killing_takes_the_whole_process_tree() {
     let id = e.staged_job();
     let root = e.store.job_dirs(&id).unwrap().root;
     let mut s = spec(&id, "misbehave", json!({}));
-    s.no_progress_s = 2;
+    s.parts[0].no_progress_s = 2;
     let job = e.run(bad(&py, "grandchild_hang"), config(), s);
     assert_eq!(error_code(&job), Some("E_TIMEOUT"));
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { previewUrl, type Api } from "../api";
 
 /** A page preview loaded only once it scrolls into view, so documents with
@@ -10,6 +10,7 @@ export function Thumbnail({
   dpi = 48,
   rotate = 0,
   alt,
+  fallback,
 }: {
   api: Api;
   reference: string;
@@ -17,6 +18,8 @@ export function Thumbnail({
   dpi?: number;
   rotate?: number;
   alt: string;
+  /** Shown instead of "No preview" when the preview fails. */
+  fallback?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [src, setSrc] = useState<string | null>(null);
@@ -40,9 +43,14 @@ export function Thumbnail({
       io.disconnect();
     };
   }, [api, reference, page, dpi]);
+  if (failed && fallback) return <>{fallback}</>;
   return (
-    <div ref={ref} className={`thumb rot-${rotate}`}>
-      {src ? <img src={src} alt={alt} draggable={false} /> : <span className="thumb-placeholder">{failed ? "No preview" : page}</span>}
+    <div ref={ref} className={`thumb rot-${rotate}${src ? " loaded" : ""}`}>
+      {src ? (
+        <img src={src} alt={alt} draggable={false} />
+      ) : (
+        <span className="thumb-placeholder">{failed ? "No preview" : <span className="skeleton" />}</span>
+      )}
     </div>
   );
 }

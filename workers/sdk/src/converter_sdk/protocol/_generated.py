@@ -71,6 +71,26 @@ class WarningCode(
             "REDACTED_TEXT_REMAINS_ELSEWHERE",
             "GLYPH_UNSUPPORTED",
             "W_LARGE_JOB",
+            "TRANSPARENCY_FLATTENED",
+            "ANIMATION_FLATTENED",
+            "IMAGE_DOWNSCALED",
+            "COLORS_REDUCED",
+            "METADATA_DROPPED",
+            "AUDIO_RESAMPLED",
+            "AUDIO_DOWNMIXED",
+            "STREAMS_DROPPED",
+            "LAYOUT_APPROXIMATED",
+            "FORMULAS_DROPPED",
+            "SHEETS_SPLIT",
+            "ONLY_FIRST_SHEET",
+            "IMAGES_DROPPED",
+            "EMBEDDED_FONTS_MISSING",
+            "NESTED_DATA_FLATTENED",
+            "COMMENTS_DROPPED",
+            "REENCODED",
+            "KEPT_ORIGINAL",
+            "TARGET_NOT_REACHED",
+            "COLUMNS_MISMATCHED",
         ]
     ]
 ):
@@ -86,6 +106,26 @@ class WarningCode(
             "REDACTED_TEXT_REMAINS_ELSEWHERE",
             "GLYPH_UNSUPPORTED",
             "W_LARGE_JOB",
+            "TRANSPARENCY_FLATTENED",
+            "ANIMATION_FLATTENED",
+            "IMAGE_DOWNSCALED",
+            "COLORS_REDUCED",
+            "METADATA_DROPPED",
+            "AUDIO_RESAMPLED",
+            "AUDIO_DOWNMIXED",
+            "STREAMS_DROPPED",
+            "LAYOUT_APPROXIMATED",
+            "FORMULAS_DROPPED",
+            "SHEETS_SPLIT",
+            "ONLY_FIRST_SHEET",
+            "IMAGES_DROPPED",
+            "EMBEDDED_FONTS_MISSING",
+            "NESTED_DATA_FLATTENED",
+            "COMMENTS_DROPPED",
+            "REENCODED",
+            "KEPT_ORIGINAL",
+            "TARGET_NOT_REACHED",
+            "COLUMNS_MISMATCHED",
         ],
         Field(
             description="Warning codes in the catalog (spec section 13.1). Workers may send other codes; the core shows those as a generic warning, so the wire format accepts any WarningCodeString."
@@ -417,6 +457,7 @@ class WorkerError(BaseModel):
             "E_SANDBOX_UNAVAILABLE",
             "E_INSTALL_CORRUPT",
             "E_REDACTION_VERIFICATION_FAILED",
+            "E_NO_TEXT",
             "E_INTERNAL",
         ],
         Field(
@@ -425,35 +466,6 @@ class WorkerError(BaseModel):
     ]
     detail: Detail | None = None
     retryable: bool
-
-
-class InspectResult(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-    )
-    v: Annotated[
-        Literal[1],
-        Field(
-            description="The protocol version this schema describes. App and workers ship together, so they must match exactly (spec section 7.5)."
-        ),
-    ] = 1
-    type: Literal["inspectResult"] = "inspectResult"
-    jobId: Annotated[
-        str,
-        Field(
-            description="Opaque job identifier chosen by the core.",
-            pattern="^[A-Za-z0-9_-]{1,64}$",
-        ),
-    ]
-    pages: Annotated[int, Field(ge=0, le=100000)]
-    encryption: Annotated[
-        Literal["none", "permissionsOnly", "openPassword"],
-        Field(
-            description="Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password."
-        ),
-    ]
-    signed: bool | None = None
-    warnings: Annotated[list[WarningItem] | None, Field(max_length=64)] = None
 
 
 class ValidationIssue(BaseModel):
@@ -475,6 +487,7 @@ class ValidationIssue(BaseModel):
             "E_SANDBOX_UNAVAILABLE",
             "E_INSTALL_CORRUPT",
             "E_REDACTION_VERIFICATION_FAILED",
+            "E_NO_TEXT",
             "E_INTERNAL",
         ],
         Field(
@@ -659,6 +672,55 @@ class PageTextResult(BaseModel):
     width: Annotated[float, Field(gt=0.0, le=200000.0)]
     height: Annotated[float, Field(gt=0.0, le=200000.0)]
     words: Annotated[list[WordBox], Field(max_length=20000)]
+
+
+class MediaInfo(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    kind: Literal["image", "audio", "video", "document"]
+    durationMs: Annotated[int | None, Field(ge=0)] = None
+    width: Annotated[int | None, Field(ge=0, le=1000000)] = None
+    height: Annotated[int | None, Field(ge=0, le=1000000)] = None
+    frames: Annotated[int | None, Field(ge=0)] = None
+    videoCodec: Annotated[str | None, Field(max_length=64)] = None
+    audioCodec: Annotated[str | None, Field(max_length=64)] = None
+    sampleRate: Annotated[int | None, Field(ge=0)] = None
+    channels: Annotated[int | None, Field(ge=0, le=64)] = None
+    bitrateKbps: Annotated[int | None, Field(ge=0)] = None
+    fps: Annotated[float | None, Field(ge=0.0)] = None
+    hasAudio: bool | None = None
+    hasVideo: bool | None = None
+
+
+class InspectResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    v: Annotated[
+        Literal[1],
+        Field(
+            description="The protocol version this schema describes. App and workers ship together, so they must match exactly (spec section 7.5)."
+        ),
+    ] = 1
+    type: Literal["inspectResult"] = "inspectResult"
+    jobId: Annotated[
+        str,
+        Field(
+            description="Opaque job identifier chosen by the core.",
+            pattern="^[A-Za-z0-9_-]{1,64}$",
+        ),
+    ]
+    pages: Annotated[int, Field(ge=0, le=100000)]
+    encryption: Annotated[
+        Literal["none", "permissionsOnly", "openPassword"],
+        Field(
+            description="Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password."
+        ),
+    ]
+    signed: bool | None = None
+    warnings: Annotated[list[WarningItem] | None, Field(max_length=64)] = None
+    media: MediaInfo | None = None
 
 
 class Message(

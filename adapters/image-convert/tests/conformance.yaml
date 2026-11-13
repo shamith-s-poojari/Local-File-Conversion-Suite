@@ -1,0 +1,23 @@
+cases:
+  - name: png-to-jpg
+    inputs: [image-png]
+    params: { to: jpg, fileTitles: [photo] }
+    expect: { outputs: 1 }
+  - name: batch-to-webp
+    inputs: [image-png, image-gif, image-bmp, image-tiff]
+    params: { to: webp }
+    expect: { outputs: 4 }
+  - name: heic-to-pdf
+    inputs: [image-heic]
+    params: { to: pdf }
+    expect: { pages: [1] }
+  - name: svg-to-png
+    inputs: [image-svg]
+    params: { to: png }
+negative:
+  params: { to: jpg }
+  inputs: [image-png]
+  bad: [corrupt-png, truncated-png]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { to: tiff }

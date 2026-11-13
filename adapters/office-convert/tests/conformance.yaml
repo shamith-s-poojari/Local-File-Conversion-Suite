@@ -1,0 +1,22 @@
+cases:
+  - name: docx-to-pdf
+    inputs: [doc-docx]
+    params: { to: pdf }
+    expect: { outputs: 1 }
+  - name: xlsx-to-csv-per-sheet
+    inputs: [doc-xlsx]
+    params: { to: csv }
+    expect: { outputs: 2 }
+  - name: markdown-to-word
+    inputs: [doc-md]
+    params: { to: docx }
+negative:
+  params: { to: pdf }
+  inputs: [doc-docx]
+  bad: [corrupt-docx, truncated-docx]
+cancel:
+  inputs: [doc-docx, doc-docx, doc-docx, doc-docx, doc-docx, doc-docx]
+  params: { to: pdf }
+encrypted:
+  # PDFs are only read as slides; the encryption checks use that route.
+  params: { to: pptx }

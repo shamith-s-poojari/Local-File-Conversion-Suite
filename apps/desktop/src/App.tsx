@@ -1,8 +1,9 @@
 import { useMachine } from "@xstate/react";
 import { useEffect, useMemo, useState } from "react";
 import { fromPromise } from "xstate";
-import { api as realApi, events, isCommandError, type Api, type Diagnostics, type Registry } from "./api";
+import { api as realApi, events, isCommandError, type Api, type Diagnostics, type Format, type Registry } from "./api";
 import { Cancelled, Configure, Failed, Home, ProgressScreen, Result, Review, Saved, Settings } from "./features/screens";
+import { GearIcon } from "./icons";
 import { appMachine, type FileView } from "./machines/app";
 
 /** Inspects files four at a time: each starts a sandboxed worker. */
@@ -51,8 +52,11 @@ export function App({ api = realApi }: { api?: Api }) {
       appMachine.provide({
         actors: {
           inspectAll: fromPromise(({ input }: { input: { files: FileView[] } }) => inspectAll(api, input.files)),
-          createJob: fromPromise(({ input }: { input: { operation: string; fileIds: string[]; params: Record<string, unknown> } }) =>
-            api.createJob(input.operation, input.fileIds, input.params),
+          createJob: fromPromise(
+            ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) =>
+              input.to
+                ? api.createConversion(input.fileIds, input.to, input.params)
+                : api.createJob(input.operation, input.fileIds, input.params),
           ),
           save: fromPromise(({ input }: { input: { jobId: string; confirm: boolean } }) =>
             input.confirm ? api.confirmSave(input.jobId) : api.saveOutputs(input.jobId),
@@ -105,9 +109,10 @@ export function App({ api = realApi }: { api?: Api }) {
     screen = <Home api={api} send={send} diag={diag} />;
   } else if (state.matches("inspecting")) {
     screen = (
-      <section className="screen" aria-live="polite">
+      <section className="screen narrow state-screen" aria-live="polite">
+        <span className="state-icon spinning" aria-hidden="true" />
         <h1>Checking files…</h1>
-        <p>Each file is opened in its own sandbox to read its pages.</p>
+        <p className="lede">Each file is opened in its own sandbox to read its size, pages or length.</p>
       </section>
     );
   } else if (state.matches("needsInput") || state.matches("rejected")) {
@@ -129,14 +134,25 @@ export function App({ api = realApi }: { api?: Api }) {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
       <header className="topbar">
-        <span className="brand">Local File Conversion Suite</span>
-        <span className="local">Processed on your device</span>
-        <button type="button" className="link" onClick={() => setSettings((s) => !s)} aria-pressed={settings}>
-          Settings
+        <span className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            <span />
+            <span />
+          </span>
+          Local File Conversion Suite
+        </span>
+        <span className="local">
+          <span className="dot on" aria-hidden="true" /> Processed on your device
+        </span>
+        <button type="button" className="ghost sm" onClick={() => setSettings((s) => !s)} aria-pressed={settings}>
+          <GearIcon /> Settings
         </button>
       </header>
-      <main>{screen}</main>
+      <main id="main">{screen}</main>
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { assign, fromPromise, setup } from "xstate";
 import type {
   CommandError,
   FileDescriptor,
+  Format,
   FileResult,
   InspectInfo,
   JobEvent,
@@ -42,7 +43,10 @@ export interface JobView {
 
 export interface Context {
   files: FileView[];
+  /** The adapter that will run: an operation, or a conversion's adapter. */
   operation: string | null;
+  /** Set for conversions: the format to make (ADR 0003). */
+  to: Format | null;
   params: Record<string, unknown>;
   showBestEffort: boolean;
   job: JobView | null;
@@ -60,6 +64,7 @@ export type Event =
   | { type: "ABANDON" }
   | { type: "ACK" }
   | { type: "SELECT_OPERATION"; operation: string; params: Record<string, unknown> }
+  | { type: "SELECT_CONVERSION"; to: Format; adapter: string; params: Record<string, unknown> }
   | { type: "SET_PARAMS"; params: Record<string, unknown> }
   | { type: "TOGGLE_BEST_EFFORT" }
   | { type: "START" }
@@ -115,7 +120,7 @@ export const appMachine = setup({
     inspectAll: fromPromise<FileView[], { files: FileView[] }>(async ({ input }) => input.files),
     createJob: fromPromise<
       string,
-      { operation: string; fileIds: string[]; params: Record<string, unknown> }
+      { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> }
     >(async () => {
       throw new Error("not provided");
     }),
@@ -177,6 +182,7 @@ export const appMachine = setup({
   context: {
     files: [],
     operation: null,
+    to: null,
     params: {},
     showBestEffort: false,
     job: null,
@@ -198,6 +204,7 @@ export const appMachine = setup({
       entry: assign({
         files: [],
         operation: null,
+        to: null,
         params: {},
         job: null,
         error: null,
@@ -267,6 +274,15 @@ export const appMachine = setup({
         SELECT_OPERATION: {
           actions: assign({
             operation: ({ event }) => event.operation,
+            to: null,
+            params: ({ event }) => event.params,
+            error: null,
+          }),
+        },
+        SELECT_CONVERSION: {
+          actions: assign({
+            operation: ({ event }) => event.adapter,
+            to: ({ event }) => event.to,
             params: ({ event }) => event.params,
             error: null,
           }),
@@ -310,6 +326,7 @@ export const appMachine = setup({
         src: "createJob",
         input: ({ context }) => ({
           operation: context.operation ?? "",
+          to: context.to,
           fileIds: fileIds(context),
           params: context.params,
         }),

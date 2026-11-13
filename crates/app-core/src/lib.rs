@@ -13,9 +13,10 @@
 //!   long-lived sandboxed worker answers `inspect`, `render` and `pageText`.
 //!   They're hidden from snapshots and events.
 
+mod engines;
 mod files;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -25,16 +26,17 @@ use converter_jobstore::{
 };
 use converter_protocol::{Codec, SecretString, Secrets};
 use converter_router::{
-    build_registry, targets, Availability, Catalog, Format as RouterFormat, Platform, Registry,
-    Targets,
+    build_registry, matrix, targets, AdapterEntry, Availability, Catalog, Format as RouterFormat,
+    OutputFormat, Plan, Planner, Platform, Registry, Targets,
 };
 use converter_sandbox::{probe, SandboxConfig, SandboxLauncher};
-use converter_scheduler::{pool_for, JobSpec, Runner, RunnerConfig, SystemMemory};
+use converter_scheduler::{pool_for, JobPart, JobSpec, Runner, RunnerConfig, SystemMemory};
 use converter_sniffer::{FileDescriptor, Format};
 use serde::Serialize;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+pub use engines::Engines;
 use files::{FileEntry, FileWorker};
 pub use files::{InspectInfo, PageText, Preview};
 
@@ -113,6 +115,10 @@ pub struct Diagnostics {
     pub sandbox: Option<probe::ProbeReport>,
     pub processing_enabled: bool,
     pub sync_folder: Option<String>,
+    /// Engines found on this computer (ADR 0003).
+    pub engines: Vec<String>,
+    /// `macos`, `windows` or `linux`: which install instructions to show.
+    pub platform: &'static str,
 }
 
 /// One file as the renderer sees it.
@@ -135,6 +141,9 @@ pub struct App {
     launcher: Arc<SandboxLauncher>,
     codec: Arc<Codec>,
     registry: Registry,
+    /// What this installation can run: platform and installed engines.
+    availability: Availability,
+    engines: Engines,
     files: Mutex<BTreeMap<String, FileEntry>>,
     /// File-worker jobs: never shown to the renderer.
     hidden: Arc<Mutex<HashSet<JobId>>>,
@@ -194,6 +203,12 @@ impl App {
         let mut sandbox_config =
             SandboxConfig::discover(&config.python, &config.adapters_dir, &config.runner)?;
         sandbox_config.runner_args = config.runner_args.clone();
+        let engines = Engines::discover(&config.python);
+        sandbox_config.grants = engines.adapter_grants(&registry);
+        let availability = Availability {
+            platform: Platform::current(),
+            engines: Some(engines.installed.clone()),
+        };
         let launcher = Arc::new(SandboxLauncher::new(sandbox_config));
         let runner = Runner::new(
             store.clone(),
@@ -210,6 +225,8 @@ impl App {
             launcher,
             codec: Arc::new(Codec::new()),
             registry,
+            availability,
+            engines,
             files: Mutex::default(),
             hidden,
             output_workers: Mutex::default(),
@@ -345,7 +362,7 @@ impl App {
             }
             d.format = format;
             d.candidates.clear();
-            d.actionable = format == Format::Pdf && !d.cloud_placeholder;
+            d.actionable = format != Format::Unknown && !d.cloud_placeholder;
         }
         Ok(entry.descriptor.clone())
     }
@@ -380,7 +397,28 @@ impl App {
     /// Page count, encryption and warnings, from the file's sandboxed worker.
     pub fn inspect_file(&self, file_id: &str) -> CommandResult<InspectInfo> {
         self.require_sandbox()?;
+        if self.file_adapter(file_id)?.is_none() {
+            return Ok(InspectInfo::unknown());
+        }
         self.with_file_worker(file_id, |w, secrets| w.inspect(secrets))
+    }
+
+    /// The available adapter that inspects and previews this file, if any.
+    fn file_adapter(&self, file_id: &str) -> CommandResult<Option<&'static str>> {
+        let format = lock(&self.files)
+            .get(file_id)
+            .ok_or_else(|| CommandError::new("E_UNKNOWN_FILE", "unknownFile"))?
+            .descriptor
+            .format;
+        Ok(self.usable_preview_adapter(format))
+    }
+
+    fn usable_preview_adapter(&self, format: Format) -> Option<&'static str> {
+        preview_adapter(format).filter(|id| {
+            self.registry
+                .get(id)
+                .is_some_and(|e| self.availability_of(e).is_ok())
+        })
     }
 
     /// Renders a page and returns a `preview:` URL path (`<token>/<page>.png`).
@@ -395,6 +433,9 @@ impl App {
                 w.render(input, page, dpi, &*register)
             });
         }
+        if self.file_adapter(reference)?.is_none() {
+            return Err(CommandError::new("E_INTERNAL", "notPreviewable"));
+        }
         self.with_file_worker(reference, |w, secrets| {
             w.render_input(secrets, page, dpi, &*register)
         })
@@ -408,7 +449,8 @@ impl App {
                 .with_output_worker(&job, output, |w, input| w.page_text(input, None, page));
         }
         self.with_file_worker(reference, |w, secrets| {
-            w.page_text("in/0.pdf", secrets, page)
+            let input = w.input.clone();
+            w.page_text(&input, secrets, page)
         })
     }
 
@@ -444,6 +486,10 @@ impl App {
             return Err(CommandError::new("E_INTERNAL", "notActionable"));
         }
         if entry.worker.is_none() {
+            let format = entry.descriptor.format;
+            let adapter = self
+                .usable_preview_adapter(format)
+                .ok_or_else(|| CommandError::new("E_INTERNAL", "notPreviewable"))?;
             let (job, _) = self.store.create_job().map_err(CommandError::from_job)?;
             lock(&self.hidden).insert(job.clone());
             self.store
@@ -451,7 +497,7 @@ impl App {
                     &job,
                     &[InputSource {
                         path: entry.path.clone(),
-                        extension: "pdf".into(),
+                        extension: format.as_str().into(),
                     }],
                     0.5,
                 )
@@ -464,8 +510,10 @@ impl App {
             entry.worker = Some(FileWorker::start(
                 &self.launcher,
                 self.codec.clone(),
+                adapter,
                 job,
                 dir,
+                format!("in/0.{}", format.as_str()),
                 entry.descriptor.size_bytes,
             )?);
         }
@@ -494,9 +542,9 @@ impl App {
             .outputs
             .get(output)
             .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownOutput"))?;
-        if out.extension != "pdf" {
-            return Err(CommandError::new("E_INTERNAL", "notPreviewable"));
-        }
+        let adapter = parse_format(&out.extension)
+            .and_then(|f| self.usable_preview_adapter(f))
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "notPreviewable"))?;
         let input = format!("out/{}", out.path);
         let mut workers = lock(&self.output_workers);
         if !workers.contains_key(job) {
@@ -508,8 +556,10 @@ impl App {
             let worker = FileWorker::start(
                 &self.launcher,
                 self.codec.clone(),
+                adapter,
                 job.clone(),
                 dir,
+                input.clone(),
                 out.size_bytes,
             )?;
             workers.insert(job.clone(), worker);
@@ -531,6 +581,28 @@ impl App {
 
     /// Operations and conversions for these files (spec 11.1 `get_targets`).
     pub fn get_targets(&self, file_ids: &[String]) -> CommandResult<Targets> {
+        let formats = self.formats_of(file_ids)?;
+        let mut t = targets(&self.registry, &self.availability, &formats);
+        // Every offered conversion runs as one job in one adapter (ADR 0003).
+        for g in &mut t.groups {
+            g.conversions
+                .retain(|c| c.plan.as_ref().is_none_or(|p| p.hops.len() == 1));
+        }
+        // A shared target ("all to PDF") needs that one-job route in every
+        // group. The groups may use different adapters: each becomes a part
+        // of the job.
+        let groups = t.groups.clone();
+        t.shared.retain(|s| {
+            groups.iter().all(|g| {
+                g.conversions
+                    .iter()
+                    .any(|c| c.to == s.to && c.plan.is_some() && c.unavailable.is_none())
+            })
+        });
+        Ok(t)
+    }
+
+    fn formats_of(&self, file_ids: &[String]) -> CommandResult<Vec<RouterFormat>> {
         let files = lock(&self.files);
         let mut formats = Vec::new();
         for id in file_ids {
@@ -544,8 +616,7 @@ impl App {
                 .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownFormat"))?;
             formats.push(format);
         }
-        let availability = Availability::everything(Platform::current());
-        Ok(targets(&self.registry, &availability, &formats))
+        Ok(formats)
     }
 
     /// Every adapter's manifest and parameter schema, for generated forms.
@@ -555,7 +626,7 @@ impl App {
 
     // ---------------------------------------------------------------- jobs
 
-    /// Validates params, stages inputs and starts the job (spec 11.1).
+    /// Validates params, stages inputs and starts an operation (spec 11.1).
     pub fn create_job(
         &self,
         operation_id: &str,
@@ -567,12 +638,170 @@ impl App {
             .registry
             .get(operation_id)
             .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownOperation"))?;
-        let manifest = &entry.manifest;
-        let (inputs, outputs) = match (&manifest.inputs, &manifest.outputs) {
+        let (inputs, outputs) = match (&entry.manifest.inputs, &entry.manifest.outputs) {
             (Some(i), Some(o)) => (i, o),
             _ => return Err(CommandError::new("E_INTERNAL", "notAnOperation")),
         };
+        if self.availability_of(entry).is_err() {
+            return Err(CommandError::new("E_INSTALL_CORRUPT", "engineMissing"));
+        }
+        let fixed = match outputs.format {
+            OutputFormat::Fixed(f) => Some(f),
+            OutputFormat::Chosen => Some(
+                params["to"]
+                    .as_str()
+                    .and_then(RouterFormat::parse)
+                    .ok_or_else(|| CommandError::new("E_PARAMS_INVALID", "unknownFormat"))?,
+            ),
+            OutputFormat::Same => None,
+        };
+        if let Some(format) = fixed {
+            let output_format = parse_format(format.as_str())
+                .ok_or_else(|| CommandError::new("E_INSTALL_CORRUPT", "unknownOutputFormat"))?;
+            let mut part = self.prepare(
+                entry,
+                file_ids,
+                params,
+                &|f| inputs.formats.contains(&f),
+                Some((inputs.min, inputs.max)),
+            )?;
+            part.part.output_format = output_format;
+            return self.start(vec![part]);
+        }
 
+        // Each file keeps its format (ADR 0004): one part per format, in the
+        // order the formats first appear.
+        let count = file_ids.len() as u32;
+        if count < inputs.min || count > inputs.max {
+            return Err(CommandError::new("E_INTERNAL", "wrongFileCount"));
+        }
+        let formats = self.formats_of(file_ids)?;
+        let mut groups: Vec<(RouterFormat, Vec<String>)> = Vec::new();
+        for (id, &f) in file_ids.iter().zip(&formats) {
+            match groups.iter_mut().find(|g| g.0 == f) {
+                Some(g) => g.1.push(id.clone()),
+                None => groups.push((f, vec![id.clone()])),
+            }
+        }
+        let mut parts = Vec::with_capacity(groups.len());
+        for (format, ids) in &groups {
+            let mut part = self.prepare(
+                entry,
+                ids,
+                params.clone(),
+                &|f| f == *format && inputs.formats.contains(&f),
+                None,
+            )?;
+            part.part.output_format = parse_format(format.as_str())
+                .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownFormat"))?;
+            parts.push(part);
+        }
+        self.start(parts)
+    }
+
+    /// Converts every file to `to`, in one job (ADR 0003). Files that need
+    /// different adapters (Word files and photos to PDF) run as one part per
+    /// adapter; each part gets the params its schema knows, so a mixed
+    /// selection runs with every adapter's defaults.
+    pub fn create_conversion(
+        &self,
+        file_ids: &[String],
+        to: &str,
+        params: Value,
+    ) -> CommandResult<JobId> {
+        self.require_sandbox()?;
+        let target = RouterFormat::parse(to)
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownFormat"))?;
+        let formats = self.formats_of(file_ids)?;
+        let planner = Planner::new(&self.registry, &self.availability);
+        let mut adapters: BTreeMap<RouterFormat, String> = BTreeMap::new();
+        // (adapter, its files, their formats), in the order files were given.
+        let mut groups: Vec<(String, Vec<String>, BTreeSet<RouterFormat>)> = Vec::new();
+        for (id, &from) in file_ids.iter().zip(&formats) {
+            let adapter = match adapters.get(&from) {
+                Some(a) => a.clone(),
+                None => {
+                    let plan = best_plan(&planner, from, target)
+                        .ok_or_else(|| CommandError::new("E_INTERNAL", "noRoute"))?;
+                    if plan.hops.len() != 1 {
+                        return Err(CommandError::new("E_INTERNAL", "multiHop"));
+                    }
+                    let a = plan.hops[0].adapter.clone();
+                    adapters.insert(from, a.clone());
+                    a
+                }
+            };
+            match groups.iter_mut().find(|g| g.0 == adapter) {
+                Some(g) => {
+                    g.1.push(id.clone());
+                    g.2.insert(from);
+                }
+                None => groups.push((adapter, vec![id.clone()], BTreeSet::from([from]))),
+            }
+        }
+        if groups.is_empty() {
+            return Err(CommandError::new("E_INTERNAL", "noFiles"));
+        }
+        let Value::Object(given) = params else {
+            return Err(CommandError::new("E_PARAMS_INVALID", "notAnObject"));
+        };
+        let output_format = parse_format(target.as_str())
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownFormat"))?;
+        let mixed = groups.len() > 1;
+        let mut parts = Vec::with_capacity(groups.len());
+        for (adapter, ids, sources) in &groups {
+            let entry = self
+                .registry
+                .get(adapter)
+                .ok_or_else(|| CommandError::new("E_INSTALL_CORRUPT", "unknownAdapter"))?;
+            let known = &entry.params_schema["properties"];
+            let mut map: serde_json::Map<String, Value> = given
+                .iter()
+                .filter(|(k, _)| !mixed || known.get(k.as_str()).is_some())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            map.insert("to".into(), json!(target.as_str()));
+            let mut part = self.prepare(
+                entry,
+                ids,
+                Value::Object(map),
+                &|f| sources.contains(&f),
+                None,
+            )?;
+            part.part.output_format = output_format;
+            parts.push(part);
+        }
+        self.start(parts)
+    }
+
+    fn availability_of(&self, entry: &AdapterEntry) -> Result<(), ()> {
+        let installed = self.availability.engines.as_ref();
+        let ok = entry
+            .manifest
+            .platforms
+            .contains(&self.availability.platform)
+            && entry
+                .manifest
+                .requires
+                .iter()
+                .all(|e| installed.is_none_or(|i| i.contains(e)));
+        if ok {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Validates params, orders the files and gathers what a job part needs.
+    fn prepare(
+        &self,
+        entry: &AdapterEntry,
+        file_ids: &[String],
+        params: Value,
+        accepts: &dyn Fn(RouterFormat) -> bool,
+        count_limits: Option<(u32, u32)>,
+    ) -> CommandResult<Prepared> {
+        let manifest = &entry.manifest;
         let (mut params, secrets) = split_secrets(params)?;
         let validator = jsonschema::validator_for(&entry.params_schema)
             .map_err(|_| CommandError::new("E_INSTALL_CORRUPT", "badParamsSchema"))?;
@@ -591,14 +820,18 @@ impl App {
 
         let ordered = order_files(&params, file_ids)?;
         let count = ordered.len() as u32;
-        if count < inputs.min || count > inputs.max {
+        if let Some((min, max)) = count_limits {
+            if count < min || count > max {
+                return Err(CommandError::new("E_INTERNAL", "wrongFileCount"));
+            }
+        }
+        if count == 0 {
             return Err(CommandError::new("E_INTERNAL", "wrongFileCount"));
         }
 
-        let (sources, total_bytes, password, titles) = {
+        let (sources, password, titles) = {
             let files = lock(&self.files);
             let mut sources = Vec::new();
-            let mut total = 0;
             let mut password: Option<SecretString> = None;
             let mut titles = Vec::new();
             for id in &ordered {
@@ -606,12 +839,9 @@ impl App {
                     .get(id)
                     .ok_or_else(|| CommandError::new("E_UNKNOWN_FILE", "unknownFile"))?;
                 let format = RouterFormat::parse(entry.descriptor.format.as_str());
-                if !entry.descriptor.actionable
-                    || !format.is_some_and(|f| inputs.formats.contains(&f))
-                {
+                if !entry.descriptor.actionable || !format.is_some_and(accepts) {
                     return Err(CommandError::new("E_INTERNAL", "unsupportedInput"));
                 }
-                total += entry.descriptor.size_bytes;
                 if password.is_none() {
                     password = entry
                         .password
@@ -624,13 +854,16 @@ impl App {
                     extension: entry.descriptor.format.as_str().to_owned(),
                 });
             }
-            (sources, total, password, titles)
+            (sources, password, titles)
         };
 
         // The core resolves file IDs; the worker only ever sees input order.
+        let wants_titles = entry.params_schema["properties"]
+            .get("fileTitles")
+            .is_some();
         if let Some(obj) = params.as_object_mut() {
             obj.remove("order");
-            if operation_id == "pdf-merge" && !obj.contains_key("fileTitles") {
+            if wants_titles && !obj.contains_key("fileTitles") {
                 obj.insert("fileTitles".into(), json!(titles));
             }
         }
@@ -641,12 +874,39 @@ impl App {
         let has_secrets = secrets.password.is_some()
             || secrets.user_password.is_some()
             || secrets.owner_password.is_some();
+        Ok(Prepared {
+            pool: pool_for(&manifest.id, worker_class(manifest)),
+            disk_factor: manifest.limits.disk_factor,
+            part: JobPart {
+                adapter_id: manifest.id.clone(),
+                inputs: Vec::new(),
+                timeout_base_s: manifest.limits.timeout_base_s,
+                timeout_s_per_mb: manifest.limits.timeout_s_per_mb,
+                no_progress_s: manifest.limits.no_progress_s,
+                params,
+                secrets: has_secrets.then_some(secrets),
+                // Set by the caller, which knows the target.
+                output_format: Format::Pdf,
+            },
+            sources,
+        })
+    }
+
+    /// Stages every part's inputs in one job and hands it to the scheduler.
+    fn start(&self, parts: Vec<Prepared>) -> CommandResult<JobId> {
+        let disk_factor = parts.iter().map(|p| p.disk_factor).fold(0.0, f64::max);
+        let pool = strictest_pool(parts.iter().map(|p| p.pool.as_str()));
+        let mut sources = Vec::new();
+        let mut job_parts = Vec::with_capacity(parts.len());
+        for p in parts {
+            let mut part = p.part;
+            part.inputs = (sources.len()..sources.len() + p.sources.len()).collect();
+            sources.extend(p.sources);
+            job_parts.push(part);
+        }
 
         let (job, _) = self.store.create_job().map_err(CommandError::from_job)?;
-        if let Err(e) = self
-            .store
-            .stage_inputs(&job, &sources, manifest.limits.disk_factor)
-        {
+        if let Err(e) = self.store.stage_inputs(&job, &sources, disk_factor) {
             let failure = converter_jobstore::JobFailure {
                 code: e.code().unwrap_or("E_INTERNAL").into(),
                 retryable: false,
@@ -654,19 +914,10 @@ impl App {
             let _ = self.store.fail(&job, failure);
             return Err(CommandError::from_job(e));
         }
-        let output_format = parse_format(outputs.format.as_str())
-            .ok_or_else(|| CommandError::new("E_INSTALL_CORRUPT", "unknownOutputFormat"))?;
-        let _ = total_bytes;
         self.runner.start(JobSpec {
             job: job.clone(),
-            adapter_id: manifest.id.clone(),
-            pool: pool_for(&manifest.id, worker_class(manifest)),
-            output_format,
-            timeout_base_s: manifest.limits.timeout_base_s,
-            timeout_s_per_mb: manifest.limits.timeout_s_per_mb,
-            no_progress_s: manifest.limits.no_progress_s,
-            params,
-            secrets: has_secrets.then_some(secrets),
+            pool,
+            parts: job_parts,
         });
         Ok(job)
     }
@@ -756,6 +1007,8 @@ impl App {
             processing_enabled: sandbox.as_ref().is_some_and(|r| r.passed),
             sandbox,
             sync_folder: None,
+            engines: self.engines.installed.iter().cloned().collect(),
+            platform: std::env::consts::OS,
         }
     }
 
@@ -830,6 +1083,24 @@ fn parse_output_ref(reference: &str) -> Option<(JobId, usize)> {
     Some((JobId::parse(job)?, n.parse().ok()?))
 }
 
+/// One part of a job before its inputs are staged.
+struct Prepared {
+    part: JobPart,
+    sources: Vec<InputSource>,
+    pool: String,
+    disk_factor: f64,
+}
+
+/// A job in parts queues in the pool of its heaviest part: one that runs
+/// LibreOffice or FFmpeg waits for that pool's single slot.
+fn strictest_pool<'a>(pools: impl Iterator<Item = &'a str>) -> String {
+    const ORDER: [&str; 7] = ["office", "media", "redact", "ocr", "render", "image", "pdf"];
+    pools
+        .min_by_key(|p| ORDER.iter().position(|o| o == p).unwrap_or(ORDER.len()))
+        .unwrap_or("pdf")
+        .to_owned()
+}
+
 fn worker_class(m: &converter_router::Manifest) -> &'static str {
     use converter_router::manifest::WorkerClass;
     match m.worker_class {
@@ -838,6 +1109,29 @@ fn worker_class(m: &converter_router::Manifest) -> &'static str {
         WorkerClass::Render => "render",
         WorkerClass::Office => "office",
         WorkerClass::Ocr => "ocr",
+        WorkerClass::Media => "media",
+    }
+}
+
+/// The plan the UI offered for `from → to`: the matrix's shape for the
+/// blueprint's formats, a direct edge otherwise (ADR 0003).
+fn best_plan(planner: &Planner, from: RouterFormat, to: RouterFormat) -> Option<Plan> {
+    if from.in_blueprint() && to.in_blueprint() {
+        matrix::offered(from, to).and_then(|cell| planner.best_for_cell(from, to, cell))
+    } else {
+        planner.best_direct(from, to)
+    }
+}
+
+/// The adapter whose worker inspects and previews files of this format.
+fn preview_adapter(format: Format) -> Option<&'static str> {
+    use Format::*;
+    match format {
+        Pdf => Some("pdf-redact"),
+        Png | Jpg | Webp | Svg | Heic | Gif | Bmp | Tiff | Avif | Ico => Some("image-convert"),
+        Mp3 | Wav | Flac | Ogg | Opus | M4a | Aac | Aiff => Some("audio-convert"),
+        Mp4 | Mov | Mkv | Webm | Avi => Some("video-convert"),
+        _ => None,
     }
 }
 
@@ -859,12 +1153,7 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A sniffer `Format` from its wire name (the sniffer type has no parser).
+/// A sniffer `Format` from its wire name.
 pub fn parse_format(s: &str) -> Option<Format> {
-    use Format::*;
-    [
-        Pdf, Docx, Pptx, Xlsx, Md, Html, Txt, Png, Jpg, Webp, Svg, Heic,
-    ]
-    .into_iter()
-    .find(|f| f.as_str() == s)
+    Format::parse(s)
 }

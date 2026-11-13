@@ -22,6 +22,8 @@ pub const WIDGETS: &[&str] = &[
     "password",
     "fileOrder",
     "imagePicker",
+    "slider",
+    "color",
 ];
 
 pub const REGISTRY_VERSION: u32 = 1;
@@ -41,6 +43,7 @@ pub enum WorkerClass {
     Render,
     Office,
     Ocr,
+    Media,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,8 +64,51 @@ pub struct Inputs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Outputs {
-    pub format: Format,
+    pub format: OutputFormat,
     pub cardinality: Cardinality,
+}
+
+/// What an operation's outputs are (ADR 0004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum OutputFormat {
+    /// Always this format (merging PDFs gives a PDF).
+    Fixed(Format),
+    /// Each input's own format: rotating a JPG and a PNG gives a JPG and a
+    /// PNG. The core runs one part per input format.
+    Same,
+    /// The format in the `to` param, which the params schema must list
+    /// (joining songs into one MP3 or FLAC).
+    Chosen,
+}
+
+impl OutputFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputFormat::Fixed(f) => f.as_str(),
+            OutputFormat::Same => "same",
+            OutputFormat::Chosen => "chosen",
+        }
+    }
+}
+
+impl TryFrom<String> for OutputFormat {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        match s.as_str() {
+            "same" => Ok(OutputFormat::Same),
+            "chosen" => Ok(OutputFormat::Chosen),
+            other => Format::parse(other)
+                .map(OutputFormat::Fixed)
+                .ok_or_else(|| format!("unknown output format {other:?}")),
+        }
+    }
+}
+
+impl From<OutputFormat> for String {
+    fn from(f: OutputFormat) -> String {
+        f.as_str().to_owned()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +132,18 @@ pub struct Limits {
     pub timeout_s_per_mb: f64,
     pub no_progress_s: u32,
     pub disk_factor: f64,
+    /// Processes the worker runs at once, itself included, before any
+    /// engine's (spec 9.2: "1 for PDF workers"). Enforced on Windows.
+    #[serde(default = "one_process", skip_serializing_if = "is_one_process")]
+    pub processes: u32,
+}
+
+fn one_process() -> u32 {
+    1
+}
+
+fn is_one_process(n: &u32) -> bool {
+    *n == 1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -385,6 +443,21 @@ fn load_adapter(
     }
 
     let params_schema = load_params_schema(&dir, &manifest.params, &mut problem)?;
+    if manifest.outputs.as_ref().map(|o| o.format) == Some(OutputFormat::Chosen) {
+        let listed = params_schema["properties"]["to"]["enum"]
+            .as_array()
+            .filter(|l| !l.is_empty());
+        match listed {
+            None => problem("outputs: format \"chosen\" needs a \"to\" param with an enum".into()),
+            Some(list) => {
+                for v in list {
+                    if v.as_str().and_then(Format::parse).is_none() {
+                        problem(format!("params: \"to\" lists {v}, which isn't a format"));
+                    }
+                }
+            }
+        }
+    }
     Some(AdapterEntry {
         manifest,
         params_schema,

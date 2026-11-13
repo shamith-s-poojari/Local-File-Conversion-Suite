@@ -2,7 +2,17 @@
 
 A privacy-first file converter and PDF toolkit. All processing happens on your machine: no file or metadata is uploaded anywhere.
 
-**Status:** Phase 1. On macOS, the app runs six PDF tools (merge, split, organize, protect or unlock, watermark, redact) end to end in a per-job sandbox. Windows has no sandbox yet, so processing is off there; Linux is untested. There are no installers yet. See [known limits](docs/known-limits.md).
+It converts between 41 formats: documents (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Markdown, HTML, text), data (CSV, JSON, YAML), images (PNG, JPG, WebP, HEIC, GIF, SVG, TIFF, AVIF and more), audio (MP3, WAV, FLAC, OGG, Opus, M4A, AAC, AIFF) and video (MP4, MOV, MKV, WebM, AVI). A selection of different kinds of file can be converted together, for example Word files and photos all to PDF. See [ADR 0003](docs/adr/0003-all-format-conversion.md).
+
+It also has tools for each kind of file ([ADR 0004](docs/adr/0004-tools-for-every-kind-of-file.md)):
+
+- **PDF:** merge, split, organize pages, compress, page numbers, protect or unlock, watermark, redact.
+- **Images:** rotate and resize, compress to a size, make an animated GIF, put images into one PDF.
+- **Audio:** join, and change the volume, fades or speed.
+- **Video:** join, rotate or change speed, and save frames as pictures.
+- **Spreadsheets:** combine CSV and Excel files, or split them by rows or by a column.
+
+**Status:** On macOS, every conversion and tool runs end to end in a per-job sandbox. The Windows and Linux builds compile and pass the lint and type checks, but their sandboxes haven't run on those systems yet. Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't. There are no installers yet. See [known limits](docs/known-limits.md).
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
 - [Phase 1 specification](docs/specs/phase-1.md) (wins wherever it differs from the blueprint)

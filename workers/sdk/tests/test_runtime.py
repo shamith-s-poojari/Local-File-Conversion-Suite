@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import queue
 import threading
 import time
@@ -280,3 +281,20 @@ def test_unsupported_method(job_dir: Path) -> None:
 )
 def test_safe_display_name(raw: str, safe: str) -> None:
     assert safe_display_name(raw) == safe
+
+
+def test_workers_never_read_the_system_mime_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sandbox makes these files unreadable; reading one would raise.
+    from converter_sdk import runtime  # noqa: PLC0415
+
+    unreadable = tmp_path / "mime.types"
+    unreadable.write_text("application/x-local  local\n")
+    unreadable.chmod(0)
+    monkeypatch.setattr(mimetypes, "knownfiles", [str(unreadable)])
+    monkeypatch.setattr(mimetypes, "inited", False)
+    monkeypatch.setattr(mimetypes, "_db", None)
+    runtime._builtin_mime_types()
+    assert mimetypes.guess_type("a.local") == (None, None)
+    assert mimetypes.guess_type("a.png")[0] == "image/png"

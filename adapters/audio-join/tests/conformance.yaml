@@ -1,0 +1,16 @@
+cases:
+  - name: mixed-to-mp3
+    inputs: [audio-wav, audio-mp3, audio-flac]
+    params: { to: mp3, gap: 1 }
+    expect: { outputs: 1 }
+  - name: to-flac
+    inputs: [audio-ogg, audio-m4a]
+    params: { to: flac }
+    expect: { outputs: 1 }
+negative:
+  params: { to: wav }
+  inputs: [audio-wav, audio-wav]
+  bad: [corrupt-wav, truncated-wav]
+cancel:
+  inputs: [audio-long-wav, audio-long-wav]
+  params: { to: flac }

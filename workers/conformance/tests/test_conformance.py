@@ -11,10 +11,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pikepdf
 import pytest
 import yaml
-from converter_conformance import corpus
+from converter_conformance import corpus, files
+from converter_conformance import validate as output_check
 from converter_conformance.harness import (
     WorkerProcess,
     load_adapter_class,
@@ -68,6 +68,46 @@ def _replace_first(inputs: list[str], name: str) -> list[str]:
     return [name, *inputs[1:]]
 
 
+def _output_format(manifest: dict[str, Any], params: dict[str, Any], path: str) -> str:
+    """The format an output must be: the target, the manifest's, or for a
+    tool that keeps each file's format (ADR 0004), its own extension."""
+    if manifest["kind"] == "conversion":
+        return str(params["to"])
+    fmt = manifest["outputs"]["format"]
+    if fmt == "chosen":
+        return str(params["to"])
+    if fmt == "same":
+        return Path(path).suffix.lstrip(".")
+    return fmt
+
+
+def _reads_pdf(manifest: dict[str, Any]) -> bool:
+    if manifest["kind"] == "conversion":
+        return any("pdf" in e["from"] for e in manifest["edges"])
+    return "pdf" in manifest["inputs"]["formats"]
+
+
+def _needs_missing_engine(names: list[str], manifest: dict[str, Any]) -> str | None:
+    env = files.engine_env()
+    if "ffmpeg" in manifest["requires"] and "LFCS_BIN_FFMPEG" not in env:
+        return "ffmpeg"
+    if "libreoffice" in manifest["requires"] and "LFCS_BIN_SOFFICE" not in env:
+        return "libreoffice"
+    if (
+        any(files.needs_ffmpeg(n) for n in names if n in files.BUILDERS)
+        and "LFCS_BIN_FFMPEG" not in env
+    ):
+        return "ffmpeg"
+    if any(files.needs_soffice(n) for n in names) and "LFCS_BIN_SOFFICE" not in env:
+        return "libreoffice"
+    return None
+
+
+def _skip_without_engines(names: list[str], manifest: dict[str, Any]) -> None:
+    if missing := _needs_missing_engine(names, manifest):
+        pytest.skip(f"{missing} isn't installed")
+
+
 @pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
 def test_has_cases_readme_and_matching_class(adapter_id, manifest, cases) -> None:
     folder = ADAPTERS / adapter_id
@@ -76,7 +116,11 @@ def test_has_cases_readme_and_matching_class(adapter_id, manifest, cases) -> Non
     assert (folder / "README.md").is_file()
     cls = load_adapter_class(folder)
     assert cls.adapter_id == manifest["id"] == folder.name
-    assert cls.fidelity == manifest["fidelity"]
+    if manifest["kind"] == "conversion":
+        declared = {(f, e["to"]): e["tier"] for e in manifest["edges"] for f in e["from"]}
+        assert declared == cls.EDGES, "manifest edges differ from the adapter's EDGES"
+    else:
+        assert cls.fidelity == manifest["fidelity"]
 
 
 @pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
@@ -84,6 +128,7 @@ def test_cases_produce_valid_contained_outputs(
     adapter_id, manifest, cases, tmp_path: Path, corpus_dir: Path
 ) -> None:
     for n, case in enumerate(cases["cases"]):
+        _skip_without_engines(case["inputs"], manifest)
         job_dir, inputs = _job(tmp_path / str(n), corpus_dir, case["inputs"])
         before = _files(job_dir)
         r = run_job(_adapter(adapter_id), job_dir, inputs, case["params"], case.get("secrets"))
@@ -95,17 +140,23 @@ def test_cases_produce_valid_contained_outputs(
         new = _files(job_dir) - before
         assert all(p.startswith(("out/", "work/")) for p in new), sorted(new)
 
-        # Validity and page counts.
+        # Validity, page counts and output counts.
         expect = case.get("expect", {})
         password = expect.get("password", "")
         pages = []
         for out in result.outputs:
-            with pikepdf.open(job_dir / out.path, password=password) as pdf:
-                assert pdf.check_pdf_syntax() == [], f"{case['name']}: {out.path} fails check"
-                pages.append(len(pdf.pages))
-                assert out.pages == len(pdf.pages)
+            fmt = _output_format(manifest, case["params"], out.path)
+            try:
+                count = output_check.check(job_dir / out.path, fmt, password)
+            except Exception as e:  # noqa: BLE001 - reported with the case name
+                pytest.fail(f"{case['name']}: {out.path} isn't a valid {fmt}: {e}")
+            if count is not None:
+                pages.append(count)
+                assert out.pages == count
         if "pages" in expect:
             assert pages == expect["pages"], case["name"]
+        if "outputs" in expect:
+            assert len(result.outputs) == expect["outputs"], case["name"]
 
         # Warnings: in the catalog and declared by the manifest.
         for w in r.of("warning"):
@@ -126,7 +177,17 @@ def test_cases_produce_valid_contained_outputs(
 def test_bad_input_gives_structured_error(
     adapter_id, manifest, cases, bad, tmp_path: Path, corpus_dir: Path
 ) -> None:
-    inputs = _replace_first(cases["cases"][0]["inputs"], bad)
+    negative = cases["negative"]
+    if "bad" in negative:
+        index = 0 if bad == "corrupt" else 1
+        if index >= len(negative["bad"]):
+            pytest.skip("no truncated input for this format")
+        inputs = _replace_first(
+            negative.get("inputs", cases["cases"][0]["inputs"]), negative["bad"][index]
+        )
+    else:
+        inputs = _replace_first(cases["cases"][0]["inputs"], bad)
+    _skip_without_engines(inputs, manifest)
     job_dir, rel = _job(tmp_path, corpus_dir, inputs)
     r = run_job(
         _adapter(adapter_id),
@@ -141,8 +202,8 @@ def test_bad_input_gives_structured_error(
     if bad == "truncated" and not codes:
         # The engine repaired it. That's allowed when the output is valid.
         for out in r.last("executeResult").outputs:
-            with pikepdf.open(job_dir / out.path) as pdf:
-                assert pdf.check_pdf_syntax() == []
+            fmt = _output_format(manifest, cases["negative"]["params"], out.path)
+            output_check.check(job_dir / out.path, fmt)
         return
     assert codes, f"{bad}: no error and no result"
     assert set(codes) <= STRUCTURED_INPUT_ERRORS, codes
@@ -152,13 +213,15 @@ def test_bad_input_gives_structured_error(
 def test_encrypted_input_without_password(
     adapter_id, manifest, cases, tmp_path: Path, corpus_dir: Path
 ) -> None:
+    if not _reads_pdf(manifest):
+        pytest.skip("doesn't read PDFs")
     inputs = _replace_first(cases["cases"][0]["inputs"], "encrypted")
     job_dir, rel = _job(tmp_path, corpus_dir, inputs)
     r = run_job(
         _adapter(adapter_id),
         job_dir,
         rel,
-        cases["negative"]["params"],
+        cases.get("encrypted", {}).get("params", cases["negative"]["params"]),
         cases["negative"].get("secrets"),
     )
     validate = r.last("validateResult")
@@ -170,12 +233,15 @@ def test_encrypted_input_without_password(
 def test_secret_never_leaves_the_worker(
     adapter_id, manifest, cases, tmp_path: Path, corpus_dir: Path
 ) -> None:
+    if not _reads_pdf(manifest):
+        pytest.skip("doesn't read PDFs")
     sentinel = corpus.SENTINEL_PASSWORD.encode("utf-8")
     case = cases["cases"][0]
     inputs = _replace_first(case["inputs"], "encrypted")
     job_dir, rel = _job(tmp_path, corpus_dir, inputs)
     secrets = {**case.get("secrets", {}), "password": corpus.SENTINEL_PASSWORD}
-    r = run_job(_adapter(adapter_id), job_dir, rel, case["params"], secrets)
+    params = cases.get("encrypted", {}).get("params", case["params"])
+    r = run_job(_adapter(adapter_id), job_dir, rel, params, secrets)
     assert r.last("executeResult") is not None or r.of("error") or r.last("validateResult")
     assert sentinel not in b"".join(r.lines)
     assert sentinel not in r.stderr
@@ -193,6 +259,7 @@ def test_cancel_within_2_seconds(
     if "repeat" in spec:
         repeat = spec["repeat"]
         params[repeat["param"]] = [repeat["item"]] * int(repeat["times"])
+    _skip_without_engines(spec["inputs"], manifest)
     job_dir, rel = _job(tmp_path, corpus_dir, spec["inputs"])
     w = WorkerProcess(_adapter(adapter_id), job_dir)
     try:
@@ -228,6 +295,7 @@ def test_repeat_runs_are_equivalent(
     adapter_id, manifest, cases, tmp_path: Path, corpus_dir: Path
 ) -> None:
     case = cases["cases"][0]
+    _skip_without_engines(case["inputs"], manifest)
     password = case.get("expect", {}).get("password", "")
     runs = []
     for n in range(2):
@@ -237,7 +305,12 @@ def test_repeat_runs_are_equivalent(
         assert result is not None
         runs.append(
             [
-                (o.suggestedName, corpus.page_texts(job_dir / o.path, password))
+                (
+                    o.suggestedName,
+                    output_check.fingerprint(
+                        job_dir / o.path, _output_format(manifest, case["params"], o.path), password
+                    ),
+                )
                 for o in result.outputs
             ]
         )
@@ -246,11 +319,26 @@ def test_repeat_runs_are_equivalent(
 
 def test_kit_covers_every_shipping_adapter() -> None:
     assert set(IDS) >= {
+        "image-convert",
+        "images-to-pdf",
+        "pdf-to-image",
         "pdf-merge",
         "pdf-split",
         "pdf-organize",
         "pdf-protect",
         "pdf-watermark",
         "pdf-redact",
+        "pdf-compress",
+        "pdf-page-numbers",
+        "image-edit",
+        "image-compress",
+        "images-to-gif",
+        "audio-join",
+        "audio-edit",
+        "video-join",
+        "video-edit",
+        "video-frames",
+        "data-combine",
+        "data-split",
     }
     assert sys.version_info >= (3, 12)

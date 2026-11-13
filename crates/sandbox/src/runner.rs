@@ -6,7 +6,7 @@
 //!
 //! The worker inherits stdin, stdout and stderr, so the protocol flows
 //! straight between it and the core. Every 50 ms the runner sums the
-//! resident memory of the worker and its descendants (an RSS watchdog: spec
+//! memory of the worker and its descendants (an RSS watchdog: spec
 //! 9.2, since `RLIMIT_AS` is unreliable on macOS). Over the limit, it kills
 //! them and writes a protocol `error` with `E_RESOURCE_MEMORY`, which the
 //! scheduler treats like any worker error (retry once, alone, larger).
@@ -17,74 +17,104 @@
 //! It runs as `converter-sandbox-run`, or as the desktop app itself started
 //! with `--sandbox-run` (so releases ship no extra binary).
 
+use std::io::Write;
 use std::process::ExitCode;
+
+pub(crate) const EX_USAGE: u8 = 64;
+pub(crate) const EX_UNAVAILABLE: u8 = 69;
+pub(crate) const KILLED_FOR_MEMORY: u8 = 137;
+
+pub(crate) struct Args {
+    pub memory_limit: u64,
+    pub job_id: String,
+    /// Processes the worker may run at once, itself included. Windows
+    /// enforces it with the Job Object; macOS limits what may be executed
+    /// and Linux gives each worker its own PID namespace instead.
+    #[cfg_attr(unix, allow(dead_code))]
+    pub max_processes: u32,
+    pub program: Vec<String>,
+}
+
+fn parse(args: Vec<String>) -> Option<Args> {
+    let mut args = args.into_iter();
+    let mut memory_limit = None;
+    let mut job_id = None;
+    let mut max_processes = 1;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--memory-limit" => memory_limit = args.next()?.parse().ok(),
+            "--job-id" => job_id = args.next(),
+            "--max-processes" => max_processes = args.next()?.parse().ok().filter(|n| *n >= 1)?,
+            "--" => break,
+            _ => return None,
+        }
+    }
+    let program: Vec<String> = args.collect();
+    let job_id = job_id?;
+    let valid_id = !job_id.is_empty()
+        && job_id.len() <= 64
+        && job_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !valid_id || program.is_empty() {
+        return None;
+    }
+    Some(Args {
+        memory_limit: memory_limit?,
+        job_id,
+        max_processes,
+        program,
+    })
+}
 
 /// Runs the runner with these arguments (without the program name or any
 /// prefix such as `--sandbox-run`).
-#[cfg(unix)]
 pub fn main_with(args: Vec<String>) -> ExitCode {
-    unix::main(args)
+    let Some(args) = parse(args) else {
+        eprintln!(
+            "usage: converter-sandbox-run --memory-limit N --job-id ID [--max-processes N] -- PROGRAM ..."
+        );
+        return ExitCode::from(EX_USAGE);
+    };
+    #[cfg(unix)]
+    return unix::main(args);
+    #[cfg(windows)]
+    return crate::windows::run(args);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = args;
+        eprintln!("sandbox runner: no sandbox on this platform");
+        ExitCode::from(EX_UNAVAILABLE)
+    }
 }
 
-#[cfg(not(unix))]
-pub fn main_with(_: Vec<String>) -> ExitCode {
-    eprintln!("sandbox runner: no sandbox on this platform yet");
-    ExitCode::from(70)
+/// The protocol `error` the scheduler sees when the worker was killed for memory.
+pub(crate) fn report_memory(job_id: &str, limit: u64) {
+    let line = serde_json::json!({
+        "v": 1,
+        "type": "error",
+        "jobId": job_id,
+        "code": "E_RESOURCE_MEMORY",
+        "retryable": true,
+        "detail": { "limitBytes": limit },
+    });
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 #[cfg(unix)]
 mod unix {
-    use std::io::Write;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::{Command, ExitCode};
     use std::thread;
     use std::time::Duration;
 
+    use super::{report_memory, Args, EX_UNAVAILABLE, KILLED_FOR_MEMORY};
+
     const POLL: Duration = Duration::from_millis(50);
-    const EX_USAGE: u8 = 64;
-    const EX_UNAVAILABLE: u8 = 69;
-    const KILLED_FOR_MEMORY: u8 = 137;
 
-    struct Args {
-        memory_limit: u64,
-        job_id: String,
-        program: Vec<String>,
-    }
-
-    fn parse(args: Vec<String>) -> Option<Args> {
-        let mut args = args.into_iter();
-        let mut memory_limit = None;
-        let mut job_id = None;
-        while let Some(a) = args.next() {
-            match a.as_str() {
-                "--memory-limit" => memory_limit = args.next()?.parse().ok(),
-                "--job-id" => job_id = args.next(),
-                "--" => break,
-                _ => return None,
-            }
-        }
-        let program: Vec<String> = args.collect();
-        let job_id = job_id?;
-        let valid_id = !job_id.is_empty()
-            && job_id.len() <= 64
-            && job_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if !valid_id || program.is_empty() {
-            return None;
-        }
-        Some(Args {
-            memory_limit: memory_limit?,
-            job_id,
-            program,
-        })
-    }
-
-    pub fn main(args: Vec<String>) -> ExitCode {
-        let Some(args) = parse(args) else {
-            eprintln!("usage: converter-sandbox-run --memory-limit N --job-id ID -- PROGRAM ...");
-            return ExitCode::from(EX_USAGE);
-        };
+    pub fn main(args: Args) -> ExitCode {
         let mut cmd = Command::new(&args.program[0]);
         cmd.args(&args.program[1..]);
         let limit = args.memory_limit;
@@ -145,20 +175,6 @@ mod unix {
         }
     }
 
-    fn report_memory(job_id: &str, limit: u64) {
-        let line = serde_json::json!({
-            "v": 1,
-            "type": "error",
-            "jobId": job_id,
-            "code": "E_RESOURCE_MEMORY",
-            "retryable": true,
-            "detail": { "limitBytes": limit },
-        });
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}");
-        let _ = out.flush();
-    }
-
     /// `root` and every process below it, parents first.
     fn descendants(root: i32) -> Vec<i32> {
         let mut out = vec![root];
@@ -185,22 +201,24 @@ mod unix {
         buf
     }
 
+    /// The process's physical footprint: its private and compressed pages,
+    /// what Activity Monitor shows as Memory. Resident size would also count
+    /// the shared system frameworks a GUI engine maps (LibreOffice links
+    /// AppKit), which cost nothing extra and roughly double its reading.
     #[cfg(target_os = "macos")]
     fn resident_bytes(pid: i32) -> u64 {
-        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
-        // SAFETY: `info` is valid for `size` bytes.
-        let n = unsafe {
-            libc::proc_pidinfo(
+        // SAFETY: zeroed is a valid rusage_info_v2 (plain integers).
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid RUSAGE_INFO_V2 buffer for the call.
+        let rc = unsafe {
+            libc::proc_pid_rusage(
                 pid,
-                libc::PROC_PIDTASKINFO,
-                0,
-                (&mut info as *mut libc::proc_taskinfo).cast(),
-                size,
+                libc::RUSAGE_INFO_V2,
+                (&mut info as *mut libc::rusage_info_v2).cast::<libc::rusage_info_t>(),
             )
         };
-        if n == size {
-            info.pti_resident_size
+        if rc == 0 {
+            info.ri_phys_footprint
         } else {
             0
         }

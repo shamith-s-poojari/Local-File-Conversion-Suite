@@ -63,6 +63,11 @@ export const ERRORS: Record<string, Message> = {
     why: "Independent checks found content that might still be recoverable.",
     todo: "You can try again with “turn affected pages into images”. Text on those pages will be lost.",
   },
+  E_NO_TEXT: {
+    what: "There's no text in this PDF to convert.",
+    why: "Its pages are pictures of text, probably scans, so there are no words to pull out.",
+    todo: "Convert it to Word, which keeps the pictures, or to images instead.",
+  },
   E_INTERNAL: {
     what: "Something unexpected went wrong.",
     todo: "Try again. If it keeps happening, please report it.",
@@ -88,6 +93,26 @@ export const WARNINGS: Record<string, string> = {
   REDACTED_TEXT_REMAINS_ELSEWHERE: "Text you covered also appears elsewhere in the document.",
   GLYPH_UNSUPPORTED: "Some characters can't be shown in the watermark font and appear as “?”.",
   W_LARGE_JOB: "This job is larger than the memory budget, so it runs on its own.",
+  TRANSPARENCY_FLATTENED: "Transparent areas were filled with a solid colour, because the new format has no transparency.",
+  ANIMATION_FLATTENED: "Only the first frame of an animation was kept.",
+  IMAGE_DOWNSCALED: "Some images were made smaller to fit the size or resolution you chose.",
+  COLORS_REDUCED: "Colours were reduced to 256 at most: a GIF can hold no more, and it makes a PNG smaller.",
+  METADATA_DROPPED: "Some details stored in the file (tags or properties) weren't kept.",
+  AUDIO_RESAMPLED: "The audio was resampled to a rate the new format supports.",
+  AUDIO_DOWNMIXED: "Surround sound was mixed down to fewer channels.",
+  STREAMS_DROPPED: "Extra tracks (cover art, subtitles or other audio) weren't kept.",
+  LAYOUT_APPROXIMATED: "The layout was rebuilt and may differ from the original. Check the result.",
+  FORMULAS_DROPPED: "Formulas were replaced by their calculated values.",
+  SHEETS_SPLIT: "Each sheet became its own file.",
+  ONLY_FIRST_SHEET: "Only the first sheet was converted.",
+  IMAGES_DROPPED: "Pictures weren't kept, because the new format holds text only.",
+  EMBEDDED_FONTS_MISSING: "Some fonts aren't installed on this computer, so similar ones were used.",
+  NESTED_DATA_FLATTENED: "Values with their own structure (lists or objects) were written as JSON text in a single cell.",
+  COMMENTS_DROPPED: "Comments in the file weren't kept: the new format has no place for them.",
+  REENCODED: "The files didn't match, so they were re-encoded to join them. This takes longer and loses a little quality.",
+  KEPT_ORIGINAL: "Some files were already as small as they could get, so they were kept unchanged.",
+  TARGET_NOT_REACHED: "Some files couldn't get under the size you chose. They were made as small as possible.",
+  COLUMNS_MISMATCHED: "The files had different columns. Missing values were left empty.",
   W_UNKNOWN: "The engine reported an unusual warning.",
 };
 
@@ -120,4 +145,24 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** How to install an engine the app looks for (ADR 0003), in this OS's
+ * usual way. The app finds it on its next start. */
+export function installHint(engine: "ffmpeg" | "libreoffice", platform: string | undefined): string {
+  const name = engine === "ffmpeg" ? "FFmpeg" : "LibreOffice";
+  const command: Record<string, Record<string, string>> = {
+    ffmpeg: {
+      macos: "brew install ffmpeg",
+      windows: "winget install Gyan.FFmpeg",
+      linux: "sudo apt install ffmpeg",
+    },
+    libreoffice: {
+      macos: "brew install --cask libreoffice",
+      windows: "winget install TheDocumentFoundation.LibreOffice",
+      linux: "sudo apt install libreoffice",
+    },
+  };
+  const cmd = platform ? command[engine]?.[platform] : undefined;
+  return cmd ? `Needs ${name}: install it with \u201c${cmd}\u201d, then reopen the app.` : `Needs ${name}.`;
 }

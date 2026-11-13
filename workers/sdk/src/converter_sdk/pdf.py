@@ -270,6 +270,32 @@ def copy_outline(
     return dropped
 
 
+# --------------------------------------------------------------- placement
+
+
+def displayed_box(page: pikepdf.Page) -> tuple[float, float, float, float, int]:
+    """(x0, y0, width, height, rotate) of the visible area in user space."""
+    box = page.cropbox
+    x0, x1 = sorted((float(box[0]), float(box[2])))
+    y0, y1 = sorted((float(box[1]), float(box[3])))
+    rotate = int(page.obj.get(pikepdf.Name.Rotate, 0)) % 360
+    rotate = rotate - rotate % 90
+    return x0, y0, x1 - x0, y1 - y0, rotate
+
+
+def placement(x0: float, y0: float, w: float, h: float, rotate: int) -> list[float]:
+    """The ``cm`` matrix mapping displayed coordinates (origin at the visible
+    bottom-left) into page user space, for a clockwise /Rotate."""
+    if rotate == 90:
+        return [0, 1, -1, 0, x0 + w, y0]
+    if rotate == 180:
+        return [-1, 0, 0, -1, x0 + w, y0 + h]
+    if rotate == 270:
+        return [0, -1, 1, 0, x0, y0 + h]
+    return [1, 0, 0, 1, x0, y0]
+
+
+
 # ------------------------------------------------------------------- saving
 
 
@@ -280,6 +306,7 @@ def save_pdf(
     *,
     encryption: pikepdf.Encryption | None = None,
     check_password: str = "",
+    recompress_flate: bool = False,
 ) -> int:
     """Save with the shared rules in spec 13.2, then check the result.
 
@@ -304,6 +331,7 @@ def save_pdf(
         deterministic_id=encryption is None,
         encryption=encryption if encryption is not None else False,
         fix_metadata_version=False,
+        recompress_flate=recompress_flate,
     )
     problems: list[str] | None
     try:

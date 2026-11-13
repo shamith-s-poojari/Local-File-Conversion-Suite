@@ -1,0 +1,21 @@
+cases:
+  - name: report-to-word
+    inputs: [doc-pdf-report]
+    params: { to: docx }
+    expect: { outputs: 1 }
+  - name: report-to-excel
+    inputs: [doc-pdf-report]
+    params: { to: xlsx }
+    expect: { outputs: 1 }
+  - name: report-to-markdown
+    inputs: [doc-pdf-report]
+    params: { to: md }
+  - name: pages-to-text
+    inputs: [text-3, text-1]
+    params: { to: txt }
+    expect: { outputs: 2 }
+negative:
+  params: { to: md }
+cancel:
+  inputs: [big]
+  params: { to: docx }

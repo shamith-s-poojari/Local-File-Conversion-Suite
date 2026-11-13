@@ -1,23 +1,48 @@
 # Known limits
 
-What the app can't do, or does only partly, as of Phase 1. Each tool's README has the details; this page collects them for users and reviewers.
+What the app can't do, or does only partly. Each tool's README has the details; this page collects them for users and reviewers.
 
 ## Platforms
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Sandbox | Works (Seatbelt) | Written, not yet verified | **Not implemented: processing is off** |
+| Sandbox | Works (Seatbelt) | Written (bubblewrap), not yet run on Linux | Written (AppContainer and Job Object), compile-checked only |
+| FFmpeg, LibreOffice | Found in Homebrew and `/Applications` | Found in the usual package paths | Found in WinGet, Scoop, Chocolatey and `Program Files` |
 | Installer | Not built yet | Not built yet | Not built yet |
 
-Packaging, signing and notarization (T21) are not done, so the app only runs from a development checkout.
+Packaging, signing and notarization (T21) are not done, so the app only runs from a development checkout. FFmpeg and LibreOffice aren't bundled: conversions that need them show as unavailable, with the install command, until they're installed.
+
+If the sandbox self-test fails on a system, processing stays off there. The app never runs a conversion unsandboxed.
 
 ## Files
 
-- **Only PDF files can be processed** in this version. Other formats are recognised and explained, but no tool accepts them yet.
 - **Limits:** 5,000 pages per file and 200 files per selection.
 - **One open password per job.** Files with different open passwords must be unlocked one at a time first.
 - **Online-only files** (OneDrive, iCloud Drive and similar) are downloaded only after you agree.
 - **Repaired files:** a damaged PDF that can be repaired on opening may still be refused if the damage survives the rewrite (`E_INPUT_CORRUPT`).
+
+## Conversions
+
+- **Mixed selections** (Word files and photos to PDF, songs and videos to MP3) use each kind's usual settings. Convert one kind at a time to change them.
+- **Scanned PDFs** have no text to extract. Converting one to text, Markdown, HTML or Excel fails with `E_NO_TEXT`; Word or images keep the page images.
+- **Best-effort conversions** (PDF to Word, PowerPoint or Excel, among others) rebuild structure from the page layout and are hidden until you ask for them. Check the result.
+- **Data files:** values inside values (a list in a JSON record) become JSON text in a spreadsheet cell; Excel formulas become their last saved values; YAML comments are dropped. Excel to Markdown isn't offered.
+- **Audio and video:** subtitles, data tracks and every audio track after the first are dropped when converting video (`STREAMS_DROPPED`). Converting to a lossy format (MP3, AAC, Opus, WebM) re-encodes, which loses a little quality each time.
+- **Office documents** depend on the installed LibreOffice: fonts the system lacks are substituted, and complex layouts may shift.
+
+## Tools for images, audio, video and data
+
+- **Image tools** take PNG, JPG, WebP, GIF, BMP, TIFF and AVIF. Convert HEIC, SVG and ICO first. Editing a JPG, lossy WebP or AVIF re-encodes it at high quality.
+- **Compress images** aims for the size you choose but stops at 64 pixels on the shorter side (`TARGET_NOT_REACHED`). Camera details are always removed, and animated WebP keeps only its first frame.
+- **Join audio** drops tags, cover art and extra tracks. Every file is resampled to the highest sample rate among them, at most 48 kHz.
+- **Join video** copies matching clips without re-encoding. Clips that differ are fitted into the first clip's frame and re-encoded, which takes as long as converting them (`REENCODED`).
+- **Rotate or change speed** re-encodes the whole video, and so does changing audio speed or volume.
+- **Combine spreadsheets** stacks every sheet of a workbook; empty sheets are skipped. **Split** uses a workbook's first sheet only, and makes at most 1,000 files from one input.
+
+## PDF compression and page numbers
+
+- **Compress PDF** shrinks only 8-bit grey or colour pictures. CMYK, palette and spot-colour pictures, 1-bit scans, and JBIG2, CCITT or JPEG 2000 data are left alone, so some files barely shrink. If nothing gets smaller, the original is kept (`KEPT_ORIGINAL`).
+- **Page numbers** show Western European characters only; others appear as "?" (`GLYPH_UNSUPPORTED`).
 
 ## Tools
 

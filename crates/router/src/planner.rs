@@ -166,11 +166,23 @@ impl Planner {
     /// one-hop cells, and through PDF for `²` cells. Without this, JPG → WEBP
     /// could route JPG → PNG → WEBP and beat the matrix's L with an E,
     /// changing what the product promises.
+    ///
+    /// A `²` cell also takes a direct edge when an adapter declares one (an
+    /// office adapter that renders through PDF internally): one job instead
+    /// of two, with the same intermediate.
     pub fn best_for_cell(&self, from: Format, to: Format, cell: matrix::Cell) -> Option<Plan> {
         self.plans(from, to).into_iter().find(|p| match cell.hops {
             1 => p.hops.len() == 1,
-            _ => p.hops.len() == usize::from(cell.hops) && p.hops[0].to == Format::Pdf,
+            _ => {
+                p.hops.len() == 1
+                    || (p.hops.len() == usize::from(cell.hops) && p.hops[0].to == Format::Pdf)
+            }
         })
+    }
+
+    /// The best direct (one-hop) plan, if an adapter declares the edge.
+    pub fn best_direct(&self, from: Format, to: Format) -> Option<Plan> {
+        self.plans(from, to).into_iter().find(|p| p.hops.len() == 1)
     }
 
     fn walk<'a>(
@@ -379,8 +391,22 @@ fn conversions_from(
 ) -> Vec<ConversionTarget> {
     let mut out = Vec::new();
     for to in Format::ALL {
-        let Some(cell) = matrix::offered(from, to) else {
-            continue;
+        let cell = if from.in_blueprint() && to.in_blueprint() {
+            match matrix::offered(from, to) {
+                Some(cell) => cell,
+                None => continue,
+            }
+        } else {
+            // ADR 0003: outside the blueprint matrix, a declared direct edge
+            // is the offer, at its declared tier.
+            match everything.best_direct(from, to) {
+                Some(plan) => matrix::Cell {
+                    tier: plan.tier,
+                    hops: 1,
+                    exact_with_text_layer: false,
+                },
+                None => continue,
+            }
         };
         let target =
             |plan: Option<Plan>, unavailable: Option<Unavailable>, tier: Tier| ConversionTarget {

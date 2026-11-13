@@ -228,7 +228,12 @@ BUILDERS = {
 
 
 def build(name: str, directory: Path) -> Path:
-    """Build corpus file ``name`` in ``directory`` (cached by name)."""
+    """Build corpus file ``name`` in ``directory`` (cached by name). Names
+    that aren't PDFs come from ``files`` (images, audio, video, documents)."""
+    if name not in BUILDERS:
+        from . import files  # noqa: PLC0415
+
+        return files.build(name, directory)
     path = directory / f"{name}.pdf"
     if not path.exists():
         directory.mkdir(parents=True, exist_ok=True)

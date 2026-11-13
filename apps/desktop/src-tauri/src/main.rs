@@ -103,6 +103,7 @@ fn run() {
             commands::get_targets,
             commands::get_registry,
             commands::create_job,
+            commands::create_conversion,
             commands::cancel_job,
             commands::request_preview,
             commands::get_page_text,

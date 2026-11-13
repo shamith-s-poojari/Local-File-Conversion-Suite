@@ -1,0 +1,12 @@
+id: audio-edit
+kind: operation
+title: Adjust volume, fade or speed
+workerClass: media
+inputs: { formats: [mp3, wav, flac, ogg, opus, m4a, aac, aiff], min: 1, max: 200 }
+outputs: { format: same, cardinality: many }
+fidelity: L
+fidelityNotes: [STREAMS_DROPPED]
+limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 180, diskFactor: 12.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

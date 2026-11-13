@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Rotate, flip or resize images",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rotate": {
+      "title": "Rotate",
+      "type": "integer",
+      "enum": [0, 90, 180, 270],
+      "default": 0,
+      "x-labels": { "0": "Don't rotate", "90": "90° clockwise", "180": "180°", "270": "90° anticlockwise" }
+    },
+    "flip": {
+      "title": "Flip",
+      "enum": ["none", "horizontal", "vertical"],
+      "default": "none",
+      "x-labels": { "none": "Don't flip", "horizontal": "Mirror left to right", "vertical": "Upside down" }
+    },
+    "resize": {
+      "title": "Resize",
+      "enum": ["none", "percent", "fit"],
+      "default": "none",
+      "x-labels": { "none": "Keep the size", "percent": "By percentage", "fit": "Fit inside a width and height" }
+    },
+    "percent": {
+      "title": "Percentage",
+      "description": "100 keeps the size. Below 100 shrinks, above enlarges.",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 400,
+      "default": 50,
+      "x-ui": "slider",
+      "x-when": { "resize": ["percent"] }
+    },
+    "width": {
+      "title": "Width (px)",
+      "type": "integer",
+      "minimum": 16,
+      "maximum": 16384,
+      "default": 1920,
+      "x-when": { "resize": ["fit"] }
+    },
+    "height": {
+      "title": "Height (px)",
+      "description": "The picture keeps its proportions and is never enlarged.",
+      "type": "integer",
+      "minimum": 16,
+      "maximum": 16384,
+      "default": 1080,
+      "x-when": { "resize": ["fit"] }
+    },
+    "grayscale": {
+      "title": "Black and white",
+      "type": "boolean",
+      "default": false
+    },
+    "stripMetadata": {
+      "title": "Remove camera details and location",
+      "description": "Drops EXIF data such as GPS position, camera model and the date taken.",
+      "type": "boolean",
+      "default": false
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

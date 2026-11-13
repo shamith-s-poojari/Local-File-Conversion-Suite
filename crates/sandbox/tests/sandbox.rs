@@ -4,7 +4,8 @@
 //!
 //! Needs the workspace virtualenv (`uv sync`). On Linux it also needs
 //! bubblewrap able to create namespaces; without either it prints a note
-//! and passes, like the scheduler's tests. On macOS the sandbox must work.
+//! and passes, like the scheduler's tests. On macOS and Windows the sandbox
+//! must work.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +22,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn launcher() -> Option<SandboxLauncher> {
-    let python = repo_root().join(".venv/bin/python");
+    let python = if cfg!(windows) {
+        repo_root().join(".venv/Scripts/python.exe")
+    } else {
+        repo_root().join(".venv/bin/python")
+    };
     if !python.is_file() {
         eprintln!("skipped: no .venv; run `uv sync`");
         return None;
@@ -36,14 +41,20 @@ fn launcher() -> Option<SandboxLauncher> {
 }
 
 fn available(l: &SandboxLauncher, scratch: &Path) -> bool {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         return true; // Must work here: no skipping.
     }
     // Linux: bubblewrap may be blocked (C7); a failed probe *report* still
     // counts, but not being able to start at all means "unavailable".
     let job = scratch.join("check");
     std::fs::create_dir_all(job.join("work")).unwrap();
-    let mut cmd = match l.wrap("j_check", &job, 256 << 20, vec!["/bin/true".into()]) {
+    let argv = vec![
+        l.config().python.clone().into_os_string(),
+        "-I".into(),
+        "-c".into(),
+        "pass".into(),
+    ];
+    let mut cmd = match l.wrap("j_check", &job, 256 << 20, argv) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("skipped: {e}");
@@ -64,7 +75,10 @@ fn probe_passes() {
     if !available(&l, tmp.path()) {
         return;
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap();
     let report = probe::self_test(&l, tmp.path(), &home).unwrap();
     eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
     let failed: Vec<_> = report.attempts.iter().filter(|a| !a.passed).collect();
@@ -111,17 +125,16 @@ fn a_job_runs_end_to_end_inside_the_sandbox() {
             ..RunnerConfig::default()
         },
     );
-    let spec = JobSpec {
-        job: id.clone(),
-        adapter_id: "dev-fake".into(),
-        pool: "pdf".into(),
-        output_format: Format::Pdf,
-        timeout_base_s: 60,
-        timeout_s_per_mb: 1.0,
-        no_progress_s: 30,
-        params: json!({"pages": 3, "delayMs": 1}),
-        secrets: None,
-    };
+    let spec = JobSpec::single(
+        id.clone(),
+        "dev-fake",
+        "pdf",
+        Format::Pdf,
+        1,
+        (60, 1.0, 30),
+        json!({"pages": 3, "delayMs": 1}),
+        None,
+    );
     runner.start(spec).join().unwrap();
     let job = store
         .snapshot()

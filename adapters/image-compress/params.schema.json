@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Compress images",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "targetKb": {
+      "title": "Make each image smaller than",
+      "description": "Quality is lowered first, then the size if that isn't enough. Camera details are removed.",
+      "type": "integer",
+      "enum": [100, 200, 500, 1000, 2000],
+      "default": 500,
+      "x-labels": { "100": "100 KB", "200": "200 KB", "500": "500 KB", "1000": "1 MB", "2000": "2 MB" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

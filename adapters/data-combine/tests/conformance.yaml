@@ -1,0 +1,16 @@
+cases:
+  - name: csv-and-excel-rows
+    inputs: [doc-csv, doc-xlsx]
+    params: { to: xlsx }
+    expect: { outputs: 1 }
+  - name: two-csv-to-csv
+    inputs: [doc-csv, doc-csv]
+    params: { to: csv, addSource: true }
+    expect: { outputs: 1 }
+negative:
+  params: { to: xlsx }
+  inputs: [doc-xlsx, doc-csv]
+  bad: [corrupt-xlsx, truncated-xlsx]
+cancel:
+  inputs: [doc-csv-long, doc-csv-long, doc-csv-long]
+  params: { to: xlsx }

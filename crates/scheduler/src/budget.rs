@@ -15,6 +15,10 @@ pub struct SystemMemory;
 
 impl MemoryProbe for SystemMemory {
     fn available_bytes(&self) -> u64 {
+        #[cfg(target_os = "macos")]
+        if let Some(bytes) = macos_available() {
+            return bytes;
+        }
         let sys = System::new_with_specifics(
             RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
         );
@@ -24,6 +28,41 @@ impl MemoryProbe for SystemMemory {
             sys.total_memory(),
         )
     }
+}
+
+/// Memory macOS can hand out without paging anything in use: free,
+/// inactive and speculative pages. sysinfo subtracts the compressor's pages
+/// as well, which on a busy 8 GB Mac reads as 0 while gigabytes of inactive
+/// pages could be reclaimed at once.
+#[cfg(target_os = "macos")]
+fn macos_available() -> Option<u64> {
+    use std::sync::OnceLock;
+    static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+    // SAFETY: returns this task's send right to the host port; kept for the
+    // process's life, so it's taken once.
+    #[allow(deprecated)]
+    let host = *HOST.get_or_init(|| unsafe { libc::mach_host_self() });
+    // SAFETY: zeroed is a valid vm_statistics64 (plain integers).
+    let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: `stats` holds HOST_VM_INFO64_COUNT integers, as `count` says.
+    let rc = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut stats as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
+    // SAFETY: plain sysconf query.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if rc != libc::KERN_SUCCESS || page <= 0 {
+        return None;
+    }
+    let pages = u64::from(stats.free_count)
+        + u64::from(stats.inactive_count)
+        + u64::from(stats.speculative_count);
+    Some(pages * page as u64)
 }
 
 /// Replaces an implausible "available" reading with a conservative one.

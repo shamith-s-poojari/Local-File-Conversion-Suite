@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Save frames as pictures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": {
+      "title": "Save as",
+      "enum": ["jpg", "png"],
+      "default": "jpg",
+      "x-labels": { "jpg": "JPG (smaller)", "png": "PNG (exact)" }
+    },
+    "mode": {
+      "title": "Which frames",
+      "enum": ["count", "interval"],
+      "default": "count",
+      "x-labels": { "count": "A number of frames, spread evenly", "interval": "One every few seconds" }
+    },
+    "count": {
+      "title": "How many",
+      "type": "integer",
+      "enum": [1, 3, 5, 10, 20, 50],
+      "default": 5,
+      "x-when": { "mode": ["count"] }
+    },
+    "every": {
+      "title": "One every",
+      "type": "integer",
+      "enum": [1, 2, 5, 10, 30, 60],
+      "default": 5,
+      "x-labels": { "1": "1 second", "2": "2 seconds", "5": "5 seconds", "10": "10 seconds", "30": "30 seconds", "60": "Minute" },
+      "x-when": { "mode": ["interval"] }
+    },
+    "maxWidth": {
+      "title": "Size",
+      "type": "integer",
+      "enum": [0, 1920, 1280, 640],
+      "default": 0,
+      "x-labels": { "0": "Same as the video", "1920": "Up to 1920 px wide", "1280": "Up to 1280 px wide", "640": "Up to 640 px wide" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import mimetypes
 import os
 import queue
 import re
@@ -216,6 +217,7 @@ class Worker:
             encryption=r.encryption,
             signed=r.signed,
             warnings=r.warnings or None,
+            media=r.media,
         )
 
     def _validate(self, ctx: JobContext, request: Validate) -> ValidateResult:
@@ -322,6 +324,22 @@ def _take_protocol_channel() -> tuple[Any, Any]:
     return proto_in, proto_out
 
 
+def _builtin_mime_types() -> None:
+    """Use Python's own MIME table, never the system's.
+
+    Libraries such as openpyxl call ``mimetypes.init()`` on import, which
+    reads ``/etc/mime.types`` and friends. Those files sit outside the
+    sandbox, so the read fails; and they differ between machines, which
+    would make outputs differ too. On Windows the registry plays the same
+    part, so it's skipped as well.
+    """
+    mimetypes.knownfiles = []
+    for name in ("_mimetypes_read_windows_registry", "_winreg"):
+        if hasattr(mimetypes, name):
+            setattr(mimetypes, name, None)
+    mimetypes.init()
+
+
 def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
     """Entry point for an adapter script: ``if __name__ == "__main__": run_main(MyAdapter)``."""
     args = sys.argv[1:] if argv is None else argv
@@ -330,6 +348,7 @@ def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
         sys.exit(EXIT_USAGE)
 
     proto_in, proto_out = _take_protocol_channel()
+    _builtin_mime_types()
 
     def read_line() -> bytes:
         # +2 leaves room for "\r\n"; anything longer is rejected by the parser.

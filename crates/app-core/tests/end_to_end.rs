@@ -27,9 +27,13 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some("--sandbox-run") {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
-    let python = repo().join(".venv/bin/python");
-    if !python.is_file() || !cfg!(target_os = "macos") {
-        println!("end_to_end: skipped (needs `uv sync`, and macOS until Linux CI proves bwrap)");
+    let python = if cfg!(windows) {
+        repo().join(".venv/Scripts/python.exe")
+    } else {
+        repo().join(".venv/bin/python")
+    };
+    if !python.is_file() || !cfg!(any(target_os = "macos", windows)) {
+        println!("end_to_end: skipped (needs `uv sync`, and macOS or Windows until Linux CI proves bwrap)");
         return ExitCode::SUCCESS;
     }
     scenario(&python);
@@ -118,7 +122,11 @@ fn scenario(python: &Path) {
     // Processing is refused until the self-test passes.
     let early = app.create_job("pdf-merge", &[], json!({})).unwrap_err();
     assert_eq!(early.code, "E_SANDBOX_UNAVAILABLE");
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let home = PathBuf::from(
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .unwrap(),
+    );
     let report = app.self_test(&home);
     assert!(report.passed, "{report:#?}");
     assert!(app.get_diagnostics().processing_enabled);
@@ -271,6 +279,8 @@ fn scenario(python: &Path) {
         .unwrap_err();
     assert_eq!(bad.code, "E_PARAMS_INVALID");
 
+    conversions(&app, python, tmp.path());
+
     // Exit: workers stop and every job directory goes.
     app.remove_file(&ids[1]).unwrap();
     app.shutdown();
@@ -279,4 +289,518 @@ fn scenario(python: &Path) {
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
     assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+/// ADR 0003: conversions through the sandbox, image inspection and previews.
+fn conversions(app: &App, python: &Path, dir: &Path) {
+    let png = dir.join("photo.png");
+    let ok = Command::new(python)
+        .args([
+            "-I",
+            "-c",
+            &format!(
+                "from PIL import Image; Image.new('RGBA', (300, 200), (200, 30, 30, 128)).save({:?})",
+                png.to_str().unwrap()
+            ),
+        ])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "making a test PNG");
+    let pdf = dir.join("pages.pdf");
+    make_pdf(python, &pdf, 2);
+    let added = app.add_paths(vec![png, pdf]).unwrap();
+    let png_id = added[0].file.as_ref().unwrap().file_id.clone();
+    let pdf_id = added[1].file.as_ref().unwrap().file_id.clone();
+    assert!(added[0].file.as_ref().unwrap().actionable);
+
+    // An image is inspected and previewed by image-convert's worker.
+    let info = app.inspect_file(&png_id).unwrap();
+    let media = info.media.expect("image facts");
+    assert_eq!(media["width"], 300);
+    assert_eq!(media["kind"], "image");
+    let preview = app.request_preview(&png_id, 1, 72).unwrap();
+    assert!(preview.width_px > 0);
+
+    // Targets: PNG offers JPG (lossy) and WebP; PDF offers PNG pages.
+    let t = app.get_targets(std::slice::from_ref(&png_id)).unwrap();
+    let to: Vec<&str> = t.groups[0]
+        .conversions
+        .iter()
+        .map(|c| c.to.as_str())
+        .collect();
+    for f in ["jpg", "webp", "pdf", "gif", "tiff", "avif", "ico", "bmp"] {
+        assert!(to.contains(&f), "png → {f} missing from {to:?}");
+    }
+    assert!(!to.contains(&"png"));
+
+    // PNG → JPG.
+    let job = app
+        .create_conversion(std::slice::from_ref(&png_id), "jpg", json!({"quality": 80}))
+        .unwrap();
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "{:?}", done.error);
+    assert_eq!(app.suggested_name(&job).unwrap(), "photo.jpg");
+    let preview = app
+        .request_preview(&format!("{}:0", job.as_str()), 1, 72)
+        .unwrap();
+    assert!(preview.width_px > 0);
+    app.discard_job(&job).unwrap();
+
+    // PDF → PNG, one per page.
+    let job = app
+        .create_conversion(std::slice::from_ref(&pdf_id), "png", json!({"dpi": 72}))
+        .unwrap();
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "{:?}", done.error);
+    assert_eq!(done.outputs.len(), 2);
+    assert_eq!(done.outputs[1].suggested_name, "pages-page-2.png");
+    app.discard_job(&job).unwrap();
+
+    // A pair nothing offers is refused.
+    let bad = app
+        .create_conversion(std::slice::from_ref(&png_id), "mp3", json!({}))
+        .unwrap_err();
+    assert_eq!(bad.code, "E_INTERNAL");
+
+    app.remove_file(&png_id).unwrap();
+    app.remove_file(&pdf_id).unwrap();
+
+    tool_steps(app, python, dir);
+    media_steps(app, python, dir);
+    document_steps(app, python, dir);
+}
+
+/// Runs a tool on files; returns the outputs' suggested names.
+fn run_tool(app: &App, ids: &[String], tool: &str, params: serde_json::Value) -> Vec<String> {
+    let t = app.get_targets(ids).unwrap();
+    assert!(
+        t.operations.iter().any(|o| o.adapter == tool),
+        "{tool} not offered: {:?}",
+        t.operations
+    );
+    let job = app
+        .create_job(tool, ids, params)
+        .unwrap_or_else(|e| panic!("{tool}: {e:?}"));
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "{tool}: {:?}", done.error);
+    let names = done
+        .outputs
+        .iter()
+        .map(|o| o.suggested_name.clone())
+        .collect();
+    app.discard_job(&job).unwrap();
+    names
+}
+
+/// Makes files with a Python snippet; `{dir}` is the test folder.
+fn python_make(python: &Path, dir: &Path, code: &str) {
+    let ok = Command::new(python)
+        .args(["-I", "-c", &code.replace("{dir}", dir.to_str().unwrap())])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "making test files: {code}");
+}
+
+fn add(app: &App, paths: Vec<PathBuf>) -> Vec<String> {
+    app.add_paths(paths)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.file.expect("added").file_id)
+        .collect()
+}
+
+/// The tools for images, data and PDFs (ADR 0004), in the sandbox.
+fn tool_steps(app: &App, python: &Path, dir: &Path) {
+    python_make(
+        python,
+        dir,
+        "from PIL import Image\n\
+         Image.new('RGB', (300, 200), (200, 30, 30)).save('{dir}/red.jpg', quality=90)\n\
+         Image.new('RGBA', (300, 200), (30, 30, 200, 128)).save('{dir}/blue.png')",
+    );
+    let ids = add(app, vec![dir.join("red.jpg"), dir.join("blue.png")]);
+
+    // Each file keeps its format: one part per format.
+    let names = run_tool(app, &ids, "image-edit", json!({"rotate": 90}));
+    assert_eq!(names, ["red-edited.jpg", "blue-edited.png"]);
+    let names = run_tool(app, &ids, "image-compress", json!({"targetKb": 100}));
+    assert_eq!(names, ["red-compressed.jpg", "blue-compressed.png"]);
+    let names = run_tool(app, &ids, "images-to-gif", json!({"frameMs": 200}));
+    assert_eq!(names, ["animation.gif"]);
+    for id in &ids {
+        app.remove_file(id).unwrap();
+    }
+
+    // Data: a CSV and a workbook combined (the format is chosen), then split.
+    python_make(
+        python,
+        dir,
+        "import openpyxl\n\
+         open('{dir}/north.csv', 'w').write('city,sales\\nOslo,3\\nBergen,4\\n')\n\
+         wb = openpyxl.Workbook(); ws = wb.active\n\
+         ws.append(['sales', 'city']); ws.append([5, 'Rome']); ws.append([6, 'Oslo'])\n\
+         wb.save('{dir}/south.xlsx')",
+    );
+    let ids = add(app, vec![dir.join("north.csv"), dir.join("south.xlsx")]);
+    let names = run_tool(app, &ids, "data-combine", json!({"to": "csv"}));
+    assert_eq!(names, ["combined.csv"]);
+    let names = run_tool(
+        app,
+        &ids,
+        "data-combine",
+        json!({"to": "xlsx", "mode": "sheets"}),
+    );
+    assert_eq!(names, ["combined.xlsx"]);
+    let names = run_tool(
+        app,
+        &ids,
+        "data-split",
+        json!({"mode": "column", "column": "city"}),
+    );
+    assert_eq!(
+        names,
+        [
+            "north-Oslo.csv",
+            "north-Bergen.csv",
+            "south-Rome.xlsx",
+            "south-Oslo.xlsx"
+        ]
+    );
+    for id in &ids {
+        app.remove_file(id).unwrap();
+    }
+
+    // PDF: compress and number.
+    let pdf = dir.join("memo.pdf");
+    make_pdf(python, &pdf, 3);
+    let ids = add(app, vec![pdf]);
+    let names = run_tool(app, &ids, "pdf-compress", json!({"level": "strong"}));
+    assert_eq!(names, ["memo-compressed.pdf"]);
+    let names = run_tool(app, &ids, "pdf-page-numbers", json!({"pages": "2-3"}));
+    assert_eq!(names, ["memo-numbered.pdf"]);
+    app.remove_file(&ids[0]).unwrap();
+}
+
+/// FFmpeg inside the sandbox: only adapters that list it get the grant.
+fn media_steps(app: &App, python: &Path, dir: &Path) {
+    if !app.get_diagnostics().engines.iter().any(|e| e == "ffmpeg") {
+        println!("end_to_end: FFmpeg not installed, media steps skipped");
+        return;
+    }
+    let wav = dir.join("tone.wav");
+    let ok = Command::new(python)
+        .args([
+            "-I",
+            "-c",
+            &format!(
+                "import math, struct, wave\n\
+                 w = wave.open({:?}, 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(44100)\n\
+                 w.writeframes(b''.join(struct.pack('<h', int(9000*math.sin(n/10))) for n in range(88200)))\n\
+                 w.close()",
+                wav.to_str().unwrap()
+            ),
+        ])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "making a test WAV");
+    let added = app.add_paths(vec![wav]).unwrap();
+    let id = added[0].file.as_ref().unwrap().file_id.clone();
+    let info = app.inspect_file(&id).unwrap();
+    let media = info.media.expect("audio facts");
+    assert_eq!(media["kind"], "audio");
+    assert_eq!(media["sampleRate"], 44100);
+    let waveform = app.request_preview(&id, 1, 72).unwrap();
+    assert_eq!(waveform.width_px, 576);
+
+    let job = app
+        .create_conversion(std::slice::from_ref(&id), "mp3", json!({"bitrate": 128}))
+        .unwrap();
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "{:?}", done.error);
+    assert_eq!(app.suggested_name(&job).unwrap(), "tone.mp3");
+    let preview = app.request_preview(&format!("{}:0", job.as_str()), 1, 72);
+    assert!(preview.is_ok(), "output waveform: {preview:?}");
+    app.discard_job(&job).unwrap();
+
+    // The MP3 back to video isn't offered; to FLAC is.
+    let t = app.get_targets(std::slice::from_ref(&id)).unwrap();
+    let to: Vec<&str> = t.groups[0]
+        .conversions
+        .iter()
+        .map(|c| c.to.as_str())
+        .collect();
+    assert!(to.contains(&"flac") && !to.contains(&"mp4"), "{to:?}");
+
+    // A song and a video to MP3 together: audio-convert and video-convert
+    // as two parts of one job.
+    let mp4 = dir.join("clip.mp4");
+    let made = ffmpeg_path().is_some_and(|ffmpeg| {
+        Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=10:duration=1",
+            ])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+            ])
+            .args(["yuv420p", "-c:a", "aac", "-shortest"])
+            .arg(&mp4)
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+    if made {
+        let video = app.add_paths(vec![mp4]).unwrap()[0]
+            .file
+            .as_ref()
+            .unwrap()
+            .file_id
+            .clone();
+        assert_eq!(
+            convert_all(app, &[id.clone(), video.clone()], "mp3"),
+            ["tone.mp3", "clip.mp3"]
+        );
+
+        // The audio and video tools (ADR 0004).
+        let names = run_tool(
+            app,
+            std::slice::from_ref(&id),
+            "audio-edit",
+            json!({"volume": -6}),
+        );
+        assert_eq!(names, ["tone-edited.wav"]);
+        let mixed = app.get_targets(&[id.clone(), video.clone()]).unwrap();
+        assert!(
+            !mixed.operations.iter().any(|o| o.adapter == "video-frames"),
+            "a song isn't a video"
+        );
+        std::fs::copy(dir.join("tone.wav"), dir.join("tone2.wav")).unwrap();
+        std::fs::copy(dir.join("clip.mp4"), dir.join("clip2.mp4")).unwrap();
+        let more = add(app, vec![dir.join("tone2.wav"), dir.join("clip2.mp4")]);
+        let names = run_tool(
+            app,
+            &[id.clone(), more[0].clone()],
+            "audio-join",
+            json!({"to": "mp3", "gap": 1}),
+        );
+        assert_eq!(names, ["joined.mp3"]);
+        let clips = [video.clone(), more[1].clone()];
+        let names = run_tool(app, &clips, "video-join", json!({"to": "mp4"}));
+        assert_eq!(names, ["joined.mp4"]);
+        let names = run_tool(app, &clips[..1], "video-edit", json!({"rotate": 90}));
+        assert_eq!(names, ["clip-edited.mp4"]);
+        let names = run_tool(
+            app,
+            &clips[..1],
+            "video-frames",
+            json!({"to": "jpg", "count": 3}),
+        );
+        assert_eq!(names.len(), 3);
+        for f in more {
+            app.remove_file(&f).unwrap();
+        }
+        app.remove_file(&video).unwrap();
+    } else {
+        println!("end_to_end: couldn't make a test video, mixed media step skipped");
+    }
+    app.remove_file(&id).unwrap();
+}
+
+/// FFmpeg on PATH or where Homebrew puts it.
+fn ffmpeg_path() -> Option<PathBuf> {
+    let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ])
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file())
+}
+
+/// Runs one conversion to success and returns the outputs' suggested names.
+/// The core re-sniffs every output, so success also means each one is
+/// recognised as the format it claims to be.
+fn convert(app: &App, id: &str, to: &str, params: serde_json::Value) -> Vec<String> {
+    let job = app
+        .create_conversion(&[id.to_owned()], to, params)
+        .unwrap_or_else(|e| panic!("→ {to}: {e:?}"));
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "→ {to}: {:?}", done.error);
+    let names = done
+        .outputs
+        .iter()
+        .map(|o| o.suggested_name.clone())
+        .collect();
+    app.discard_job(&job).unwrap();
+    names
+}
+
+/// Converts several files in one job; returns the outputs' suggested names.
+fn convert_all(app: &App, ids: &[String], to: &str) -> Vec<String> {
+    let t = app.get_targets(ids).unwrap();
+    assert!(
+        t.shared.iter().any(|s| s.to.as_str() == to),
+        "all → {to} not offered: {:?}",
+        t.shared
+    );
+    let job = app
+        .create_conversion(ids, to, json!({}))
+        .unwrap_or_else(|e| panic!("all → {to}: {e:?}"));
+    let done = wait_terminal(app, &job);
+    assert_eq!(
+        done.state,
+        JobState::Succeeded,
+        "all → {to}: {:?}",
+        done.error
+    );
+    let names = done
+        .outputs
+        .iter()
+        .map(|o| o.suggested_name.clone())
+        .collect();
+    app.discard_job(&job).unwrap();
+    names
+}
+
+fn targets_of(app: &App, id: &str) -> Vec<String> {
+    app.get_targets(&[id.to_owned()]).unwrap().groups[0]
+        .conversions
+        .iter()
+        .filter(|c| c.unavailable.is_none())
+        .map(|c| c.to.as_str().to_owned())
+        .collect()
+}
+
+/// Documents: Markdown, PDF to text formats, and LibreOffice inside the sandbox.
+fn document_steps(app: &App, python: &Path, dir: &Path) {
+    let code = format!(
+        "import docx, openpyxl\n\
+         d = docx.Document(); d.add_heading('Quarterly report', 1); d.add_paragraph('Revenue grew in Lisbon.')\n\
+         d.save({docx:?})\n\
+         wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Sales'; ws.append(['Region', 'Q1']); ws.append(['North', 1200])\n\
+         wb.create_sheet('Notes').append(['Euros'])\n\
+         wb.save({xlsx:?})\n\
+         open({md:?}, 'w').write('# Notes\\n\\nSome *text* and a table:\\n\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n')\n\
+         open({csv:?}, 'w').write('name,score\\nAda,3\\nBob,=1+1\\n')\n\
+         open({yaml:?}, 'w').write('people:\\n  - name: Ada\\n    tags: [x, y]\\n')\n",
+        docx = dir.join("report.docx").to_str().unwrap(),
+        xlsx = dir.join("book.xlsx").to_str().unwrap(),
+        md = dir.join("notes.md").to_str().unwrap(),
+        csv = dir.join("scores.csv").to_str().unwrap(),
+        yaml = dir.join("team.yaml").to_str().unwrap(),
+    );
+    let ok = Command::new(python)
+        .args(["-I", "-c", &code])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "making test documents");
+    let pdf = dir.join("letter.pdf");
+    make_pdf(python, &pdf, 2);
+    let added = app
+        .add_paths(vec![
+            dir.join("notes.md"),
+            pdf,
+            dir.join("report.docx"),
+            dir.join("book.xlsx"),
+            dir.join("scores.csv"),
+            dir.join("team.yaml"),
+        ])
+        .unwrap();
+    let ids: Vec<String> = added
+        .iter()
+        .map(|a| a.file.as_ref().unwrap().file_id.clone())
+        .collect();
+    let (md, pdf, docx, xlsx) = (&ids[0], &ids[1], &ids[2], &ids[3]);
+    let (csv, yaml) = (&ids[4], &ids[5]);
+
+    // Markdown and PDF need no LibreOffice.
+    let to = targets_of(app, md);
+    for f in ["pdf", "html", "txt"] {
+        assert!(to.contains(&f.to_owned()), "md → {f} missing from {to:?}");
+    }
+    assert_eq!(
+        convert(app, md, "pdf", json!({"pageSize": "letter"})),
+        ["notes.pdf"]
+    );
+    assert_eq!(convert(app, md, "html", json!({})), ["notes.html"]);
+    assert_eq!(convert(app, md, "txt", json!({})), ["notes.txt"]);
+    let to = targets_of(app, pdf);
+    for f in ["docx", "xlsx", "md", "html", "txt", "png"] {
+        assert!(to.contains(&f.to_owned()), "pdf → {f} missing from {to:?}");
+    }
+    assert_eq!(convert(app, pdf, "docx", json!({})), ["letter.docx"]);
+    assert_eq!(convert(app, pdf, "md", json!({})), ["letter.md"]);
+    assert_eq!(
+        convert(app, pdf, "txt", json!({"pages": "2"})),
+        ["letter.txt"]
+    );
+
+    // Tables and data need no LibreOffice either.
+    for (id, wanted) in [
+        (csv, &["json", "yaml", "xlsx", "md", "html"][..]),
+        (yaml, &["json", "csv", "xlsx"][..]),
+        (xlsx, &["json", "yaml"][..]),
+    ] {
+        let to = targets_of(app, id);
+        for f in wanted {
+            assert!(to.contains(&(*f).to_owned()), "{f} missing from {to:?}");
+        }
+    }
+    assert_eq!(convert(app, csv, "json", json!({})), ["scores.json"]);
+    assert_eq!(convert(app, csv, "xlsx", json!({})), ["scores.xlsx"]);
+    assert_eq!(convert(app, yaml, "xlsx", json!({})), ["team.xlsx"]);
+    assert_eq!(convert(app, xlsx, "yaml", json!({})), ["book.yaml"]);
+    assert_eq!(
+        convert(app, xlsx, "csv", json!({})),
+        ["book-Sales.csv", "book-Notes.csv"]
+    );
+
+    // A mixed selection runs as one job in parts, one per adapter.
+    assert_eq!(
+        convert_all(app, &[md.clone(), csv.clone()], "html"),
+        ["notes.html", "scores.html"]
+    );
+
+    if app
+        .get_diagnostics()
+        .engines
+        .iter()
+        .any(|e| e == "libreoffice")
+    {
+        // LibreOffice runs inside the per-job sandbox with only its grant.
+        assert_eq!(convert(app, docx, "pdf", json!({})), ["report.pdf"]);
+        assert_eq!(convert(app, docx, "md", json!({})), ["report.md"]);
+        assert_eq!(convert(app, docx, "odt", json!({})), ["report.odt"]);
+        assert_eq!(convert(app, xlsx, "png", json!({"dpi": 72})).len(), 2);
+        // Word (LibreOffice) and Markdown (markup-convert) together.
+        assert_eq!(
+            convert_all(app, &[docx.clone(), md.clone()], "pdf"),
+            ["report.pdf", "notes.pdf"]
+        );
+        assert_eq!(convert(app, md, "docx", json!({})), ["notes.docx"]);
+        assert_eq!(convert(app, pdf, "pptx", json!({})), ["letter.pptx"]);
+    } else {
+        println!("end_to_end: LibreOffice not installed, office steps skipped");
+        assert!(!targets_of(app, docx).contains(&"pdf".to_owned()));
+    }
+    for id in &ids {
+        app.remove_file(id).unwrap();
+    }
 }

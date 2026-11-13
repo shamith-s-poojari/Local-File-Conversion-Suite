@@ -58,6 +58,17 @@ pub fn self_test(
     scratch: &Path,
     home: &Path,
 ) -> Result<ProbeReport, String> {
+    if let Err(e) = launcher.prepare() {
+        return Ok(ProbeReport {
+            attempts: vec![Attempt {
+                name: "runtime_readable".into(),
+                expected: "allowed",
+                outcome: e,
+                passed: false,
+            }],
+            passed: false,
+        });
+    }
     let root = scratch.join("probe");
     let _ = fs::remove_dir_all(&root);
     let job = root.join("job-a");

@@ -1,0 +1,12 @@
+id: image-edit
+kind: operation
+title: Rotate, flip or resize images
+workerClass: image
+inputs: { formats: [png, jpg, webp, gif, bmp, tiff, avif], min: 1, max: 500 }
+outputs: { format: same, cardinality: many }
+fidelity: L
+fidelityNotes: [IMAGE_DOWNSCALED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow]

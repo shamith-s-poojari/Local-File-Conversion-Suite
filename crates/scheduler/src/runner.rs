@@ -2,6 +2,7 @@
 //! (spec section 5.1), keeping the job store authoritative.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -40,16 +41,59 @@ pub fn pool_for(adapter_id: &str, worker_class: &str) -> String {
 pub struct JobSpec {
     /// A job whose inputs are staged; it must be in `staging`.
     pub job: JobId,
-    pub adapter_id: String,
     pub pool: String,
-    /// The format every output must sniff as.
-    pub output_format: Format,
+    /// What runs, in order. Most jobs have one part; converting a mixed
+    /// selection ("all to PDF" for Word files and photos) has one per
+    /// adapter (ADR 0003).
+    pub parts: Vec<JobPart>,
+}
+
+/// One adapter's share of a job.
+#[derive(Debug, Clone)]
+pub struct JobPart {
+    pub adapter_id: String,
+    /// Indexes of the staged inputs (`in/0.pdf` is 0) this part gets, in order.
+    pub inputs: Vec<usize>,
     pub timeout_base_s: u32,
     pub timeout_s_per_mb: f64,
     pub no_progress_s: u32,
     /// Already validated against the adapter's params schema.
     pub params: Value,
     pub secrets: Option<Secrets>,
+    /// The format every output of this part must sniff as. Parts can
+    /// differ: a tool that keeps each file's format runs one part per
+    /// format (ADR 0004).
+    pub output_format: Format,
+}
+
+impl JobSpec {
+    /// A job run by one adapter over every staged input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn single(
+        job: JobId,
+        adapter_id: &str,
+        pool: &str,
+        output_format: Format,
+        inputs: usize,
+        (timeout_base_s, timeout_s_per_mb, no_progress_s): (u32, f64, u32),
+        params: Value,
+        secrets: Option<Secrets>,
+    ) -> Self {
+        JobSpec {
+            job,
+            pool: pool.to_owned(),
+            parts: vec![JobPart {
+                adapter_id: adapter_id.to_owned(),
+                inputs: (0..inputs).collect(),
+                timeout_base_s,
+                timeout_s_per_mb,
+                no_progress_s,
+                params,
+                secrets,
+                output_format,
+            }],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -158,74 +202,96 @@ impl Runner {
 
     fn drive(&self, spec: &JobSpec, token: &CancelToken) -> Result<(), JobFailure> {
         let job = &spec.job;
+        if spec.parts.is_empty() {
+            return Err(failure("E_INTERNAL"));
+        }
         let dirs = self
             .store
             .job_dirs(job)
             .map_err(|_| failure("E_INTERNAL"))?;
-        let inputs: Vec<String> = dirs
+        let staged: Vec<(String, u64)> = dirs
             .inputs
             .iter()
-            .filter_map(|p| p.file_name())
-            .map(|n| format!("in/{}", n.to_string_lossy()))
+            .filter_map(|p| {
+                let name = p.file_name()?.to_string_lossy();
+                let size = std::fs::metadata(p).map_or(0, |m| m.len());
+                Some((format!("in/{name}"), size))
+            })
             .collect();
-        let input_bytes: u64 = dirs
-            .inputs
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        let watchdog = Watchdog::from_limits(
-            spec.timeout_base_s,
-            spec.timeout_s_per_mb,
-            spec.no_progress_s,
-            input_bytes,
-        );
-        let launch = |memory_limit| LaunchSpec {
-            adapter_id: spec.adapter_id.clone(),
+        let mut plans = Vec::with_capacity(spec.parts.len());
+        for part in &spec.parts {
+            let mut inputs = Vec::with_capacity(part.inputs.len());
+            let mut bytes = 0u64;
+            for &i in &part.inputs {
+                let (path, size) = staged.get(i).ok_or_else(|| failure("E_INTERNAL"))?;
+                inputs.push(path.clone());
+                bytes += size;
+            }
+            if inputs.is_empty() {
+                return Err(failure("E_INTERNAL"));
+            }
+            let watchdog = Watchdog::from_limits(
+                part.timeout_base_s,
+                part.timeout_s_per_mb,
+                part.no_progress_s,
+                bytes,
+            );
+            plans.push((inputs, watchdog));
+        }
+        let launch = |part: &JobPart, memory_limit| LaunchSpec {
+            adapter_id: part.adapter_id.clone(),
             job_id: job.clone(),
             job_dir: dirs.root.clone(),
             memory_limit,
         };
         let mut events = EventForwarder::new(&self.store, job, self.config.progress_interval);
 
+        // Every part is checked before any runs, so a problem with the last
+        // file shows before minutes of work on the first.
         check(token)?;
         self.set_state(job, JobState::Validating)?;
-        let mut worker = Worker::spawn(
-            &*self.launcher,
-            &launch(None),
-            self.codec.clone(),
-            self.config.timing,
-        )?;
-        let validated = worker.request(
-            RequestKind::Validate,
-            json!({ "inputs": inputs, "params": spec.params }),
-            spec.secrets.as_ref(),
-            watchdog,
-            token,
-            &mut |e| events.forward(e),
-        )?;
-        for w in validated["warnings"].as_array().into_iter().flatten() {
-            events.warning(w["code"].as_str().unwrap_or_default(), w.get("detail"));
+        let mut estimate = 0u64;
+        for (part, (inputs, watchdog)) in spec.parts.iter().zip(&plans) {
+            let mut worker = Worker::spawn(
+                &*self.launcher,
+                &launch(part, None),
+                self.codec.clone(),
+                self.config.timing,
+            )?;
+            let validated = worker.request(
+                RequestKind::Validate,
+                json!({ "inputs": inputs, "params": part.params }),
+                part.secrets.as_ref(),
+                *watchdog,
+                token,
+                &mut |e| events.forward(e),
+            )?;
+            for w in validated["warnings"].as_array().into_iter().flatten() {
+                events.warning(w["code"].as_str().unwrap_or_default(), w.get("detail"));
+            }
+            if let Some(first) = validated["errors"].as_array().and_then(|e| e.first()) {
+                return Err(failure(first["code"].as_str().unwrap_or("E_INTERNAL")));
+            }
+            let estimated = worker.request(
+                RequestKind::Estimate,
+                json!({ "inputs": inputs, "params": part.params, "metadata": validated["metadata"] }),
+                None,
+                *watchdog,
+                token,
+                &mut |e| events.forward(e),
+            )?;
+            // Parts run one at a time, so the largest one sets the budget.
+            estimate = estimate.max(estimated["ramBytes"].as_u64().unwrap_or(0));
+            // Don't hold an idle worker while queued; execute gets a fresh one
+            // launched with the admitted memory limit.
+            worker.shutdown();
         }
-        if let Some(first) = validated["errors"].as_array().and_then(|e| e.first()) {
-            return Err(failure(first["code"].as_str().unwrap_or("E_INTERNAL")));
-        }
-        let estimated = worker.request(
-            RequestKind::Estimate,
-            json!({ "inputs": inputs, "params": spec.params, "metadata": validated["metadata"] }),
-            None,
-            watchdog,
-            token,
-            &mut |e| events.forward(e),
-        )?;
-        let estimate = estimated["ramBytes"].as_u64().unwrap_or(0);
-        // Don't hold an idle worker while queued; execute gets a fresh one
-        // launched with the admitted memory limit.
-        worker.shutdown();
 
+        let mut claimed: Vec<(Value, Format)> = Vec::new();
+        let mut next = 0;
         let mut retry = false;
         let mut warned_large = false;
-        let result = loop {
+        while next < spec.parts.len() {
             self.set_state(job, JobState::Queued)?;
             let admission = self.admit(job, &spec.pool, estimate, retry, token)?;
             let slot = SlotGuard { runner: self, job };
@@ -234,40 +300,52 @@ impl Runner {
                 warned_large = true;
                 events.warning("W_LARGE_JOB", None);
             }
-            let mut worker = Worker::spawn(
-                &*self.launcher,
-                &launch(Some(admission.hard_limit)),
-                self.codec.clone(),
-                self.config.timing,
-            )?;
-            let outcome = worker.request(
-                RequestKind::Execute,
-                json!({ "inputs": inputs, "outDir": "out", "workDir": "work", "params": spec.params }),
-                spec.secrets.as_ref(),
-                watchdog,
-                token,
-                &mut |e| events.forward(e),
-            );
-            // The budget is released only once the worker is gone.
-            match outcome {
-                Ok(result) => {
-                    worker.shutdown();
-                    drop(slot);
-                    break result;
+            while next < spec.parts.len() {
+                let part = &spec.parts[next];
+                let (inputs, watchdog) = &plans[next];
+                let mut worker = Worker::spawn(
+                    &*self.launcher,
+                    &launch(part, Some(admission.hard_limit)),
+                    self.codec.clone(),
+                    self.config.timing,
+                )?;
+                let outcome = worker.request(
+                    RequestKind::Execute,
+                    json!({ "inputs": inputs, "outDir": "out", "workDir": "work", "params": part.params }),
+                    part.secrets.as_ref(),
+                    *watchdog,
+                    token,
+                    &mut |e| events.forward(e),
+                );
+                match outcome {
+                    Ok(result) => {
+                        worker.shutdown();
+                        let taken = take_outputs(
+                            &dirs.out,
+                            &result,
+                            (spec.parts.len() > 1).then_some(next),
+                        )?;
+                        claimed.extend(taken.into_iter().map(|o| (o, part.output_format)));
+                        next += 1;
+                    }
+                    // Spec 10.2: retry once, alone, at the full budget.
+                    Err(f) if f.code == "E_RESOURCE_MEMORY" && !retry => {
+                        drop(worker);
+                        retry = true;
+                        break;
+                    }
+                    Err(f) => return Err(f),
                 }
-                // Spec 10.2: retry once, alone, at the full budget.
-                Err(f) if f.code == "E_RESOURCE_MEMORY" && !retry => {
-                    drop(worker);
-                    drop(slot);
-                    retry = true;
-                }
-                Err(f) => return Err(f),
             }
-        };
+            // The budget is released only once the worker is gone.
+            drop(slot);
+        }
 
+        // Checked once every worker has exited, so none can change a file
+        // after its check.
         check(token)?;
         self.set_state(job, JobState::Verifying)?;
-        verify_outputs(&self.store, job, &result, spec.output_format)?;
+        verify_outputs(&self.store, job, &claimed)?;
         self.set_state(job, JobState::Succeeded)?;
         Ok(())
     }
@@ -435,6 +513,36 @@ pub fn warning_catalog() -> &'static HashSet<String> {
             .filter_map(|c| c.as_str().map(str::to_owned))
             .collect()
     })
+}
+
+/// The outputs a part's worker claims. With several parts, each part's
+/// files are renamed `p<part>-<name>` before the next part runs, since
+/// every worker numbers its outputs from 0. A claim the rename can't follow
+/// (a missing file, a path outside `out/`) is a protocol error.
+fn take_outputs(out: &Path, result: &Value, part: Option<usize>) -> Result<Vec<Value>, JobFailure> {
+    let claimed = result["outputs"].as_array().cloned().unwrap_or_default();
+    if claimed.is_empty() {
+        return Err(failure("E_PROTOCOL"));
+    }
+    let Some(part) = part else {
+        return Ok(claimed);
+    };
+    claimed
+        .into_iter()
+        .map(|mut o| {
+            let name = o["path"]
+                .as_str()
+                .and_then(|p| p.strip_prefix("out/"))
+                .filter(|n| !n.is_empty() && !n.contains(['/', '\\']) && *n != "..")
+                .ok_or_else(|| failure("E_PROTOCOL"))?
+                .to_owned();
+            let renamed = format!("p{part}-{name}");
+            std::fs::rename(out.join(&name), out.join(&renamed))
+                .map_err(|_| failure("E_PROTOCOL"))?;
+            o["path"] = json!(format!("out/{renamed}"));
+            Ok(o)
+        })
+        .collect()
 }
 
 #[cfg(test)]

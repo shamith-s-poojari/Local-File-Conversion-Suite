@@ -25,8 +25,21 @@ from converter_sdk.protocol import Secrets, parse_worker_message
 JOB_ID = "j_conformance"
 
 
+def _engines() -> None:
+    """Point adapters at FFmpeg and LibreOffice as the core would (ADR 0003)."""
+    import os  # noqa: PLC0415
+
+    from . import files  # noqa: PLC0415
+
+    for key, value in files.engine_env().items():
+        os.environ.setdefault(key, value)
+
+
+_engines()
+
+
 def make_job_dir(root: Path, inputs: list[Path]) -> tuple[Path, list[str]]:
-    """Stage inputs as ``in/<n>.pdf`` (copies, spec change C3). Returns job-relative paths."""
+    """Stage inputs as ``in/<n>.<ext>`` (copies, spec change C3). Returns job-relative paths."""
     root.mkdir(parents=True, exist_ok=True)
     for d in ("in", "out", "work"):
         (root / d).mkdir(exist_ok=True)

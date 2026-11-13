@@ -5,8 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Format =
-  | "pdf" | "docx" | "pptx" | "xlsx" | "md" | "html" | "txt"
-  | "png" | "jpg" | "webp" | "svg" | "heic" | "unknown";
+  | "pdf" | "docx" | "doc" | "odt" | "rtf" | "pptx" | "ppt" | "odp"
+  | "xlsx" | "xls" | "ods" | "csv" | "md" | "html" | "txt" | "epub" | "json" | "yaml"
+  | "png" | "jpg" | "webp" | "svg" | "heic" | "gif" | "bmp" | "tiff" | "avif" | "ico"
+  | "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff"
+  | "mp4" | "mov" | "mkv" | "webm" | "avi"
+  | "unknown";
 
 export interface FileDescriptor {
   fileId: string;
@@ -30,11 +34,28 @@ export interface FileResult {
   displayName: string;
 }
 
+export interface MediaInfo {
+  kind: "image" | "audio" | "video" | "document";
+  durationMs?: number;
+  width?: number;
+  height?: number;
+  frames?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  sampleRate?: number;
+  channels?: number;
+  bitrateKbps?: number;
+  fps?: number;
+  hasAudio?: boolean;
+  hasVideo?: boolean;
+}
+
 export interface InspectInfo {
   pages: number;
   encryption: "none" | "permissionsOnly" | "openPassword";
   signed: boolean | null;
   warnings: string[];
+  media?: MediaInfo;
 }
 
 export interface CommandError {
@@ -87,7 +108,27 @@ export interface OperationTarget {
   unavailable?: unknown;
 }
 
-export interface Targets { operations: OperationTarget[] }
+export type Tier = "E" | "H" | "R" | "L";
+
+export interface Hop { adapter: string; from: Format; to: Format; tier: Tier }
+
+export interface ConversionTarget {
+  to: Format;
+  tier: Tier;
+  bestEffort: boolean;
+  exactWithTextLayer: boolean;
+  plan?: { hops: Hop[]; tier: Tier; cost: number };
+  unavailable?: unknown;
+}
+
+export interface FormatGroup { format: Format; files: number; conversions: ConversionTarget[] }
+
+export interface Targets {
+  operations: OperationTarget[];
+  groups: FormatGroup[];
+  /** Targets every selected format reaches with one adapter ("all to PDF"). */
+  shared: ConversionTarget[];
+}
 
 export interface JsonSchema {
   type?: string | string[];
@@ -106,12 +147,20 @@ export interface JsonSchema {
   readOnly?: boolean;
   writeOnly?: boolean;
   "x-ui"?: string;
-  /** Show this field only while other params have these values. */
+  /** Display labels for enum values, keyed by the value as text. */
+  "x-labels"?: Record<string, string>;
+  /** Show this field only while other params have these values (a list
+   * means any of them). */
   "x-when"?: Record<string, unknown>;
 }
 
 export interface AdapterEntry {
-  manifest: { id: string; title: string; inputs?: { min: number; max: number } };
+  manifest: {
+    id: string;
+    kind: "operation" | "conversion";
+    title: string;
+    inputs?: { formats: Format[]; min: number; max: number };
+  };
   paramsSchema: JsonSchema;
 }
 
@@ -133,6 +182,10 @@ export interface Diagnostics {
   sandbox?: ProbeReport | null;
   processingEnabled: boolean;
   startupError?: string;
+  /** Engines found on this computer, e.g. "ffmpeg", "libreoffice". */
+  engines?: string[];
+  /** "macos", "windows" or "linux". */
+  platform?: string;
 }
 
 export interface SaveResult {
@@ -154,6 +207,8 @@ export const api = {
   getRegistry: () => invoke<Registry>("get_registry"),
   createJob: (operationId: string, fileIds: string[], params: Record<string, unknown>) =>
     invoke<string>("create_job", { operationId, fileIds, params }),
+  createConversion: (fileIds: string[], to: Format, params: Record<string, unknown>) =>
+    invoke<string>("create_conversion", { fileIds, to, params }),
   cancelJob: (jobId: string) => invoke<boolean>("cancel_job", { jobId }),
   requestPreview: (reference: string, page: number, dpi: number) =>
     invoke<Preview>("request_preview", { reference, page, dpi }),

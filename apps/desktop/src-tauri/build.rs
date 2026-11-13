@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
     "get_targets",
     "get_registry",
     "create_job",
+    "create_conversion",
     "cancel_job",
     "request_preview",
     "get_page_text",

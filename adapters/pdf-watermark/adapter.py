@@ -18,9 +18,11 @@ from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     RangeError,
+    displayed_box,
     pages_in,
     param_issue,
     parse_page_ranges,
+    placement,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue
@@ -57,28 +59,6 @@ def _font() -> tuple[str, Any]:
 
 def _rgb(color: str) -> tuple[float, float, float]:
     return tuple(int(color[i : i + 2], 16) / 255 for i in (1, 3, 5))  # type: ignore[return-value]
-
-
-def displayed_box(page: pikepdf.Page) -> tuple[float, float, float, float, int]:
-    """(x0, y0, width, height, rotate) of the visible area in user space."""
-    box = page.cropbox
-    x0, x1 = sorted((float(box[0]), float(box[2])))
-    y0, y1 = sorted((float(box[1]), float(box[3])))
-    rotate = int(page.obj.get(Name.Rotate, 0)) % 360
-    rotate = rotate - rotate % 90
-    return x0, y0, x1 - x0, y1 - y0, rotate
-
-
-def placement(x0: float, y0: float, w: float, h: float, rotate: int) -> list[float]:
-    """The ``cm`` matrix mapping displayed coordinates (origin at the visible
-    bottom-left) into page user space, for a clockwise /Rotate."""
-    if rotate == 90:
-        return [0, 1, -1, 0, x0 + w, y0]
-    if rotate == 180:
-        return [-1, 0, 0, -1, x0 + w, y0 + h]
-    if rotate == 270:
-        return [0, -1, 1, 0, x0, y0 + h]
-    return [1, 0, 0, 1, x0, y0]
 
 
 def make_stamp(width: float, height: float, params: dict[str, Any], font: str, text: str) -> bytes:

@@ -28,6 +28,13 @@ def connect(host, port):
     s.close()
 
 
+def shell():
+    if sys.platform == "win32":
+        root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+        return [os.path.join(root, "System32", "cmd.exe"), "/c", "exit 0"]
+    return ["/bin/sh", "-c", "true"]
+
+
 def access(cfg):
     def read(path):
         with open(path, "rb") as f:
@@ -47,7 +54,7 @@ def access(cfg):
         "connect_external": attempt(lambda: connect("1.1.1.1", 443)),
         "connect_loopback": attempt(lambda: connect("127.0.0.1", cfg["loopbackPort"])),
         "dns": attempt(lambda: socket.getaddrinfo("example.com", 80)),
-        "spawn_shell": attempt(lambda: subprocess.run(["/bin/sh", "-c", "true"], check=True)),
+        "spawn_shell": attempt(lambda: subprocess.run(shell(), check=True)),  # noqa: S603
     }
     sys.stdout.write(json.dumps(report))
 
