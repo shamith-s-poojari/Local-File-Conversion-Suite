@@ -401,9 +401,15 @@ pub(crate) fn worker_env(job_dir: &Path) -> Vec<(&'static str, OsString)> {
     ];
     if cfg!(windows) {
         // Windows finds temp folders through TEMP and TMP, and system DLLs
-        // through SYSTEMROOT.
+        // through SYSTEMROOT. Starting an AppContainer process also reads
+        // the profile folders to set up the container's own, and fails with
+        // error 203 (variable not found) without them; they point at the
+        // job's work folder so no real profile path reaches the worker.
         env.push(("TEMP", work.clone()));
-        env.push(("TMP", work));
+        env.push(("TMP", work.clone()));
+        env.push(("USERPROFILE", work.clone()));
+        env.push(("LOCALAPPDATA", work.clone()));
+        env.push(("APPDATA", work));
         let root = std::env::var_os("SYSTEMROOT").unwrap_or_else(|| OsString::from(r"C:\Windows"));
         let mut path = PathBuf::from(&root).join("System32").into_os_string();
         path.push(";");
