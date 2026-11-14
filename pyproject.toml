@@ -8,10 +8,20 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "converter-conformance",
     "converter-sdk",
     "datamodel-code-generator[ruff]==0.91.0",
+    "markdown-it-py>=3",
+    "openpyxl>=3.1",
+    "pdf2docx>=0.5.8",
+    "pikepdf>=9.5,<10",
+    "pillow>=11,<12",
+    "pillow-heif>=0.18",
+    "pymupdf>=1.24,<2",
+    "pypdfium2>=4.30,<5",
     "pytest>=8",
     "pyyaml>=6.0.3",
+    "reportlab>=4.2,<5",
     "ruff>=0.6",
 ]
 
@@ -19,10 +29,11 @@ dev = [
 package = false
 
 [tool.uv.sources]
+converter-conformance = { workspace = true }
 converter-sdk = { workspace = true }
 
 [tool.uv.workspace]
-members = ["workers/sdk"]
+members = ["workers/sdk", "workers/conformance"]
 
 [tool.ruff]
 line-length = 100
@@ -32,6 +43,8 @@ select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101", "S105", "S106"]
+# The conformance kit is test tooling: asserts and fixed test passwords are its job.
+"workers/conformance/src/**" = ["S101", "S105"]
 # Written by packages/protocol/scripts/generate.mjs; long schema descriptions stay on one line.
 "**/protocol/_generated.py" = ["E501"]
 

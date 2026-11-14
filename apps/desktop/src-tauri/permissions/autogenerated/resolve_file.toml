@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-file"
+description = "Enables the resolve_file command without any pre-configured scope."
+commands.allow = ["resolve_file"]
+
+[[permission]]
+identifier = "deny-resolve-file"
+description = "Denies the resolve_file command without any pre-configured scope."
+commands.deny = ["resolve_file"]

@@ -138,6 +138,10 @@ pub struct OutputFile {
     /// Extension of the declared output format, such as `pdf`.
     pub extension: String,
     pub size_bytes: u64,
+    /// The staged input this output came from (`in/<source>.*`), when the
+    /// worker said so (ADR 0005).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<usize>,
 }
 
 /// A job as the UI sees it after a reload (`get_snapshot`). Holds no paths.

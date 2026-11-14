@@ -1,0 +1,16 @@
+cases:
+  - name: mixed-louder-faded
+    inputs: [audio-wav, audio-mp3, audio-flac, audio-m4a]
+    params: { volume: 6, fadeIn: 1, fadeOut: 1, fileTitles: [a, b, c, d] }
+    expect: { outputs: 4 }
+  - name: normalize-faster
+    inputs: [audio-ogg]
+    params: { normalize: true, speed: 1.5 }
+    expect: { outputs: 1 }
+negative:
+  params: { volume: 3 }
+  inputs: [audio-wav]
+  bad: [corrupt-wav, truncated-wav]
+cancel:
+  inputs: [audio-long-wav, audio-long-wav]
+  params: { normalize: true }

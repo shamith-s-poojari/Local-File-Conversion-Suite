@@ -1,0 +1,16 @@
+cases:
+  - name: mixed-pngs
+    inputs: [image-png, image-jpg, image-gif, image-webp]
+    params: { to: png, columns: 3, fileTitles: [a, b, c, d] }
+    expect: { outputs: 1 }
+  - name: pdf-sheet
+    inputs: [image-png, image-tiff]
+    params: { to: pdf, sheet: letter }
+    expect: { outputs: 1 }
+negative:
+  params: { to: png }
+  inputs: [image-png]
+  bad: [corrupt-png, truncated-png]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { to: png }

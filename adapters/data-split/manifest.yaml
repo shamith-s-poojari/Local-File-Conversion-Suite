@@ -1,0 +1,12 @@
+id: data-split
+kind: operation
+title: Split a spreadsheet
+workerClass: render
+inputs: { formats: [csv, xlsx], min: 1, max: 50 }
+outputs: { format: same, cardinality: many }
+fidelity: H
+fidelityNotes: [FORMULAS_DROPPED, ONLY_FIRST_SHEET]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 3.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [openpyxl]

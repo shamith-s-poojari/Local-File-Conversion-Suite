@@ -1,0 +1,18 @@
+cases:
+  - name: pages-to-png
+    inputs: [text-3]
+    params: { to: png, dpi: 72 }
+    expect: { outputs: 3 }
+  - name: rotated-to-jpg
+    inputs: [rotated-90]
+    params: { to: jpg, dpi: 72 }
+    expect: { outputs: 2 }
+  - name: multipage-tiff
+    inputs: [text-3]
+    params: { to: tiff, dpi: 72 }
+    expect: { outputs: 1 }
+negative:
+  params: { to: png, dpi: 72 }
+cancel:
+  inputs: [big]
+  params: { to: png, dpi: 150 }

@@ -1,0 +1,15 @@
+# The scheduler runs this adapter in its own one-slot `redact` pool (spec 10.2).
+id: pdf-redact
+kind: operation
+title: Redact PDF
+workerClass: pdf
+inputs: { formats: [pdf], min: 1, max: 1 }
+outputs: { format: pdf, cardinality: one }
+fidelity: E
+fidelityNotes:
+  [REDACTED_TEXT_REMAINS_ELSEWHERE, NO_TEXT_LAYER, FORMS_FLATTENED, TAGS_DROPPED, SIGNATURE_INVALIDATED, XFA_UNSUPPORTED, ACTIVE_CONTENT_FOUND]
+# Two processes: the worker and its redaction verifier.
+limits: { timeoutBaseS: 120, timeoutSPerMb: 3, noProgressS: 180, diskFactor: 4.0, processes: 2 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pymupdf, pypdfium2, pikepdf]

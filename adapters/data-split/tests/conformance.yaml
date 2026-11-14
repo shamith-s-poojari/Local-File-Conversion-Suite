@@ -1,0 +1,14 @@
+cases:
+  - name: csv-every-row
+    inputs: [doc-csv]
+    params: { rows: 1, fileTitles: [table] }
+  - name: excel-every-two
+    inputs: [doc-xlsx]
+    params: { rows: 2 }
+negative:
+  params: { rows: 1 }
+  inputs: [doc-xlsx]
+  bad: [corrupt-xlsx, truncated-xlsx]
+cancel:
+  inputs: [doc-csv-long, doc-csv-long, doc-csv-long]
+  params: { rows: 1000 }

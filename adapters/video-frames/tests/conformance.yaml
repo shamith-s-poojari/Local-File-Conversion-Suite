@@ -1,0 +1,15 @@
+cases:
+  - name: five-jpgs
+    inputs: [video-mp4]
+    params: { to: jpg, count: 5, fileTitles: [clip] }
+    expect: { outputs: 5 }
+  - name: pngs-every-second
+    inputs: [video-webm, video-mov]
+    params: { to: png, mode: interval, every: 1, maxWidth: 640 }
+negative:
+  params: { to: jpg, count: 1 }
+  inputs: [video-mp4]
+  bad: [corrupt-mp4, truncated-mp4]
+cancel:
+  inputs: [video-long-mp4]
+  params: { to: png, mode: interval, every: 1 }

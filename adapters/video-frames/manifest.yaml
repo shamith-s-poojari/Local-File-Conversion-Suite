@@ -1,0 +1,12 @@
+id: video-frames
+kind: operation
+title: Save frames as pictures
+workerClass: media
+inputs: { formats: [mp4, mov, mkv, webm, avi], min: 1, max: 20 }
+outputs: { format: chosen, cardinality: many }
+fidelity: L
+fidelityNotes: []
+limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 180, diskFactor: 4.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg, pillow]

@@ -556,6 +556,7 @@ Every adapter must pass conformance. Below, **E** means no generational loss of 
 | `E_PROTOCOL`, `E_OUTPUT_INVALID` | No | Worker misbehaved |
 | `E_SANDBOX_UNAVAILABLE`, `E_INSTALL_CORRUPT` | No | Needs a repair or a fix to the system |
 | `E_REDACTION_VERIFICATION_FAILED` | No | Redaction couldn't be proven; no output |
+| `E_NO_TEXT` | No | A PDF has no text layer to convert to a text format (ADR 0003) |
 | `E_INTERNAL` | Yes | Unexpected error |
 
 Every code needs user text in the "what happened, why, what to do" pattern. The text lives in one catalog file so that CI can check for missing entries.

@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PDF pages to images",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": { "title": "Convert to", "enum": ["png", "jpg", "webp", "tiff", "gif", "bmp", "svg"] },
+    "pages": {
+      "title": "Pages",
+      "description": "Leave empty for every page. For example: 1-3, 5, 8-",
+      "type": "string",
+      "maxLength": 10000,
+      "x-ui": "pageRanges"
+    },
+    "dpi": {
+      "title": "Resolution",
+      "type": "integer",
+      "enum": [72, 150, 300, 600],
+      "default": 150,
+      "x-labels": {
+        "72": "Screen (72 dpi)",
+        "150": "Standard (150 dpi)",
+        "300": "Print (300 dpi)",
+        "600": "High (600 dpi)"
+      },
+      "x-when": { "to": ["png", "jpg", "webp", "tiff", "gif", "bmp"] }
+    },
+    "quality": {
+      "title": "Quality",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 100,
+      "default": 85,
+      "x-ui": "slider",
+      "x-when": { "to": ["jpg", "webp"] }
+    },
+    "multipage": {
+      "title": "One multi-page TIFF",
+      "description": "Off gives one TIFF per page.",
+      "type": "boolean",
+      "default": true,
+      "x-when": { "to": ["tiff"] }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

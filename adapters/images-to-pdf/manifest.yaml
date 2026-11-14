@@ -1,0 +1,12 @@
+id: images-to-pdf
+kind: operation
+title: Combine images into one PDF
+workerClass: image
+inputs: { formats: [png, jpg, webp, heic, gif, bmp, tiff, avif], min: 1, max: 500 }
+outputs: { format: pdf, cardinality: one }
+fidelity: E
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 4.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow, pillow-heif, pymupdf, pikepdf]

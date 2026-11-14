@@ -1,0 +1,14 @@
+cases:
+  - name: basic
+    inputs: [text-3, text-5]
+    params: { bookmarks: perFile }
+    expect: { pages: [8] }
+  - name: mixed-sizes-and-forms
+    inputs: [landscape, rotated-90, form, form, tagged]
+    params: { bookmarks: keep, metadataFrom: -1 }
+    expect: { pages: [8] }
+negative:
+  params: {}
+cancel:
+  inputs: [big, big, big]
+  params: { bookmarks: none }

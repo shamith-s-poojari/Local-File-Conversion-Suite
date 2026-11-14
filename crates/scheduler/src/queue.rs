@@ -18,10 +18,20 @@ pub const STARVATION_AFTER: Duration = Duration::from_secs(60);
 /// Phase 1 pool sizes: PDF structural 2, render 2, redact 1. Pools not
 /// listed get one slot.
 pub fn phase1_pools() -> HashMap<String, usize> {
-    [("pdf", 2), ("render", 2), ("redact", 1)]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v))
-        .collect()
+    // ADR 0003 adds images, office (LibreOffice is heavy: one at a time)
+    // and media (FFmpeg already uses every core).
+    [
+        ("pdf", 2),
+        ("render", 2),
+        ("redact", 1),
+        ("image", 2),
+        ("office", 1),
+        ("media", 1),
+        ("ocr", 1),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect()
 }
 
 /// A job's hard memory limit: `min(max(1.5 × estimate, 512 MB), budget)`.

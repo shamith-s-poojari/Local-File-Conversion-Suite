@@ -1,0 +1,25 @@
+id: image-convert
+kind: conversion
+title: Convert images
+workerClass: image
+edges:
+  - { from: [png, jpg, webp, heic, gif, bmp, tiff, ico, svg], to: avif, tier: L }
+  - { from: [png, jpg, webp, gif, tiff, ico], to: bmp, tier: E }
+  - { from: [heic, avif, svg], to: bmp, tier: H }
+  - { from: [png, jpg, webp, heic, bmp, tiff, avif, ico, svg], to: gif, tier: L }
+  - { from: [png, jpg, webp, heic, gif, bmp, tiff, avif, svg], to: ico, tier: L }
+  - { from: [png, webp, heic, gif, bmp, tiff, avif, ico, svg], to: jpg, tier: L }
+  - { from: [png, jpg, webp, gif, bmp, tiff, ico], to: pdf, tier: E }
+  - { from: [heic, avif, svg], to: pdf, tier: H }
+  - { from: [jpg, webp, gif, bmp, tiff, ico], to: png, tier: E }
+  - { from: [heic, avif, svg], to: png, tier: H }
+  - { from: [png, jpg, webp, gif, bmp, ico], to: tiff, tier: E }
+  - { from: [heic, avif, svg], to: tiff, tier: H }
+  - { from: [png, gif, bmp, tiff, ico], to: webp, tier: E }
+  - { from: [svg], to: webp, tier: H }
+  - { from: [jpg, heic, avif], to: webp, tier: L }
+fidelityNotes: [TRANSPARENCY_FLATTENED, ANIMATION_FLATTENED, IMAGE_DOWNSCALED, COLORS_REDUCED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow, pillow-heif, pymupdf, pikepdf]

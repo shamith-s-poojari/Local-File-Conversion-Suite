@@ -1,0 +1,21 @@
+[package]
+name = "lfcs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line companion to the converter app: same router, sandbox and output checks"
+
+[[bin]]
+name = "lfcs"
+path = "src/main.rs"
+
+[dependencies]
+converter-app-core = { path = "../../crates/app-core" }
+converter-jobstore = { path = "../../crates/jobstore" }
+converter-router = { path = "../../crates/router" }
+converter-sandbox = { path = "../../crates/sandbox" }
+serde = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

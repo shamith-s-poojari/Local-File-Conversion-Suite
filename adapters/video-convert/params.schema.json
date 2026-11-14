@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Convert video",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": {
+      "title": "Convert to",
+      "enum": ["mp4", "mov", "mkv", "webm", "avi", "gif", "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aiff"]
+    },
+    "quality": {
+      "title": "Quality",
+      "description": "Same as the original copies the picture without re-encoding when the new format can hold it, which is fastest and loses nothing.",
+      "enum": ["original", "high", "balanced", "small"],
+      "default": "original",
+      "x-labels": {
+        "original": "Same as the original",
+        "high": "High (bigger file)",
+        "balanced": "Balanced",
+        "small": "Small file"
+      },
+      "x-when": { "to": ["mp4", "mov", "mkv", "webm", "avi"] }
+    },
+    "maxHeight": {
+      "title": "Resolution",
+      "type": "integer",
+      "enum": [0, 2160, 1440, 1080, 720, 480, 360],
+      "default": 0,
+      "x-labels": {
+        "0": "Same as the original",
+        "2160": "Up to 4K (2160p)",
+        "1440": "Up to 1440p",
+        "1080": "Up to 1080p (Full HD)",
+        "720": "Up to 720p (HD)",
+        "480": "Up to 480p",
+        "360": "Up to 360p"
+      },
+      "x-when": { "to": ["mp4", "mov", "mkv", "webm", "avi"] }
+    },
+    "removeAudio": {
+      "title": "Remove the sound",
+      "type": "boolean",
+      "default": false,
+      "x-when": { "to": ["mp4", "mov", "mkv", "webm", "avi"] }
+    },
+    "fps": {
+      "title": "Frames per second",
+      "type": "integer",
+      "enum": [8, 12, 15, 20, 25],
+      "default": 12,
+      "x-labels": { "8": "8 (smallest)", "12": "12", "15": "15", "20": "20", "25": "25 (smoothest)" },
+      "x-when": { "to": ["gif"] }
+    },
+    "gifWidth": {
+      "title": "Width",
+      "type": "integer",
+      "enum": [320, 480, 640, 800],
+      "default": 480,
+      "x-labels": { "320": "320 px", "480": "480 px", "640": "640 px", "800": "800 px" },
+      "x-when": { "to": ["gif"] }
+    },
+    "bitrate": {
+      "title": "Sound quality",
+      "type": "integer",
+      "enum": [96, 128, 192, 256, 320],
+      "default": 192,
+      "x-labels": { "96": "96 kbps", "128": "128 kbps", "192": "192 kbps", "256": "256 kbps", "320": "320 kbps" },
+      "x-when": { "to": ["mp3", "ogg", "opus", "m4a", "aac"] }
+    },
+    "start": {
+      "title": "Start at",
+      "description": "Optional. Minutes and seconds, for example 1:30.",
+      "type": "string",
+      "maxLength": 12,
+      "pattern": "^$|^[0-9]{1,3}(:[0-5]?[0-9]){0,2}(\\.[0-9]{1,3})?$"
+    },
+    "end": {
+      "title": "End at",
+      "description": "Optional. Leave empty to keep everything after the start.",
+      "type": "string",
+      "maxLength": 12,
+      "pattern": "^$|^[0-9]{1,3}(:[0-5]?[0-9]){0,2}(\\.[0-9]{1,3})?$"
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

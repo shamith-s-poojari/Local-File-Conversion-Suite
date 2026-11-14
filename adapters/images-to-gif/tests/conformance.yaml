@@ -1,0 +1,12 @@
+cases:
+  - name: mixed-formats
+    inputs: [image-png, image-jpg, image-webp, image-heic]
+    params: { frameMs: 200 }
+    expect: { outputs: 1 }
+negative:
+  params: {}
+  inputs: [image-png, image-jpg]
+  bad: [corrupt-png, truncated-png]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { width: 800 }
