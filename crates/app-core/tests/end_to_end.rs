@@ -548,6 +548,15 @@ fn safety_steps(app: &App, python: &Path, dir: &Path) {
     let names = run_tool(app, &pdf, "file-disarm", json!({}));
     assert_eq!(names, ["form-safe.pdf"]);
 
+    // Redaction's verifier is a second Python process, like disarm's: both
+    // must start inside the sandbox (Windows counts its processes).
+    let secret = dir.join("secret.pdf");
+    make_pdf(python, &secret, 2);
+    let redact = add(app, vec![secret]);
+    let names = run_tool(app, &redact, "pdf-redact", json!({"terms": ["Page 2"]}));
+    assert_eq!(names.len(), 1, "{names:?}");
+    app.remove_file(&redact[0]).unwrap();
+
     // A contact sheet of a photo and a PDF's pages.
     let both = [ids[0].clone(), pdf[0].clone()];
     let names = run_tool(app, &both, "contact-sheet", json!({"to": "png"}));

@@ -1,5 +1,6 @@
 //! `lfcs` end to end on this machine. Needs the workspace virtualenv
-//! (`uv sync`); without it each test prints a note and passes. The binary is
+//! (`uv sync`); without it, or on Linux without a working bubblewrap, each
+//! test prints a note and passes. The binary is
 //! its own sandbox runner, so these run real sandboxed workers.
 
 use std::path::{Path, PathBuf};
@@ -18,12 +19,30 @@ fn python() -> Option<PathBuf> {
     } else {
         repo().join(".venv/bin/python")
     };
-    if python.is_file() {
-        Some(python)
-    } else {
+    if !python.is_file() {
         eprintln!("skipped: no .venv; run `uv sync`");
-        None
+        return None;
     }
+    if !sandbox_works() {
+        eprintln!("skipped: bubblewrap can't create a sandbox here");
+        return None;
+    }
+    Some(python)
+}
+
+/// On Linux, bubblewrap may be blocked (a CI runner, a container); then
+/// `lfcs` refuses to process (exit 3) and these tests skip, like the
+/// sandbox crate's. On macOS and Windows the sandbox must work.
+fn sandbox_works() -> bool {
+    static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WORKS.get_or_init(|| {
+        if !cfg!(target_os = "linux") {
+            return true;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let o = lfcs(&t.path().join("data"), &["doctor"]);
+        o.status.code() != Some(3)
+    })
 }
 
 /// Forward slashes: safe inside Python source on every OS.

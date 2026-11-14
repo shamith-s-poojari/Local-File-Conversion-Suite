@@ -25,7 +25,6 @@ This file and ``verify.py`` are each self-contained: workers run with
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -37,6 +36,7 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import AdapterError, JobContext, OutputFile, PageWords, run_main
+from converter_sdk.engines import helper_env
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
@@ -413,7 +413,7 @@ def rasterize(doc: Any, pages: set[int]) -> Any:
 def run_verifier(ctx: JobContext, output: Path, spec: dict[str, Any]) -> dict[str, Any]:
     """Run ``verify.py`` in a fresh process. It sees only the output file
     (job-relative) and what to check, on stdin."""
-    env = {k: os.environ[k] for k in ("SYSTEMROOT", "TMP", "TEMP") if k in os.environ}
+    env = helper_env()
     request = json.dumps({**spec, "output": output.relative_to(ctx.job_dir.resolve()).as_posix()})
     proc = subprocess.Popen(  # noqa: S603 - fixed argv: our interpreter and our verifier
         [sys.executable, "-I", str(VERIFY)],

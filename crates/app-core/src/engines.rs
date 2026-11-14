@@ -217,7 +217,10 @@ impl Engines {
                     any = true;
                 }
             }
-            grant.processes += a.manifest.limits.processes.saturating_sub(1);
+            // Each extra process the worker starts is another Python (a
+            // verifier). From a Windows virtualenv that is two processes, the
+            // launcher and the interpreter, and Windows enforces the count.
+            grant.processes += a.manifest.limits.processes.saturating_sub(1) * PYTHON_PROCESSES;
             if any || grant.processes > 0 {
                 out.insert(a.manifest.id.clone(), grant);
             }
@@ -225,6 +228,10 @@ impl Engines {
         out
     }
 }
+
+/// Processes one extra Python process may need: a virtualenv launcher and
+/// the interpreter it starts.
+const PYTHON_PROCESSES: u32 = 2;
 
 /// Which engine modules the worker interpreter can import.
 fn python_modules(python: &Path) -> BTreeSet<String> {

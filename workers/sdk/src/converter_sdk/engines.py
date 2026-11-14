@@ -19,6 +19,18 @@ from pathlib import Path
 from .context import JobContext
 from .errors import AdapterError, Cancelled
 
+# What a fresh helper process (an independent verifier) gets from the
+# worker's environment, and nothing else. Windows needs the first three to
+# start a process at all: an AppContainer child without its profile
+# variables fails with ERROR_ENVVAR_NOT_FOUND (203). The sandbox sets them
+# to the job's work folder.
+HELPER_ENV = ("SYSTEMROOT", "TMP", "TEMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA")
+
+
+def helper_env() -> dict[str, str]:
+    """A minimal environment for a helper process started by an adapter."""
+    return {k: os.environ[k] for k in HELPER_ENV if k in os.environ}
+
 
 def binary(name: str) -> Path:
     """The granted path of an engine binary, e.g. ``binary("ffmpeg")``."""

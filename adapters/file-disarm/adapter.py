@@ -17,7 +17,6 @@ The removal code is in ``converter_sdk.pdf`` (PDF) and ``converter_sdk.active``
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -37,6 +36,7 @@ from converter_sdk import (
 )
 from converter_sdk.active import OOXML_FORMATS, active_findings, disarm_markup, disarm_ooxml
 from converter_sdk.convert import ConversionAdapter, issue, source_format
+from converter_sdk.engines import helper_env
 from converter_sdk.pdf import flatten_forms, is_signed, remove_active_content, save_pdf
 from converter_sdk.protocol import ValidationIssue
 
@@ -61,7 +61,7 @@ def output_format(fmt: str) -> str:
 def run_verifier(ctx: JobContext, output: Path) -> dict[str, Any]:
     """Run ``verify.py`` in a fresh process. It sees only the output's
     job-relative path, on stdin."""
-    env = {k: os.environ[k] for k in ("SYSTEMROOT", "TMP", "TEMP") if k in os.environ}
+    env = helper_env()
     request = json.dumps({"output": output.relative_to(ctx.job_dir.resolve()).as_posix()})
     proc = subprocess.Popen(  # noqa: S603 - fixed argv: our interpreter and our verifier
         [sys.executable, "-I", str(VERIFY)],
