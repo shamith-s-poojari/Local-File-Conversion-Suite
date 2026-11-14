@@ -369,6 +369,7 @@ fn conversions(app: &App, python: &Path, dir: &Path) {
     tool_steps(app, python, dir);
     media_steps(app, python, dir);
     document_steps(app, python, dir);
+    safety_steps(app, python, dir);
 }
 
 /// Runs a tool on files; returns the outputs' suggested names.
@@ -483,6 +484,78 @@ fn tool_steps(app: &App, python: &Path, dir: &Path) {
     let names = run_tool(app, &ids, "pdf-page-numbers", json!({"pages": "2-3"}));
     assert_eq!(names, ["memo-numbered.pdf"]);
     app.remove_file(&ids[0]).unwrap();
+}
+
+/// What a file reveals, removing it, making a file safe, contact sheets and
+/// duplicates (ADR 0005), in the sandbox.
+fn safety_steps(app: &App, python: &Path, dir: &Path) {
+    python_make(
+        python,
+        dir,
+        "import shutil\n\
+         from PIL import Image\n\
+         import pikepdf\n\
+         from pikepdf import Dictionary, Name, String\n\
+         im = Image.new('RGB', (64, 48), (10, 120, 200))\n\
+         ex = Image.Exif()\n\
+         ex[0x010F] = 'Maker'; ex[0x0110] = 'Phone 9'\n\
+         ex.get_ifd(0x8825).update({1: 'N', 2: (59.0, 54.0, 0.0), 3: 'E', 4: (10.0, 45.0, 0.0)})\n\
+         im.save('{dir}/trip.jpg', exif=ex, quality=90)\n\
+         shutil.copy('{dir}/trip.jpg', '{dir}/trip copy.jpg')\n\
+         pdf = pikepdf.new()\n\
+         pdf.add_blank_page(); pdf.add_blank_page()\n\
+         pdf.Root.OpenAction = pdf.make_indirect(Dictionary(S=Name.JavaScript, JS=String('app.alert(1)')))\n\
+         pdf.save('{dir}/form.pdf')",
+    );
+    let kinds = |id: &str| -> Vec<String> {
+        app.inspect_file(id)
+            .unwrap()
+            .findings
+            .into_iter()
+            .map(|f| f.kind)
+            .collect()
+    };
+
+    // A photo reveals where and with what it was taken; cleaning removes it.
+    let ids = add(app, vec![dir.join("trip.jpg"), dir.join("trip copy.jpg")]);
+    assert_eq!(app.duplicates(&ids), 1);
+    let found = kinds(&ids[0]);
+    assert!(found.iter().any(|k| k == "location"), "{found:?}");
+    assert!(found.iter().any(|k| k == "device"), "{found:?}");
+    let t = app.get_targets(&ids[..1]).unwrap();
+    assert!(t.operations.iter().any(|o| o.adapter == "file-clean"));
+    let job = app.create_job("file-clean", &ids[..1], json!({})).unwrap();
+    let done = wait_terminal(app, &job);
+    assert_eq!(done.state, JobState::Succeeded, "{:?}", done.error);
+    assert_eq!(done.outputs[0].suggested_name, "trip-clean.jpg");
+    // Copying a JPEG: its sandboxed worker hands back a PNG.
+    let png = app.clipboard_png(&job, 0).unwrap();
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let out = dir.join("cleaned");
+    std::fs::create_dir_all(&out).unwrap();
+    app.save_outputs(&job, &SaveDestination::Folder(out.clone()), false)
+        .unwrap();
+    let cleaned = add(app, vec![out.join("trip-clean.jpg")]);
+    let left = kinds(&cleaned[0]);
+    assert!(
+        !left.iter().any(|k| k == "location" || k == "device"),
+        "{left:?}"
+    );
+
+    // A PDF that runs JavaScript when opened is made safe.
+    let pdf = add(app, vec![dir.join("form.pdf")]);
+    assert!(kinds(&pdf[0]).iter().any(|k| k == "activeContent"));
+    let names = run_tool(app, &pdf, "file-disarm", json!({}));
+    assert_eq!(names, ["form-safe.pdf"]);
+
+    // A contact sheet of a photo and a PDF's pages.
+    let both = [ids[0].clone(), pdf[0].clone()];
+    let names = run_tool(app, &both, "contact-sheet", json!({"to": "png"}));
+    assert_eq!(names, ["contact-sheet.png"]);
+
+    for id in ids.iter().chain(&cleaned).chain(&pdf) {
+        app.remove_file(id).unwrap();
+    }
 }
 
 /// FFmpeg inside the sandbox: only adapters that list it get the grant.

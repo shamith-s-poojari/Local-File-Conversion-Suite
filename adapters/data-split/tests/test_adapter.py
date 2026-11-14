@@ -26,6 +26,7 @@ def test_every_n_rows_repeats_the_header(tmp_path: Path) -> None:
     r = run_in_process(ADAPTER, tmp_path / "job", [src], {"rows": 2, "fileTitles": ["nums"]})
     assert not r.errors
     assert r.names == ["nums-part-1.csv", "nums-part-2.csv", "nums-part-3.csv"]
+    assert r.sources == [0, 0, 0]
     assert [_read(o) for o in r.outputs] == [
         [["n"], ["0"], ["1"]],
         [["n"], ["2"], ["3"]],

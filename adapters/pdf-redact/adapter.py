@@ -42,6 +42,7 @@ from converter_sdk.pdf import (
     PdfAdapter,
     is_tagged,
     param_issue,
+    remove_hidden_layers,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue, WordBox
@@ -387,106 +388,6 @@ def draw_fills(
         ops.append("Q")
         page.contents_add(pdf.make_stream(b"q\n"), prepend=True)
         page.contents_add(pdf.make_stream(("Q\n" + "\n".join(ops) + "\n").encode("ascii")))
-
-
-def hidden_ocgs(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
-    """Optional-content groups that are off in the default configuration."""
-    props = pdf.Root.get(Name.OCProperties)
-    if not isinstance(props, pikepdf.Dictionary):
-        return set()
-    every = {o.objgen for o in props.get(Name.OCGs, pikepdf.Array()) if o.is_indirect}
-    default = props.get(Name.D)
-    if not isinstance(default, pikepdf.Dictionary):
-        return set()
-    off = {o.objgen for o in default.get(Name.OFF, pikepdf.Array()) if o.is_indirect}
-    if default.get(Name.BaseState) == Name.OFF:
-        on = {o.objgen for o in default.get(Name.ON, pikepdf.Array()) if o.is_indirect}
-        off |= every - on
-    return off
-
-
-def _is_hidden(oc: Any, hidden: set[tuple[int, int]]) -> bool:
-    """An OCG or OCMD that involves any hidden group. Erring towards hidden
-    removes more, never less, which is the safe side for redaction."""
-    if not isinstance(oc, pikepdf.Dictionary):
-        return False
-    if oc.is_indirect and oc.objgen in hidden:
-        return True
-    groups = oc.get(Name.OCGs)
-    if isinstance(groups, pikepdf.Dictionary):
-        groups = [groups]
-    if isinstance(groups, (pikepdf.Array, list)):
-        return any(g.is_indirect and g.objgen in hidden for g in groups)
-    return False
-
-
-def _strip_hidden_content(
-    pdf: pikepdf.Pdf, owner: Any, resources: Any, hidden: set[tuple[int, int]], seen: set
-) -> None:
-    """Remove ``/OC … BDC … EMC`` sections and ``Do`` of XObjects that belong
-    to hidden groups, in ``owner``'s content and in nested form XObjects."""
-    props = resources.get(Name.Properties) if isinstance(resources, pikepdf.Dictionary) else None
-    xobjects = resources.get(Name.XObject) if isinstance(resources, pikepdf.Dictionary) else None
-    out = []
-    skip_depth = 0
-    depth = 0
-    changed = False
-    for operands, operator in pikepdf.parse_content_stream(owner):
-        op = str(operator)
-        if op in ("BDC", "BMC"):
-            depth += 1
-            if skip_depth:
-                continue
-            if op == "BDC" and len(operands) == 2 and operands[0] == Name.OC:
-                tag = operands[1]
-                oc = props.get(tag) if isinstance(tag, pikepdf.Name) and props is not None else tag
-                if _is_hidden(oc, hidden):
-                    skip_depth = depth
-                    changed = True
-                    continue
-        elif op == "EMC":
-            if skip_depth:
-                if depth == skip_depth:
-                    skip_depth = 0
-                depth -= 1
-                continue
-            depth -= 1
-        elif skip_depth:
-            continue
-        elif op == "Do" and xobjects is not None:
-            xobj = xobjects.get(operands[0])
-            if isinstance(xobj, pikepdf.Stream):
-                if _is_hidden(xobj.stream_dict.get(Name.OC), hidden):
-                    changed = True
-                    continue
-                if xobj.stream_dict.get(Name.Subtype) == Name.Form and xobj.objgen not in seen:
-                    seen.add(xobj.objgen)
-                    _strip_hidden_content(
-                        pdf, xobj, xobj.stream_dict.get(Name.Resources), hidden, seen
-                    )
-        out.append((operands, operator))
-    if changed:
-        data = pikepdf.unparse_content_stream(out)
-        if isinstance(owner, pikepdf.Page):
-            owner.obj.Contents = pdf.make_stream(data)
-        else:
-            owner.write(data)
-
-
-def remove_hidden_layers(pdf: pikepdf.Pdf) -> bool:
-    """Spec 13.8 strip step: content in layers that are off by default goes.
-    Returns True if the document had optional content at all."""
-    if Name.OCProperties not in pdf.Root:
-        return False
-    hidden = hidden_ocgs(pdf)
-    if hidden:
-        seen: set[tuple[int, int]] = set()
-        for page in pdf.pages:
-            _strip_hidden_content(pdf, page, page.obj.get(Name.Resources), hidden, seen)
-    # What's left is visible content; drop the layer machinery so no viewer
-    # can toggle anything.
-    del pdf.Root[Name.OCProperties]
-    return True
 
 
 def rasterize(doc: Any, pages: set[int]) -> Any:

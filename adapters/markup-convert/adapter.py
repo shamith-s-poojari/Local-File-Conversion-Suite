@@ -29,6 +29,7 @@ from converter_sdk import (
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
 from converter_sdk.markup import (
     PAGE_CSS,
+    check_zip,
     html_document,
     html_to_markdown,
     html_to_text,
@@ -271,12 +272,7 @@ class Epub:
         except (zipfile.BadZipFile, OSError):
             raise AdapterError("E_INPUT_CORRUPT") from None
         try:
-            infos = self.zip.infolist()
-            if (
-                any(i.file_size > EPUB_MAX_MEMBER for i in infos)
-                or sum(i.file_size for i in infos) > EPUB_MAX_TOTAL
-            ):
-                raise AdapterError("E_LIMIT_EXCEEDED", {"limit": "bytes", "max": EPUB_MAX_TOTAL})
+            infos = check_zip(self.zip, member_max=EPUB_MAX_MEMBER, total_max=EPUB_MAX_TOTAL)
             self.names = {i.filename for i in infos}
             self._refuse_drm()
             container = self._xml("META-INF/container.xml")

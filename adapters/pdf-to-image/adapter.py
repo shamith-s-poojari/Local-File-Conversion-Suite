@@ -115,7 +115,7 @@ class PdfToImageAdapter(PdfAdapter):
         for index, (path, pages) in enumerate(plans):
             title = self._title(params, index)
             if to == "svg":
-                outputs += self._svg(ctx, path, pages, title)
+                outputs += self._svg(ctx, path, pages, title, index)
                 done += len(pages)
                 ctx.progress("render", done, total)
                 continue
@@ -130,7 +130,7 @@ class PdfToImageAdapter(PdfAdapter):
                     name = f"{title}.{to}" if len(pages) == 1 else f"{title}-page-{n}.{to}"
                     out = ctx.output_path(name)
                     self._save(img, out, to, params)
-                    outputs.append(OutputFile(out))
+                    outputs.append(OutputFile(out, source=index))
                 done += 1
                 ctx.progress("render", done, total)
             doc.close()
@@ -141,7 +141,7 @@ class PdfToImageAdapter(PdfAdapter):
                     buf, "TIFF", compression="tiff_lzw", save_all=True, append_images=images[1:]
                 )
                 out.write_bytes(buf.getvalue())
-                outputs.append(OutputFile(out))
+                outputs.append(OutputFile(out, source=index))
         return outputs
 
     @staticmethod
@@ -197,7 +197,9 @@ class PdfToImageAdapter(PdfAdapter):
         img.save(buf, PIL_FORMAT[to], **save)
         out.write_bytes(buf.getvalue())
 
-    def _svg(self, ctx: JobContext, path: Path, pages: list[int], title: str) -> list[OutputFile]:
+    def _svg(
+        self, ctx: JobContext, path: Path, pages: list[int], title: str, index: int
+    ) -> list[OutputFile]:
         import pymupdf  # noqa: PLC0415
 
         doc = pymupdf.open(path)
@@ -212,7 +214,7 @@ class PdfToImageAdapter(PdfAdapter):
                 name = f"{title}.svg" if len(pages) == 1 else f"{title}-page-{n}.svg"
                 out = ctx.output_path(name)
                 out.write_text(svg, "utf-8", newline="\n")
-                outputs.append(OutputFile(out))
+                outputs.append(OutputFile(out, source=index))
             return outputs
         finally:
             doc.close()

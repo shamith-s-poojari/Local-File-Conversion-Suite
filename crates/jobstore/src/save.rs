@@ -26,6 +26,37 @@ pub enum SaveDestination {
     /// Any number of outputs into this folder from the folder dialog. Name
     /// collisions get a numeric suffix; nothing is ever replaced.
     Folder(PathBuf),
+    /// Like [`SaveDestination::Folder`], but outputs that came from a
+    /// dropped folder are saved in the same layout below it.
+    FolderKeepingLayout(FolderLayout),
+}
+
+/// Where each staged input came from, for [`SaveDestination::FolderKeepingLayout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderLayout {
+    /// The folder the user chose.
+    pub dir: PathBuf,
+    /// Per staged input (index = `OutputFile::source`): the dropped folder's
+    /// name and the directories below it, with `/` separators, or `None` for
+    /// a file that was dropped on its own. Each component is sanitized again
+    /// when saving; `..`, absolute paths and drive letters can't escape `dir`.
+    pub inputs: Vec<Option<String>>,
+}
+
+impl FolderLayout {
+    /// The directory components under `dir` for an output, if it keeps a layout.
+    fn components(&self, output: &OutputFile) -> Option<Vec<String>> {
+        let folder = self.inputs.get(output.source?)?.as_deref()?;
+        let parts: Vec<String> = folder
+            .split(['/', '\\'])
+            .filter(|c| {
+                !c.trim_matches(|ch: char| ch == '.' || ch.is_whitespace())
+                    .is_empty()
+            })
+            .map(|c| sanitize_file_name(c, "", "folder"))
+            .collect();
+        (!parts.is_empty()).then_some(parts)
+    }
 }
 
 /// Confirmations the user gave after seeing a [`SaveCheck`].
@@ -98,7 +129,10 @@ impl JobStore {
         let out = dir.join("out");
         let result = match dest {
             SaveDestination::File(path) => save_file(&out, &outputs[0], path).map(|p| vec![p]),
-            SaveDestination::Folder(folder) => save_into_folder(&out, &outputs, folder),
+            SaveDestination::Folder(folder) => save_into_folder(&out, &outputs, folder, None),
+            SaveDestination::FolderKeepingLayout(layout) => {
+                save_into_folder(&out, &outputs, &layout.dir, Some(layout))
+            }
         };
         let saved = match result {
             Ok(saved) => saved,
@@ -167,6 +201,7 @@ impl JobStore {
 fn dest_path(dest: &SaveDestination) -> &Path {
     match dest {
         SaveDestination::File(p) | SaveDestination::Folder(p) => p,
+        SaveDestination::FolderKeepingLayout(l) => &l.dir,
     }
 }
 
@@ -207,6 +242,7 @@ fn save_into_folder(
     out: &Path,
     outputs: &[OutputFile],
     folder: &Path,
+    layout: Option<&FolderLayout>,
 ) -> Result<Vec<PathBuf>, JobError> {
     let meta = std::fs::metadata(folder).map_err(JobError::io("opening the save folder"))?;
     if !meta.is_dir() {
@@ -215,19 +251,83 @@ fn save_into_folder(
         ));
     }
     let mut saved = Vec::with_capacity(outputs.len());
+    let mut created = Vec::new();
+    let mut touched: Vec<PathBuf> = vec![folder.to_path_buf()];
     for (n, output) in outputs.iter().enumerate() {
-        match save_one_into_folder(out, output, n, folder) {
+        let result = match layout.and_then(|l| l.components(output)) {
+            Some(parts) => ensure_subdirs(folder, &parts, &mut created).and_then(|dir| {
+                if !touched.contains(&dir) {
+                    touched.push(dir.clone());
+                }
+                save_one_into_folder(out, output, n, &dir)
+            }),
+            None => save_one_into_folder(out, output, n, folder),
+        };
+        match result {
             Ok(p) => saved.push(p),
             Err(e) => {
                 for p in &saved {
                     let _ = std::fs::remove_file(p);
                 }
+                // Only directories this save made, deepest first, and only
+                // if they're empty.
+                for d in created.iter().rev() {
+                    let _ = std::fs::remove_dir(d);
+                }
                 return Err(e);
             }
         }
     }
-    sync_dir(folder);
+    for d in &touched {
+        sync_dir(d);
+    }
     Ok(saved)
+}
+
+/// Creates `parts` one at a time below `base`, reusing real directories that
+/// already exist. A name taken by a file or a link gets a ` (k)` suffix, so
+/// nothing outside `base` is ever reached through a link. Records what it made.
+fn ensure_subdirs(
+    base: &Path,
+    parts: &[String],
+    created: &mut Vec<PathBuf>,
+) -> Result<PathBuf, JobError> {
+    let mut dir = base.to_path_buf();
+    for part in parts {
+        let mut chosen = None;
+        for k in 0..=MAX_SUFFIX {
+            let name = if k == 0 {
+                part.clone()
+            } else {
+                format!("{part} ({k})")
+            };
+            let candidate = dir.join(&name);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(m) if m.is_dir() => {
+                    chosen = Some(candidate);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    match std::fs::create_dir(&candidate) {
+                        Ok(()) => {
+                            created.push(candidate.clone());
+                            chosen = Some(candidate);
+                            break;
+                        }
+                        // Made by someone else just now: look again.
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                        Err(e) => return Err(JobError::io("creating a folder")(e)),
+                    }
+                }
+                Err(e) => return Err(JobError::io("opening the save folder")(e)),
+            }
+        }
+        dir = chosen.ok_or(JobError::InvalidInput(
+            "too many folders with the same name",
+        ))?;
+    }
+    Ok(dir)
 }
 
 fn save_one_into_folder(

@@ -39,6 +39,14 @@ If the sandbox self-test fails on a system, processing stays off there. The app 
 - **Rotate or change speed** re-encodes the whole video, and so does changing audio speed or volume.
 - **Combine spreadsheets** stacks every sheet of a workbook; empty sheets are skipped. **Split** uses a workbook's first sheet only, and makes at most 1,000 files from one input.
 
+## Safety, privacy and convenience (ADR 0005)
+
+- **Remove hidden details** doesn't touch pixels, text inside pictures, or tracked changes (`TRACKED_CHANGES_KEPT`). A JPEG with a rotation in its EXIF, and TIFF and AVIF files, are re-encoded once (`REENCODED`); an animated AVIF keeps its first frame. Signed PDFs lose their signature (`SIGNATURE_INVALIDATED`).
+- **Make safe to open** keeps what you see but removes interaction: forms with actions are flattened, link annotations whose action was removed stay as inert links, and formulas that used an external workbook keep their last values. Excel 4.0 macro sheets are detected but not removed, so such a file fails the check rather than passing. Legacy `.doc`, `.xls` and `.ppt` aren't accepted.
+- **Copy** puts any picture result (as an image, at most 4096 pixels on its longest side) or text result on the clipboard. Audio, video, PDF and Office results can't be copied; save them instead.
+- **Folders:** a folder is read up to eight levels deep, without following links or reading hidden files, and still up to 200 files. **Keep folder layout** puts each result next to where its input was; a result made from several files (a merge, a join, a contact sheet) goes in the top folder.
+- **Duplicates** are found by comparing file contents, so two copies of a photo with different metadata count as different.
+
 ## PDF compression and page numbers
 
 - **Compress PDF** shrinks only 8-bit grey or colour pictures. CMYK, palette and spot-colour pictures, 1-bit scans, and JBIG2, CCITT or JPEG 2000 data are left alone, so some files barely shrink. If nothing gets smaller, the original is kept (`KEPT_ORIGINAL`).

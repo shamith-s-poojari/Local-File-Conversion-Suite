@@ -63,6 +63,25 @@ Results keep the document properties of their source (title, author and so on) u
 
 The tools don't add your name, folder paths or the time to results, with one exception: **Merge's per-file bookmarks are titled with the original file names** (choose "keep" or "none" for bookmarks to avoid that).
 
+## Finding and removing hidden details
+
+When you add a file, its sandboxed worker lists what the file gives away (location, camera or device, author, software, dates, comments, tracked changes, hidden content, tags) and what it could do when opened (macros, scripts, embedded files, outside links). The list is made on your device. A finding names what was found, or a short value such as a camera model or coordinates; it never contains the document's text.
+
+**Remove hidden details** (`file-clean`, `media-clean`) removes:
+
+- photos: EXIF (including GPS and the camera's serial number), XMP, IPTC, comments and PNG text, without changing a pixel; a rotated JPEG, TIFF and AVIF are re-encoded once;
+- PDF: document properties, XMP, thumbnails and private application data, and by default comments; hidden layers on request;
+- Word, Excel and PowerPoint: author, last editor, dates, company, template, custom properties and the thumbnail, and by default comments;
+- audio and video: every container, stream and chapter tag, and cover art on request, without re-encoding.
+
+It doesn't remove what is in the content itself: a face or a street sign in a photo, text inside a picture, or tracked changes (they are reported; accept or reject them in your editor first). Legacy `.doc`, `.xls` and `.ppt` files aren't accepted. Each result is read again, and the job fails if a location, device, author or date is still there.
+
+**Make safe to open** (`file-disarm`) removes macros, ActiveX, embedded files and objects, scripts and automatic actions, form submissions, and links that load something from outside the file. Plain web links stay unless you ask. An independent check in a fresh process must find nothing active, or no file is produced.
+
+## Clipboard
+
+Paste turns a picture, a table or text into a file in the app's data folder; it is deleted when you remove it, clear the selection or quit. Copy puts a result on the clipboard from the app's core: text as it is, and a picture after its own sandboxed worker has decoded it to PNG, so the core never parses the picture itself. The interface has no clipboard permission.
+
 ## Known gaps
 
 - WebView traffic is not yet measured (spike S4).

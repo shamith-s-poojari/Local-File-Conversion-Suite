@@ -98,7 +98,7 @@ class ImageCompressAdapter(Adapter):
                     notes.add("KEPT_ORIGINAL")
                 else:
                     out.write_bytes(data)
-            outputs.append(OutputFile(out))
+            outputs.append(OutputFile(out, source=i))
             ctx.progress("compress", i + 1, total)
         for code in sorted(notes):
             ctx.warn(code)

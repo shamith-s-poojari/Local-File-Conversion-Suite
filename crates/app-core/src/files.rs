@@ -28,6 +28,9 @@ pub(crate) struct FileEntry {
     pub worker: Option<FileWorker>,
     /// For closing the least recently used worker first.
     pub last_used: std::time::Instant,
+    /// A pasted item in the data root's `pasted/` folder: deleted when the
+    /// file leaves the selection.
+    pub temp: bool,
 }
 
 impl FileEntry {
@@ -38,6 +41,7 @@ impl FileEntry {
             password: None,
             worker: None,
             last_used: std::time::Instant::now(),
+            temp: false,
         }
     }
 
@@ -59,6 +63,15 @@ pub struct InspectInfo {
     /// Image, audio or video facts (ADR 0003).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media: Option<Value>,
+    /// What the file reveals or could do when opened (ADR 0005).
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Finding {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl InspectInfo {
@@ -70,6 +83,7 @@ impl InspectInfo {
             signed: None,
             warnings: Vec::new(),
             media: None,
+            findings: Vec::new(),
         }
     }
 }
@@ -178,6 +192,19 @@ impl FileWorker {
                 })
                 .unwrap_or_default(),
             media: r.get("media").filter(|m| m.is_object()).cloned(),
+            findings: r["findings"]
+                .as_array()
+                .map(|f| {
+                    f.iter()
+                        .filter_map(|x| {
+                            Some(Finding {
+                                kind: x["kind"].as_str()?.to_owned(),
+                                detail: x["detail"].as_str().map(str::to_owned),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 
@@ -233,6 +260,26 @@ impl FileWorker {
             width_px: r["widthPx"].as_u64().unwrap_or(0),
             height_px: r["heightPx"].as_u64().unwrap_or(0),
         })
+    }
+
+    /// Renders `input`'s first page or frame to a PNG in the job's own
+    /// folder and returns its path (for the clipboard; never registered as
+    /// a preview).
+    pub fn render_file(&mut self, input: &str, dpi: u32) -> CommandResult<PathBuf> {
+        let tag: String = input
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let sub = format!("clip_{tag}");
+        let folder = self.dir.join("out").join(&sub);
+        std::fs::create_dir_all(&folder)
+            .map_err(|_| CommandError::new("E_RESOURCE_DISK", "previewFolder"))?;
+        self.request(
+            RequestKind::Render,
+            json!({ "input": input, "page": 1, "dpi": dpi, "out": format!("out/{sub}/1.png") }),
+            None,
+        )?;
+        Ok(folder.join("1.png"))
     }
 
     pub fn page_text(

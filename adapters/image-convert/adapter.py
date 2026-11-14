@@ -16,6 +16,7 @@ from converter_sdk import (
     RenderedPage,
     ResourceEstimate,
     ValidationReport,
+    reveal,
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
@@ -262,6 +263,7 @@ class ImageConvertAdapter(ConversionAdapter):
                 pages=1,
                 encryption="none",
                 media=MediaInfo(kind="image", width=w, height=h, frames=1),
+                findings=reveal.findings(ctx, input),
             )
         img = _open(input)
         try:
@@ -270,6 +272,7 @@ class ImageConvertAdapter(ConversionAdapter):
                 pages=1,
                 encryption="none",
                 media=MediaInfo(kind="image", width=img.width, height=img.height, frames=frames),
+                findings=reveal.findings(ctx, input),
             )
         finally:
             img.close()

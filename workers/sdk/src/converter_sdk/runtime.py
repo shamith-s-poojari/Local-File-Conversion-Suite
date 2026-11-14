@@ -218,6 +218,7 @@ class Worker:
             signed=r.signed,
             warnings=r.warnings or None,
             media=r.media,
+            findings=r.findings[:64] or None,
         )
 
     def _validate(self, ctx: JobContext, request: Validate) -> ValidateResult:
@@ -257,7 +258,12 @@ class Worker:
             raise AdapterError("E_INTERNAL", {"reason": "outputOutsideOut"})
         size, digest = _size_and_sha256(path)
         return ExecuteOutput(
-            path=relative, suggestedName=name, pages=output.pages, sizeBytes=size, sha256=digest
+            path=relative,
+            suggestedName=name,
+            pages=output.pages,
+            sizeBytes=size,
+            sha256=digest,
+            source=_source_of(ctx, output),
         )
 
     def _render(self, ctx: JobContext, request: Render) -> RenderResult:
@@ -382,3 +388,11 @@ def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
     proto_out.flush()
     # Skip interpreter teardown: daemon threads and engine finalizers can stall it.
     os._exit(code)
+
+
+def _source_of(ctx: JobContext, output: OutputFile) -> int | None:
+    """The input an output came from: as the adapter says, or the only
+    input when there is just one (ADR 0005, keeping folder layout)."""
+    if output.source is not None:
+        return output.source
+    return 0 if len(ctx.inputs) == 1 else None

@@ -287,6 +287,8 @@ class InProcessRun:
     names: list[str]
     warnings: list[str]
     sent: list[Any]
+    sources: list[int | None] = field(default_factory=list)
+    """Each output's ``OutputFile.source`` (ADR 0005)."""
 
 
 def run_in_process(
@@ -318,5 +320,6 @@ def run_in_process(
     outputs = adapter.execute_conversion(ctx, params)
     run.outputs = [o.path for o in outputs]
     run.names = [ctx.suggested_name(o.path) for o in outputs]
+    run.sources = [o.source for o in outputs]
     run.warnings = [m.code for m in sent if getattr(m, "type", None) == "warning"]
     return run

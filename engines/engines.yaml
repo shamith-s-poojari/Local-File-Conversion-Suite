@@ -31,4 +31,5 @@ engines:
   # ADR 0003
   ffmpeg:       { license: gpl-separate-process, version: null }
   markdown-it-py: { license: permissive, version: null }
+  lxml:         { license: permissive, version: null }      # ADR 0005; XML and HTML parsing with entities, DTDs and network off
   pyyaml:       { license: permissive, version: null }       # MIT

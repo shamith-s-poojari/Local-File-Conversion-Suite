@@ -16,6 +16,7 @@ def test_each_file_keeps_its_format_and_turns(tmp_path: Path) -> None:
     r = run_in_process(ADAPTER, tmp_path / "job", srcs, {"rotate": 90, "fileTitles": ["a", "b"]})
     assert not r.errors
     assert r.names == ["a-edited.png", "b-edited.jpg"]
+    assert r.sources == [0, 1]  # each result names its input (folder layout)
     with Image.open(r.outputs[0]) as png:
         assert png.format == "PNG"
         assert png.size == (200, 320)  # 320×200 turned a quarter

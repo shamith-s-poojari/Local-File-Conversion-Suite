@@ -28,6 +28,8 @@ export interface FileView {
   inspect?: InspectInfo;
   /** Why the user must act before continuing. */
   needs?: "password" | "format" | "download";
+  /** For `folderTruncated`: how many files were left out. */
+  count?: number;
 }
 
 export interface JobView {
@@ -75,7 +77,7 @@ export type Event =
   | { type: "DISMISS" }
   | { type: "EDIT" }
   | { type: "ADJUST" }
-  | { type: "SAVE" }
+  | { type: "SAVE"; keepLayout?: boolean }
   | { type: "CONFIRM_OVERWRITE" }
   | { type: "DISCARD_CONFIRMED" }
   | { type: "NEW" }
@@ -124,7 +126,7 @@ export const appMachine = setup({
     >(async () => {
       throw new Error("not provided");
     }),
-    save: fromPromise<SaveResult, { jobId: string; confirm: boolean }>(async () => {
+    save: fromPromise<SaveResult, { jobId: string; confirm: boolean; keepLayout?: boolean }>(async () => {
       throw new Error("not provided");
     }),
     snapshotOutputs: fromPromise<JobSnapshot["outputs"], { jobId: string }>(async () => []),
@@ -432,7 +434,11 @@ export const appMachine = setup({
         saving: {
           invoke: {
             src: "save",
-            input: ({ context }) => ({ jobId: context.job?.jobId ?? "", confirm: false }),
+            input: ({ context, event }) => ({
+              jobId: context.job?.jobId ?? "",
+              confirm: false,
+              keepLayout: event.type === "SAVE" && event.keepLayout === true,
+            }),
             onDone: [
               {
                 guard: ({ event }) => event.output.status === "saved",
@@ -493,7 +499,7 @@ function withoutSecrets(params: Record<string, unknown>): Record<string, unknown
 }
 
 function fromResult(r: FileResult): FileView {
-  return { file: r.file, displayName: r.displayName, error: r.error };
+  return { file: r.file, displayName: r.displayName, error: r.error, count: r.count };
 }
 
 function allIds(ctx: Context): string[] {

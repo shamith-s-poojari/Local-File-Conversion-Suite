@@ -9,4 +9,4 @@ fidelityNotes: []
 limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 180, diskFactor: 4.0 }
 params: ./params.schema.json
 platforms: [windows, macos, linux]
-requires: [ffmpeg]
+requires: [ffmpeg, pillow]

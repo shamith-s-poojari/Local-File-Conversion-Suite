@@ -1,0 +1,14 @@
+id: file-disarm
+kind: operation
+title: Make safe to open
+workerClass: pdf
+inputs: { formats: [pdf, docx, xlsx, pptx, svg, html], min: 1, max: 500 }
+outputs: { format: same, cardinality: many }
+fidelity: H
+fidelityNotes:
+  [ACTIVE_CONTENT_REMOVED, MACROS_REMOVED, EXTERNAL_LINKS_REMOVED, FORMS_FLATTENED, SIGNATURE_INVALIDATED]
+# Two processes: the worker and its verifier.
+limits: { timeoutBaseS: 60, timeoutSPerMb: 3, noProgressS: 180, diskFactor: 3.0, processes: 2 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pikepdf, lxml]

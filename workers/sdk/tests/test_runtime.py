@@ -318,3 +318,17 @@ def test_empty_input_without_the_null_device(monkeypatch: pytest.MonkeyPatch) ->
         assert os.read(fd, 10) == b""
     finally:
         os.close(fd)
+
+
+def test_an_only_input_owns_every_output(tmp_path: Path) -> None:
+    from converter_sdk.context import OutputFile
+    from converter_sdk.runtime import _source_of
+
+    class Ctx:
+        def __init__(self, n: int) -> None:
+            self.inputs = [tmp_path / f"{i}.pdf" for i in range(n)]
+
+    out = OutputFile(tmp_path / "a.pdf")
+    assert _source_of(Ctx(1), out) == 0  # type: ignore[arg-type]
+    assert _source_of(Ctx(2), out) is None  # type: ignore[arg-type]
+    assert _source_of(Ctx(2), OutputFile(tmp_path / "a.pdf", source=1)) == 1  # type: ignore[arg-type]

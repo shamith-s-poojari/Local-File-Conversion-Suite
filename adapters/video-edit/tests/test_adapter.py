@@ -23,6 +23,7 @@ def test_rotation_turns_the_frame_and_keeps_the_format(tmp_path: Path) -> None:
     r = run_in_process(ADAPTER, tmp_path / "job", [a, b], {"rotate": 90, "fileTitles": ["a", "b"]})
     assert not r.errors
     assert r.names == ["a-edited.mp4", "b-edited.mkv"]
+    assert r.sources == [0, 1]
     for out in r.outputs:
         v = _video(out)
         assert (v["width"], v["height"]) == (240, 320)

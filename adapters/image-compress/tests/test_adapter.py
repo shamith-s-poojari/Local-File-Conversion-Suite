@@ -26,6 +26,7 @@ def test_lossy_images_get_under_the_target_in_their_format(tmp_path: Path) -> No
     r = run_in_process(ADAPTER, tmp_path / "job", srcs, {"targetKb": 200, "fileTitles": ["a", "b"]})
     assert not r.errors
     assert r.names == ["a-compressed.jpg", "b-compressed.webp"]
+    assert r.sources == [0, 1]
     for out, fmt in zip(r.outputs, ("JPEG", "WEBP"), strict=True):
         assert out.stat().st_size <= 200_000
         with Image.open(out) as img:

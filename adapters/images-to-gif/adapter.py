@@ -14,23 +14,11 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
-from converter_sdk.images import WHITE, flatten, has_alpha, pixels, read_frames
+from converter_sdk.images import pixels, read_frames
+from converter_sdk.sheets import fit_on_canvas
 from PIL import Image
 
 MB = 1024 * 1024
-
-
-def fit_on_canvas(img: Image.Image, size: tuple[int, int]) -> Image.Image:
-    """``img`` scaled to fit inside ``size``, centred on white."""
-    img = flatten(img) if has_alpha(img) else img.convert("RGB")
-    w, h = size
-    f = min(w / img.width, h / img.height)
-    scaled = img.resize(
-        (max(1, round(img.width * f)), max(1, round(img.height * f))), Image.Resampling.LANCZOS
-    )
-    canvas = Image.new("RGB", size, WHITE)
-    canvas.paste(scaled, ((w - scaled.width) // 2, (h - scaled.height) // 2))
-    return canvas
 
 
 class ImagesToGifAdapter(Adapter):

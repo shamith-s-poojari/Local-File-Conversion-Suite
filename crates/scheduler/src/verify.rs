@@ -42,6 +42,7 @@ pub fn verify_outputs(
             suggested_name: o["suggestedName"].as_str().unwrap_or_default().to_owned(),
             extension: format.as_str().to_owned(),
             size_bytes: o["sizeBytes"].as_u64().unwrap_or(u64::MAX),
+            source: o["source"].as_u64().and_then(|i| usize::try_from(i).ok()),
         });
         hashes.push(o["sha256"].as_str().unwrap_or_default().to_owned());
         formats.push(*format);

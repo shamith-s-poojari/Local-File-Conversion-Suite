@@ -117,7 +117,7 @@ class AudioEditAdapter(Adapter):
             title = ConversionAdapter.title(params, i)
             out = ctx.output_path(f"{title}-edited.{fmt}")
             ffmpeg(ctx, [path], args, out, duration=(seconds / speed) or 1, stage="edit")
-            outputs.append(OutputFile(out))
+            outputs.append(OutputFile(out, source=i))
         if dropped:
             ctx.warn("STREAMS_DROPPED")
         return outputs

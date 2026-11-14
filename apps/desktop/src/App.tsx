@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { fromPromise } from "xstate";
 import { api as realApi, events, isCommandError, type Api, type Diagnostics, type Format, type Registry } from "./api";
 import { Cancelled, Configure, Failed, Home, ProgressScreen, Result, Review, Saved, Settings } from "./features/screens";
-import { GearIcon } from "./icons";
+import { GearIcon, WarningIcon } from "./icons";
+import { ACTION_ERRORS, errorMessage } from "./text";
 import { appMachine, type FileView } from "./machines/app";
 
 /** Inspects files four at a time: each starts a sandboxed worker. */
@@ -46,6 +47,23 @@ export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[
   return out;
 }
 
+/** Tab-separated lines, as Excel, Sheets and web tables put on the clipboard. */
+export function looksTabular(text: string): boolean {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
+  return lines.length >= 2 && lines.filter((l) => l.includes("\t")).length >= lines.length * 0.8;
+}
+
+/** What a paste becomes: a picture, a table or text (ADR 0005). */
+export async function readPaste(
+  data: DataTransfer,
+): Promise<{ kind: "image" | "table" | "text"; bytes: Uint8Array } | null> {
+  const image = Array.from(data.files).find((f) => f.type === "image/png" || f.type === "image/jpeg");
+  if (image) return { kind: "image", bytes: new Uint8Array(await image.arrayBuffer()) };
+  const text = data.getData("text/plain");
+  if (!text.trim()) return null;
+  return { kind: looksTabular(text) ? "table" : "text", bytes: new TextEncoder().encode(text) };
+}
+
 export function App({ api = realApi }: { api?: Api }) {
   const machine = useMemo(
     () =>
@@ -58,8 +76,8 @@ export function App({ api = realApi }: { api?: Api }) {
                 ? api.createConversion(input.fileIds, input.to, input.params)
                 : api.createJob(input.operation, input.fileIds, input.params),
           ),
-          save: fromPromise(({ input }: { input: { jobId: string; confirm: boolean } }) =>
-            input.confirm ? api.confirmSave(input.jobId) : api.saveOutputs(input.jobId),
+          save: fromPromise(({ input }: { input: { jobId: string; confirm: boolean; keepLayout?: boolean } }) =>
+            input.confirm ? api.confirmSave(input.jobId) : api.saveOutputs(input.jobId, input.keepLayout ?? false),
           ),
           snapshotOutputs: fromPromise(async ({ input }: { input: { jobId: string } }) => {
             const s = await api.getSnapshot();
@@ -79,6 +97,27 @@ export function App({ api = realApi }: { api?: Api }) {
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [settings, setSettings] = useState(false);
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null);
+  const acceptsPaste = !settings && (state.matches("idle") || state.matches("configuring"));
+
+  useEffect(() => {
+    if (!acceptsPaste) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.("input, textarea, [contenteditable]")) return; // a field's own paste
+      if (!e.clipboardData) return;
+      e.preventDefault();
+      setPasteProblem(null);
+      void readPaste(e.clipboardData)
+        .then((p) => (p ? api.addPasted(p.kind, p.bytes) : []))
+        .then((results) => results.length && send({ type: "FILES_ADDED", results }))
+        .catch((err: { code?: string; reason?: string }) =>
+          setPasteProblem((err.reason && ACTION_ERRORS[err.reason]) ?? errorMessage(err.code ?? "E_INTERNAL").what),
+        );
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [acceptsPaste, api, send]);
 
   useEffect(() => {
     const unlisten = [
@@ -152,6 +191,17 @@ export function App({ api = realApi }: { api?: Api }) {
           <GearIcon /> Settings
         </button>
       </header>
+      {pasteProblem && (
+        <div className="banner error paste-problem" role="alert">
+          <WarningIcon />
+          <div>
+            <p>{pasteProblem}</p>
+          </div>
+          <button type="button" className="ghost sm" onClick={() => setPasteProblem(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <main id="main">{screen}</main>
     </div>
   );

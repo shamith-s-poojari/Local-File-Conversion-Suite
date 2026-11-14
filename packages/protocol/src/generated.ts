@@ -162,7 +162,12 @@ export type WarningCode =
   | "REENCODED"
   | "KEPT_ORIGINAL"
   | "TARGET_NOT_REACHED"
-  | "COLUMNS_MISMATCHED";
+  | "COLUMNS_MISMATCHED"
+  | "ACTIVE_CONTENT_REMOVED"
+  | "MACROS_REMOVED"
+  | "EXTERNAL_LINKS_REMOVED"
+  | "DETAILS_REMOVED"
+  | "TRACKED_CHANGES_KEPT";
 
 /**
  * One line of the worker protocol.
@@ -395,6 +400,12 @@ export interface InspectResult {
    */
   warnings?: WarningItem[];
   media?: MediaInfo;
+  /**
+   * What the file reveals or could do when opened (ADR 0005). Display only.
+   *
+   * @maxItems 64
+   */
+  findings?: Finding[];
 }
 /**
  * This interface was referenced by `Message`'s JSON-Schema
@@ -424,6 +435,30 @@ export interface MediaInfo {
   fps?: number;
   hasAudio?: boolean;
   hasVideo?: boolean;
+}
+/**
+ * This interface was referenced by `Message`'s JSON-Schema
+ * via the `definition` "Finding".
+ */
+export interface Finding {
+  kind:
+    | "location"
+    | "device"
+    | "author"
+    | "software"
+    | "dates"
+    | "comments"
+    | "trackedChanges"
+    | "hiddenContent"
+    | "activeContent"
+    | "macros"
+    | "externalLinks"
+    | "embeddedFiles"
+    | "tags";
+  /**
+   * A short value to show, such as a camera model. Never document text.
+   */
+  detail?: string;
 }
 /**
  * Validation outcome. Non-empty errors means the job must not run.
@@ -489,6 +524,10 @@ export interface ExecuteOutput {
   pages?: number;
   sizeBytes: Count;
   sha256: Sha256;
+  /**
+   * Index of the input this output came from, when it came from one.
+   */
+  source?: number;
 }
 /**
  * This interface was referenced by `Message`'s JSON-Schema

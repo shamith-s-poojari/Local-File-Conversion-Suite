@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-can-keep-layout"
+description = "Enables the can_keep_layout command without any pre-configured scope."
+commands.allow = ["can_keep_layout"]
+
+[[permission]]
+identifier = "deny-can-keep-layout"
+description = "Denies the can_keep_layout command without any pre-configured scope."
+commands.deny = ["can_keep_layout"]

@@ -205,6 +205,10 @@ def encode(
         frames = [to_palette(x) for x in frames]
     else:
         raise AdapterError("E_INTERNAL", {"reason": "unsupportedFormat"}, retryable=False)
+    if fmt in ("jpg", "gif"):
+        # Pillow writes ``image.info["comment"]`` back out unless told not to,
+        # which would carry a source file's comment into every output.
+        save["comment"] = b""
     if keep_exif and f.exif and fmt in ("jpg", "png", "webp", "tiff", "avif"):
         save["exif"] = f.exif
     if f.icc and fmt in ("jpg", "png", "webp", "tiff", "avif"):

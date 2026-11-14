@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Make safe to open",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "removeLinks": {
+      "title": "Also remove web links",
+      "description": "Links that open a web page are kept by default. Links that load things from outside the file, open other files or start programs are always removed.",
+      "type": "boolean",
+      "default": false
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

@@ -94,6 +94,7 @@ impl Fixture {
                         suggested_name: (*name).into(),
                         extension: "pdf".into(),
                         size_bytes: bytes.len() as u64,
+                        source: None,
                     })
                     .collect(),
             )
@@ -145,6 +146,7 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
                 suggested_name: "merged.pdf".into(),
                 extension: "pdf".into(),
                 size_bytes: 8,
+                source: None,
             }],
         )
         .unwrap();
@@ -311,6 +313,7 @@ fn record_outputs_distrusts_the_worker() {
         suggested_name: "x.pdf".into(),
         extension: "pdf".into(),
         size_bytes: size,
+        source: None,
     };
     for bad in [
         out("../escape.pdf", 1),

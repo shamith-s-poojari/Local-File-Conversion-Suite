@@ -14,6 +14,7 @@ from converter_sdk import (
     RenderedPage,
     ResourceEstimate,
     ValidationReport,
+    reveal,
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
@@ -87,7 +88,12 @@ class AudioConvertAdapter(ConversionAdapter):
         info = probe(ctx, input)
         if not audio_streams(info):
             raise AdapterError("E_INPUT_CORRUPT")
-        return InspectReport(pages=0, encryption="none", media=media_info(info, "audio"))
+        return InspectReport(
+            pages=0,
+            encryption="none",
+            media=media_info(info, "audio"),
+            findings=reveal.media_findings(info),
+        )
 
     def render(self, ctx: JobContext, input: Path, page: int, dpi: int, out: Path) -> RenderedPage:
         """A waveform: 8 × ``dpi`` pixels wide, a quarter as tall."""

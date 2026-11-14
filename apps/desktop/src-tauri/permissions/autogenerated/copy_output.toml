@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-output"
+description = "Enables the copy_output command without any pre-configured scope."
+commands.allow = ["copy_output"]
+
+[[permission]]
+identifier = "deny-copy-output"
+description = "Denies the copy_output command without any pre-configured scope."
+commands.deny = ["copy_output"]

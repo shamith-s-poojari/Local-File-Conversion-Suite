@@ -42,6 +42,9 @@ class OutputFile:
 
     path: Path
     pages: int | None = None
+    source: int | None = None
+    """Index of the input this output came from (ADR 0005), for keeping a
+    dropped folder's layout when saving."""
 
 
 @dataclass

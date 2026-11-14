@@ -203,7 +203,12 @@
         "REENCODED",
         "KEPT_ORIGINAL",
         "TARGET_NOT_REACHED",
-        "COLUMNS_MISMATCHED"
+        "COLUMNS_MISMATCHED",
+        "ACTIVE_CONTENT_REMOVED",
+        "MACROS_REMOVED",
+        "EXTERNAL_LINKS_REMOVED",
+        "DETAILS_REMOVED",
+        "TRACKED_CHANGES_KEPT"
       ]
     },
     "WarningCodeString": {
@@ -719,6 +724,46 @@
         },
         "media": {
           "$ref": "#/definitions/MediaInfo"
+        },
+        "findings": {
+          "description": "What the file reveals or could do when opened (ADR 0005). Display only.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
+        }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "location",
+            "device",
+            "author",
+            "software",
+            "dates",
+            "comments",
+            "trackedChanges",
+            "hiddenContent",
+            "activeContent",
+            "macros",
+            "externalLinks",
+            "embeddedFiles",
+            "tags"
+          ]
+        },
+        "detail": {
+          "description": "A short value to show, such as a camera model. Never document text.",
+          "type": "string",
+          "maxLength": 200
         }
       }
     },
@@ -873,6 +918,12 @@
               },
               "sha256": {
                 "$ref": "#/definitions/Sha256"
+              },
+              "source": {
+                "description": "Index of the input this output came from, when it came from one.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9999
               }
             }
           }

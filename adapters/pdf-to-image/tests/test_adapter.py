@@ -30,6 +30,7 @@ def test_one_image_per_page(tmp_path: Path, to: str) -> None:
     src = corpus.text_pdf(tmp_path / "src.pdf", 3)
     r = run(tmp_path, src, to, dpi=72)
     assert r.names == [f"report-page-{n}.{to}" for n in (1, 2, 3)]
+    assert r.sources == [0, 0, 0]
     with Image.open(r.outputs[0]) as img:
         assert img.size == (612, 792)  # Letter at 72 dpi
 

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
+
+from .errors import AdapterError
 
 PAGE_CSS = """
 body { font-family: Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.45;
@@ -258,3 +261,38 @@ def _table(el: Any, state: dict[str, bool]) -> str:
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
     lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
     return "\n".join(lines)
+
+
+ZIP_MAX_RATIO = 200
+"""A member that expands more than this many times is a decompression bomb
+(real documents rarely pass 20)."""
+ZIP_RATIO_FLOOR = 1024 * 1024
+"""Members smaller than this are never judged on their ratio: tiny XML compresses extremely well."""
+ZIP_MAX_MEMBERS = 20_000
+
+
+def check_zip(
+    zf: zipfile.ZipFile,
+    *,
+    member_max: int,
+    total_max: int,
+    ratio_max: int = ZIP_MAX_RATIO,
+    members_max: int = ZIP_MAX_MEMBERS,
+) -> list[zipfile.ZipInfo]:
+    """Refuse a ZIP before anything is extracted, from its central directory:
+    too many members, one member or the total too large, or a member that
+    expands suspiciously (decompression bomb). Raises ``E_LIMIT_EXCEEDED``;
+    returns the member list."""
+    infos = zf.infolist()
+    if len(infos) > members_max:
+        raise AdapterError("E_LIMIT_EXCEEDED", {"limit": "members", "max": members_max})
+    total = 0
+    for info in infos:
+        total += info.file_size
+        if info.file_size > member_max or total > total_max:
+            raise AdapterError("E_LIMIT_EXCEEDED", {"limit": "bytes", "max": total_max})
+        if info.file_size > ZIP_RATIO_FLOOR and info.file_size > ratio_max * max(
+            1, info.compress_size
+        ):
+            raise AdapterError("E_LIMIT_EXCEEDED", {"limit": "ratio", "max": ratio_max})
+    return infos

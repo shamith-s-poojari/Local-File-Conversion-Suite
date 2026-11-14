@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Literal
 
 from .context import JobContext, OutputFile
 from .errors import AdapterError
-from .protocol import MediaInfo, ValidationIssue, WarningItem, WordBox
+from .protocol import Finding, MediaInfo, ValidationIssue, WarningItem, WordBox
 
 
 @dataclass
@@ -19,6 +19,7 @@ class InspectReport:
     signed: bool | None = None
     warnings: list[WarningItem] = field(default_factory=list)
     media: MediaInfo | None = None
+    findings: list[Finding] = field(default_factory=list)
 
 
 @dataclass

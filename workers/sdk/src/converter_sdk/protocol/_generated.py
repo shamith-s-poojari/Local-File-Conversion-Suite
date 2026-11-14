@@ -91,6 +91,11 @@ class WarningCode(
             "KEPT_ORIGINAL",
             "TARGET_NOT_REACHED",
             "COLUMNS_MISMATCHED",
+            "ACTIVE_CONTENT_REMOVED",
+            "MACROS_REMOVED",
+            "EXTERNAL_LINKS_REMOVED",
+            "DETAILS_REMOVED",
+            "TRACKED_CHANGES_KEPT",
         ]
     ]
 ):
@@ -126,6 +131,11 @@ class WarningCode(
             "KEPT_ORIGINAL",
             "TARGET_NOT_REACHED",
             "COLUMNS_MISMATCHED",
+            "ACTIVE_CONTENT_REMOVED",
+            "MACROS_REMOVED",
+            "EXTERNAL_LINKS_REMOVED",
+            "DETAILS_REMOVED",
+            "TRACKED_CHANGES_KEPT",
         ],
         Field(
             description="Warning codes in the catalog (spec section 13.1). Workers may send other codes; the core shows those as a generic warning, so the wire format accepts any WarningCodeString."
@@ -468,6 +478,34 @@ class WorkerError(BaseModel):
     retryable: bool
 
 
+class Finding(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    kind: Literal[
+        "location",
+        "device",
+        "author",
+        "software",
+        "dates",
+        "comments",
+        "trackedChanges",
+        "hiddenContent",
+        "activeContent",
+        "macros",
+        "externalLinks",
+        "embeddedFiles",
+        "tags",
+    ]
+    detail: Annotated[
+        str | None,
+        Field(
+            description="A short value to show, such as a camera model. Never document text.",
+            max_length=200,
+        ),
+    ] = None
+
+
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -576,6 +614,14 @@ class ExecuteOutput(BaseModel):
         str,
         Field(description="Lowercase hex SHA-256 digest.", pattern="^[0-9a-f]{64}$"),
     ]
+    source: Annotated[
+        int | None,
+        Field(
+            description="Index of the input this output came from, when it came from one.",
+            ge=0,
+            le=9999,
+        ),
+    ] = None
 
 
 class ExecuteResult(BaseModel):
@@ -721,6 +767,13 @@ class InspectResult(BaseModel):
     signed: bool | None = None
     warnings: Annotated[list[WarningItem] | None, Field(max_length=64)] = None
     media: MediaInfo | None = None
+    findings: Annotated[
+        list[Finding] | None,
+        Field(
+            description="What the file reveals or could do when opened (ADR 0005). Display only.",
+            max_length=64,
+        ),
+    ] = None
 
 
 class Message(

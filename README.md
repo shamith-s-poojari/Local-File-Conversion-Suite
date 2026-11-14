@@ -12,6 +12,14 @@ It also has tools for each kind of file ([ADR 0004](docs/adr/0004-tools-for-ever
 - **Video:** join, rotate or change speed, and save frames as pictures.
 - **Spreadsheets:** combine CSV and Excel files, or split them by rows or by a column.
 
+And, for every file you add ([ADR 0005](docs/adr/0005-safety-privacy-and-convenience.md)):
+
+- **What it reveals:** location, camera, author, dates, comments, tracked changes, hidden content, and whether it can run macros or scripts or load things from outside, all found on your device.
+- **Remove hidden details** from photos, PDFs, Office files, audio and video, without changing the pictures or re-encoding the sound.
+- **Make safe to open:** remove macros, scripts, embedded files and outside links from PDFs, Office files, SVG and web pages, checked by an independent verifier.
+- **Contact sheets** of photos, PDF pages or a video; **suggestions** for the selection; **folders** in and out with their layout kept; **paste** a picture or a table, and **copy** a result.
+- **`lfcs`**, a command line that runs the same sandboxed tools. See [apps/cli](apps/cli/README.md).
+
 **Status:** On macOS, every conversion and tool runs end to end in a per-job sandbox. The Windows and Linux builds compile and pass the lint and type checks, but their sandboxes haven't run on those systems yet. Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't. There are no installers yet. See [known limits](docs/known-limits.md).
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
@@ -60,6 +68,7 @@ pnpm dev
 | Path | Contents |
 |---|---|
 | `apps/desktop/` | React UI, and the Tauri shell in `src-tauri/` |
+| `apps/cli/` | `lfcs`, the command line |
 | `crates/` | Rust libraries, added as their tasks begin |
 | `packages/protocol/` | Worker protocol schema, fixtures and code generator. See its [README](packages/protocol/README.md) |
 | `workers/` | Adapter SDK and conformance kit |

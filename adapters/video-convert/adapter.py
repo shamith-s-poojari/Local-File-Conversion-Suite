@@ -14,6 +14,7 @@ from converter_sdk import (
     RenderedPage,
     ResourceEstimate,
     ValidationReport,
+    reveal,
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
@@ -70,6 +71,8 @@ COPY_AUDIO = {
     "mov": {"aac", "mp3", "alac", "pcm_s16le", "pcm_s24le"},
     "mkv": {"aac", "mp3", "vorbis", "opus", "flac", "ac3", "eac3", "pcm_s16le"},
 }
+
+
 def _even(max_height: int) -> str:
     """Scale so both sides are even (yuv420p needs it), shrinking only."""
     if max_height:
@@ -85,7 +88,12 @@ class VideoConvertAdapter(ConversionAdapter):
         info = probe(ctx, input)
         if not video_streams(info):
             raise AdapterError("E_INPUT_CORRUPT")
-        return InspectReport(pages=0, encryption="none", media=media_info(info, "video"))
+        return InspectReport(
+            pages=0,
+            encryption="none",
+            media=media_info(info, "video"),
+            findings=reveal.media_findings(info),
+        )
 
     def render(self, ctx: JobContext, input: Path, page: int, dpi: int, out: Path) -> RenderedPage:
         """A poster frame, a tenth of the way in, longest side 8 × ``dpi``."""

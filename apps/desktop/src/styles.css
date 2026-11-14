@@ -1800,3 +1800,128 @@ legend {
     display: none;
   }
 }
+
+/* ---- Loop 6: findings, suggestions, folders, paste and copy (ADR 0005) ---- */
+
+.drop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.reveals {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.reveals > summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  list-style: none;
+}
+.reveals > summary::-webkit-details-marker {
+  display: none;
+}
+.reveals > summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+.reveals .caution {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warn);
+  font-weight: 550;
+}
+.reveals .caution svg {
+  width: 13px;
+  height: 13px;
+}
+.reveals .reveal-line {
+  text-decoration: underline dotted var(--line-strong);
+  text-underline-offset: 3px;
+}
+.reveals ul {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  list-style: none;
+  background: var(--sunken);
+  border-radius: var(--radius-s);
+  display: grid;
+  gap: 3px;
+}
+.reveals li {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  min-width: 0;
+}
+.reveals li .mono {
+  overflow-wrap: anywhere;
+}
+.finding-kind {
+  color: var(--ink);
+  flex: none;
+}
+.folder-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.suggestions .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chip {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.15s var(--ease-press);
+}
+.chip:hover {
+  border-color: var(--ink);
+}
+.chip:active {
+  transform: scale(0.98);
+}
+.chip.checked {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.chip.note {
+  cursor: default;
+  background: var(--sunken);
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.toggle.inline {
+  margin: 0 0.4rem;
+}
+
+.paste-problem {
+  margin: 12px auto 0;
+  max-width: 720px;
+}
+
+.output-text .ghost.sm {
+  margin-top: 6px;
+  justify-self: start;
+}
+/* A file row with its findings open keeps the thumbnail and remove button at the top. */
+.file-item:has(.reveals[open]) {
+  align-items: start;
+}

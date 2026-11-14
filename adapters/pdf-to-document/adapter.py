@@ -134,7 +134,7 @@ class PdfToDocumentAdapter(PdfAdapter):
                     }[to](ctx, doc, pages, out, title)
                 finally:
                     doc.close()
-            outputs.append(OutputFile(out))
+            outputs.append(OutputFile(out, source=index))
         ctx.progress("convert", self._total, self._total)
         return outputs
 

@@ -1,0 +1,12 @@
+id: file-clean
+kind: operation
+title: Remove hidden details
+workerClass: pdf
+inputs: { formats: [jpg, png, webp, tiff, avif, pdf, docx, xlsx, pptx], min: 1, max: 500 }
+outputs: { format: same, cardinality: many }
+fidelity: E
+fidelityNotes: [DETAILS_REMOVED, TRACKED_CHANGES_KEPT, REENCODED, SIGNATURE_INVALIDATED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pikepdf, pillow, lxml]

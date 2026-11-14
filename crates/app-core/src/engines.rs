@@ -26,6 +26,7 @@ const PYTHON_ENGINES: &[(&str, &str)] = &[
     ("openpyxl", "openpyxl"),
     ("python-pptx", "pptx"),
     ("markdown-it-py", "markdown_it"),
+    ("lxml", "lxml"),
     ("pyyaml", "yaml"),
     ("pdfplumber", "pdfplumber"),
     ("img2pdf", "img2pdf"),

@@ -13,16 +13,20 @@
 //!   long-lived sandboxed worker answers `inspect`, `render` and `pageText`.
 //!   They're hidden from snapshots and events.
 
+mod config;
+mod defaults;
+mod dupes;
 mod engines;
 mod files;
+mod intake;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use converter_jobstore::{
-    DataRoot, InputSource, JobError, JobEvent, JobId, JobSnapshot, JobStore, SaveCheck,
-    SaveDestination, SaveOptions, Snapshot, StoreConfig, SyncRoots,
+    DataRoot, FolderLayout, InputSource, JobError, JobEvent, JobId, JobSnapshot, JobStore,
+    SaveCheck, SaveDestination, SaveOptions, Snapshot, StoreConfig, SyncRoots,
 };
 use converter_protocol::{Codec, SecretString, Secrets};
 use converter_router::{
@@ -36,6 +40,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+pub use config::find_dev_root;
+pub use defaults::{defaults, with_defaults};
 pub use engines::Engines;
 use files::{FileEntry, FileWorker};
 pub use files::{InspectInfo, PageText, Preview};
@@ -47,6 +53,23 @@ pub const MAX_FILES: usize = 200;
 pub const MAX_LIVE_FILE_WORKERS: usize = 4;
 /// Preview resolutions the UI may ask for.
 pub const PREVIEW_DPI: &[u32] = &[48, 72, 96, 144];
+/// Longest side of a picture put on the clipboard.
+pub const CLIPBOARD_SIDE: u32 = 4096;
+/// Largest PNG read back for the clipboard.
+const MAX_CLIPBOARD_PNG: u64 = 128 * 1024 * 1024;
+/// Picture outputs that can be copied as an image.
+const COPYABLE_PICTURES: &[Format] = &[
+    Format::Png,
+    Format::Jpg,
+    Format::Webp,
+    Format::Gif,
+    Format::Bmp,
+    Format::Tiff,
+    Format::Avif,
+    Format::Heic,
+    Format::Svg,
+    Format::Ico,
+];
 
 /// A command failure the UI can show. `code` is from the catalog or a
 /// command-level reason; nothing here contains a path or document text.
@@ -131,6 +154,10 @@ pub struct FileResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub display_name: String,
+    /// With `error: "folderTruncated"`: how many files of the dropped
+    /// folders didn't fit under [`MAX_FILES`] and were left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 type Sink = Arc<dyn Fn(&JobEvent) + Send + Sync>;
@@ -149,6 +176,11 @@ pub struct App {
     hidden: Arc<Mutex<HashSet<JobId>>>,
     /// Workers for previewing finished jobs' outputs, by job.
     output_workers: Mutex<BTreeMap<JobId, FileWorker>>,
+    /// Per job, per staged input: the dropped folder it came from
+    /// (`root/relative/dir`), for keeping the layout when saving.
+    layouts: Mutex<BTreeMap<JobId, Vec<Option<String>>>>,
+    /// Pasted items (`<data root>/pasted`), cleared at start and exit.
+    pasted_dir: PathBuf,
     sandbox: Mutex<Option<probe::ProbeReport>>,
     preview_dirs: Arc<dyn Fn(PathBuf) -> String + Send + Sync>,
     revoke_preview: Arc<dyn Fn(&str) + Send + Sync>,
@@ -196,6 +228,8 @@ impl App {
         )
         .map_err(|e| format!("job store: {e}"))?;
         let store = Arc::new(store);
+        let pasted_dir = store.data_root().path().join(intake::PASTED_DIR);
+        intake::clear_pasted(&pasted_dir);
 
         let catalog = Catalog::load(&config.resources).map_err(problems)?;
         let registry = build_registry(&config.adapters_dir, &catalog, config.include_dev_adapters)
@@ -230,6 +264,8 @@ impl App {
             files: Mutex::default(),
             hidden,
             output_workers: Mutex::default(),
+            layouts: Mutex::default(),
+            pasted_dir,
             sandbox: Mutex::new(None),
             preview_dirs: register_preview,
             revoke_preview,
@@ -269,39 +305,93 @@ impl App {
 
     /// Sniffs paths from the native picker or a drop (spec 6). Rejected
     /// files come back with an error; the others get a `fileId`.
+    ///
+    /// A folder is walked (see [`intake::walk`]) and its files are added with
+    /// their `folder`. What doesn't fit under [`MAX_FILES`] is left out and
+    /// reported as one extra result: `error: "folderTruncated"` with `count`.
+    /// An empty folder comes back as `error: "emptyFolder"`.
     pub fn add_paths(&self, paths: Vec<PathBuf>) -> CommandResult<Vec<FileResult>> {
-        let mut files = lock(&self.files);
-        if files.len() + paths.len() > MAX_FILES {
-            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooManyFiles"));
-        }
-        let mut out = Vec::new();
+        let mut items: Vec<Intake> = Vec::new();
+        let mut results = Vec::new();
+        let mut has_folder = false;
+        let mut first_root: Option<String> = None;
         for path in paths {
-            let display_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            match converter_sniffer::sniff_path(&path) {
-                Ok(descriptor) => {
-                    out.push(FileResult {
-                        file: Some(descriptor.clone()),
-                        error: None,
-                        display_name,
+            if path.is_dir() {
+                has_folder = true;
+                let walked = intake::walk(&path);
+                first_root.get_or_insert_with(|| walked.root.clone());
+                if walked.files.is_empty() {
+                    results.push(FileResult {
+                        file: None,
+                        error: Some("emptyFolder".into()),
+                        display_name: walked.root.clone(),
+                        count: None,
                     });
-                    files.insert(descriptor.file_id.clone(), FileEntry::new(path, descriptor));
                 }
-                Err(e) => out.push(FileResult {
-                    file: None,
-                    error: Some(
-                        serde_json::to_value(e)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_owned))
-                            .unwrap_or_else(|| "unreadable".into()),
-                    ),
-                    display_name,
-                }),
+                for f in &walked.files {
+                    items.push(Intake {
+                        display_name: file_name_of(&f.path),
+                        folder: Some(f.folder(&walked.root)),
+                        path: f.path.clone(),
+                        temp: false,
+                    });
+                }
+            } else {
+                items.push(Intake {
+                    display_name: file_name_of(&path),
+                    folder: None,
+                    path,
+                    temp: false,
+                });
             }
         }
-        Ok(out)
+        let mut files = lock(&self.files);
+        let room = MAX_FILES.saturating_sub(files.len());
+        if !has_folder && items.len() > room {
+            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooManyFiles"));
+        }
+        let left_out = items.len().saturating_sub(room);
+        items.truncate(room);
+        for item in items {
+            results.push(sniff_into(&mut files, item));
+        }
+        if left_out > 0 {
+            results.push(FileResult {
+                file: None,
+                error: Some("folderTruncated".into()),
+                display_name: first_root.unwrap_or_default(),
+                count: Some(left_out),
+            });
+        }
+        Ok(results)
+    }
+
+    /// Adds something pasted from the clipboard (`image`, `table` or
+    /// `text`). The bytes are checked and written to the data root's
+    /// `pasted/` folder, then sniffed like any other file. The file is
+    /// deleted when it leaves the selection, and the folder at exit.
+    pub fn add_pasted(&self, kind: &str, bytes: Vec<u8>) -> CommandResult<Vec<FileResult>> {
+        let kind = intake::PasteKind::parse(kind)
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownPasteKind"))?;
+        let mut files = lock(&self.files);
+        if files.len() >= MAX_FILES {
+            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooManyFiles"));
+        }
+        let pasted = intake::paste(&self.pasted_dir, kind, &bytes)?;
+        drop(bytes);
+        let result = sniff_into(
+            &mut files,
+            Intake {
+                display_name: pasted.display_name,
+                folder: None,
+                path: pasted.path.clone(),
+                temp: true,
+            },
+        );
+        if result.file.is_none() {
+            let _ = std::fs::remove_file(&pasted.path);
+        }
+        Ok(vec![result])
     }
 
     pub fn remove_file(&self, file_id: &str) -> CommandResult<()> {
@@ -315,6 +405,9 @@ impl App {
     fn close_entry(&self, mut entry: FileEntry) {
         if let Some(worker) = entry.worker.take() {
             self.close_worker(worker);
+        }
+        if entry.temp {
+            let _ = std::fs::remove_file(&entry.path);
         }
     }
 
@@ -356,6 +449,7 @@ impl App {
             let id = entry.descriptor.file_id.clone();
             entry.descriptor = FileDescriptor {
                 file_id: id,
+                folder: entry.descriptor.folder.clone(),
                 ..fresh
             };
         }
@@ -398,6 +492,20 @@ impl App {
             .values()
             .filter(|e| e.worker.is_some())
             .count()
+    }
+
+    /// How many of these files repeat an earlier one byte for byte
+    /// (smart suggestions, ADR 0005). Unknown IDs are ignored.
+    pub fn duplicates(&self, file_ids: &[String]) -> usize {
+        let files: Vec<(u64, PathBuf)> = {
+            let files = lock(&self.files);
+            file_ids
+                .iter()
+                .filter_map(|id| files.get(id))
+                .map(|e| (e.descriptor.size_bytes, e.path.clone()))
+                .collect()
+        };
+        dupes::count_duplicates(&files)
     }
 
     /// Page count, encryption and warnings, from the file's sandboxed worker.
@@ -709,16 +817,51 @@ impl App {
     /// different adapters (Word files and photos to PDF) run as one part per
     /// adapter; each part gets the params its schema knows, so a mixed
     /// selection runs with every adapter's defaults.
+    ///
+    /// With `"skipSame": true` in `params`, files already in the target
+    /// format are left out; see [`App::create_conversion_counted`].
     pub fn create_conversion(
         &self,
         file_ids: &[String],
         to: &str,
         params: Value,
     ) -> CommandResult<JobId> {
+        self.create_conversion_counted(file_ids, to, params)
+            .map(|(job, _)| job)
+    }
+
+    /// [`App::create_conversion`], also returning how many files `skipSame`
+    /// left out. If every file is skipped there is nothing to run and the
+    /// error is `E_PARAMS_INVALID` / `allSkipped`.
+    pub fn create_conversion_counted(
+        &self,
+        file_ids: &[String],
+        to: &str,
+        mut params: Value,
+    ) -> CommandResult<(JobId, usize)> {
         self.require_sandbox()?;
         let target = RouterFormat::parse(to)
             .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownFormat"))?;
-        let formats = self.formats_of(file_ids)?;
+        let skip_same = params
+            .as_object_mut()
+            .and_then(|m| m.remove("skipSame"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut formats = self.formats_of(file_ids)?;
+        let mut file_ids = file_ids.to_vec();
+        let mut skipped = 0;
+        if skip_same {
+            let keep: Vec<bool> = formats.iter().map(|&f| f != target).collect();
+            skipped = keep.iter().filter(|k| !**k).count();
+            let mut it = keep.iter();
+            file_ids.retain(|_| *it.next().unwrap_or(&true));
+            let mut it = keep.iter();
+            formats.retain(|_| *it.next().unwrap_or(&true));
+            if file_ids.is_empty() {
+                return Err(CommandError::new("E_PARAMS_INVALID", "allSkipped"));
+            }
+        }
+        let file_ids = &file_ids[..];
         let planner = Planner::new(&self.registry, &self.availability);
         let mut adapters: BTreeMap<RouterFormat, String> = BTreeMap::new();
         // (adapter, its files, their formats), in the order files were given.
@@ -777,7 +920,7 @@ impl App {
             part.part.output_format = output_format;
             parts.push(part);
         }
-        self.start(parts)
+        Ok((self.start(parts)?, skipped))
     }
 
     fn availability_of(&self, entry: &AdapterEntry) -> Result<(), ()> {
@@ -835,9 +978,10 @@ impl App {
             return Err(CommandError::new("E_INTERNAL", "wrongFileCount"));
         }
 
-        let (sources, password, titles) = {
+        let (sources, folders, password, titles) = {
             let files = lock(&self.files);
             let mut sources = Vec::new();
+            let mut folders = Vec::new();
             let mut password: Option<SecretString> = None;
             let mut titles = Vec::new();
             for id in &ordered {
@@ -855,12 +999,13 @@ impl App {
                         .map(|p| SecretString::new(p.to_string()));
                 }
                 titles.push(stem(&entry.descriptor.display_name));
+                folders.push(entry.descriptor.folder.clone());
                 sources.push(InputSource {
                     path: entry.path.clone(),
                     extension: entry.descriptor.format.as_str().to_owned(),
                 });
             }
-            (sources, password, titles)
+            (sources, folders, password, titles)
         };
 
         // The core resolves file IDs; the worker only ever sees input order.
@@ -895,6 +1040,7 @@ impl App {
                 output_format: Format::Pdf,
             },
             sources,
+            folders,
         })
     }
 
@@ -903,11 +1049,13 @@ impl App {
         let disk_factor = parts.iter().map(|p| p.disk_factor).fold(0.0, f64::max);
         let pool = strictest_pool(parts.iter().map(|p| p.pool.as_str()));
         let mut sources = Vec::new();
+        let mut folders = Vec::new();
         let mut job_parts = Vec::with_capacity(parts.len());
         for p in parts {
             let mut part = p.part;
             part.inputs = (sources.len()..sources.len() + p.sources.len()).collect();
             sources.extend(p.sources);
+            folders.extend(p.folders);
             job_parts.push(part);
         }
 
@@ -919,6 +1067,9 @@ impl App {
             };
             let _ = self.store.fail(&job, failure);
             return Err(CommandError::from_job(e));
+        }
+        if folders.iter().any(Option::is_some) {
+            lock(&self.layouts).insert(job.clone(), folders);
         }
         self.runner.start(JobSpec {
             job: job.clone(),
@@ -934,6 +1085,7 @@ impl App {
 
     pub fn discard_job(&self, job: &JobId) -> CommandResult<()> {
         self.close_output_worker(job);
+        lock(&self.layouts).remove(job);
         self.store.discard(job).map_err(CommandError::from_job)
     }
 
@@ -951,7 +1103,8 @@ impl App {
         confirmed_input_overwrite: bool,
     ) -> CommandResult<usize> {
         self.close_output_worker(job);
-        self.store
+        let saved = self
+            .store
             .save_outputs(
                 job,
                 dest,
@@ -960,7 +1113,131 @@ impl App {
                 },
             )
             .map(|r| r.saved.len())
-            .map_err(CommandError::from_job)
+            .map_err(CommandError::from_job)?;
+        lock(&self.layouts).remove(job);
+        Ok(saved)
+    }
+
+    /// Whether saving this job's outputs can keep the dropped folder's
+    /// layout: at least one output came from a file that was in a folder.
+    pub fn can_keep_layout(&self, job: &JobId) -> bool {
+        let Ok(snap) = self.job_snapshot(job) else {
+            return false;
+        };
+        let layouts = lock(&self.layouts);
+        let Some(inputs) = layouts.get(job) else {
+            return false;
+        };
+        snap.outputs.iter().any(|o| {
+            o.source
+                .and_then(|s| inputs.get(s))
+                .is_some_and(Option::is_some)
+        })
+    }
+
+    /// The destination for saving several outputs into `dir`: with the
+    /// dropped folder's layout when asked for and possible.
+    pub fn folder_destination(
+        &self,
+        job: &JobId,
+        dir: PathBuf,
+        keep_layout: bool,
+    ) -> SaveDestination {
+        if keep_layout && self.can_keep_layout(job) {
+            if let Some(inputs) = lock(&self.layouts).get(job).cloned() {
+                return SaveDestination::FolderKeepingLayout(FolderLayout { dir, inputs });
+            }
+        }
+        SaveDestination::Folder(dir)
+    }
+
+    /// The extension of one output (`png`, `csv`, ...), if it exists.
+    pub fn output_extension(&self, job: &JobId, index: usize) -> CommandResult<Option<String>> {
+        Ok(self
+            .job_snapshot(job)?
+            .outputs
+            .get(index)
+            .map(|o| o.extension.to_ascii_lowercase()))
+    }
+
+    /// The bytes of one output, for the clipboard, with its extension. At
+    /// most `max_bytes` are read. The path stays inside the core.
+    pub fn read_output(
+        &self,
+        job: &JobId,
+        index: usize,
+        max_bytes: u64,
+    ) -> CommandResult<(String, Vec<u8>)> {
+        use std::io::Read;
+        let snap = self.job_snapshot(job)?;
+        if !matches!(
+            snap.state,
+            converter_jobstore::JobState::Succeeded | converter_jobstore::JobState::Partial
+        ) {
+            return Err(CommandError::new("E_WRONG_STATE", "jobNotFinished"));
+        }
+        let out = snap
+            .outputs
+            .get(index)
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownOutput"))?;
+        if out.size_bytes > max_bytes {
+            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooLargeToCopy"));
+        }
+        let path = self
+            .store
+            .job_dirs(job)
+            .map_err(CommandError::from_job)?
+            .out
+            .join(&out.path);
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|_| CommandError::new("E_INTERNAL", "unknownOutput"))?;
+        if !meta.is_file() {
+            return Err(CommandError::new("E_INTERNAL", "unknownOutput"));
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|f| f.take(max_bytes + 1).read_to_end(&mut bytes))
+            .map_err(|_| CommandError::new("E_INTERNAL", "unreadableOutput"))?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooLargeToCopy"));
+        }
+        Ok((out.extension.clone(), bytes))
+    }
+
+    /// A picture output as PNG bytes for the clipboard. The output is
+    /// decoded by its own sandboxed worker (the preview path), which writes
+    /// a PNG at most [`CLIPBOARD_SIDE`] pixels on its longest side; the
+    /// core only reads that PNG back.
+    pub fn clipboard_png(&self, job: &JobId, index: usize) -> CommandResult<Vec<u8>> {
+        use std::io::Read;
+        self.require_sandbox()?;
+        let snap = self.job_snapshot(job)?;
+        if !matches!(
+            snap.state,
+            converter_jobstore::JobState::Succeeded | converter_jobstore::JobState::Partial
+        ) {
+            return Err(CommandError::new("E_WRONG_STATE", "jobNotFinished"));
+        }
+        let format = snap
+            .outputs
+            .get(index)
+            .and_then(|o| parse_format(&o.extension))
+            .ok_or_else(|| CommandError::new("E_INTERNAL", "unknownOutput"))?;
+        if !COPYABLE_PICTURES.contains(&format) {
+            return Err(CommandError::new("E_INTERNAL", "notCopyable"));
+        }
+        let path = self.with_output_worker(job, index, |w, input| {
+            w.render_file(input, CLIPBOARD_SIDE / 8)
+        })?;
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path)
+            .and_then(|f| f.take(MAX_CLIPBOARD_PNG + 1).read_to_end(&mut bytes));
+        let _ = std::fs::remove_file(&path);
+        read.map_err(|_| CommandError::new("E_INTERNAL", "unreadableOutput"))?;
+        if bytes.len() as u64 > MAX_CLIPBOARD_PNG {
+            return Err(CommandError::new("E_LIMIT_EXCEEDED", "tooLargeToCopy"));
+        }
+        Ok(bytes)
     }
 
     /// How many outputs a job has (to pick a file or folder dialog).
@@ -1033,6 +1310,7 @@ impl App {
         for job in self.store.snapshot().jobs {
             self.runner.cancel(&job.job_id);
         }
+        intake::clear_pasted(&self.pasted_dir);
         self.store.shutdown();
     }
 }
@@ -1093,6 +1371,8 @@ fn parse_output_ref(reference: &str) -> Option<(JobId, usize)> {
 struct Prepared {
     part: JobPart,
     sources: Vec<InputSource>,
+    /// The dropped folder of each source, in the same order.
+    folders: Vec<Option<String>>,
     pool: String,
     disk_factor: f64,
 }
@@ -1137,7 +1417,54 @@ fn preview_adapter(format: Format) -> Option<&'static str> {
         Png | Jpg | Webp | Svg | Heic | Gif | Bmp | Tiff | Avif | Ico => Some("image-convert"),
         Mp3 | Wav | Flac | Ogg | Opus | M4a | Aac | Aiff => Some("audio-convert"),
         Mp4 | Mov | Mkv | Webm | Avi => Some("video-convert"),
+        // What an Office file or a web page reveals or could do (ADR 0005).
+        Docx | Xlsx | Pptx | Html => Some("file-disarm"),
         _ => None,
+    }
+}
+
+/// One file about to be sniffed into the selection.
+struct Intake {
+    path: PathBuf,
+    display_name: String,
+    folder: Option<String>,
+    /// Lives in `pasted/` and is deleted with the selection entry.
+    temp: bool,
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Sniffs one file and adds it to the selection if it was accepted.
+fn sniff_into(files: &mut BTreeMap<String, FileEntry>, item: Intake) -> FileResult {
+    match converter_sniffer::sniff_path(&item.path) {
+        Ok(mut descriptor) => {
+            descriptor.display_name = item.display_name.clone();
+            descriptor.folder = item.folder;
+            let mut entry = FileEntry::new(item.path, descriptor.clone());
+            entry.temp = item.temp;
+            files.insert(descriptor.file_id.clone(), entry);
+            FileResult {
+                file: Some(descriptor),
+                error: None,
+                display_name: item.display_name,
+                count: None,
+            }
+        }
+        Err(e) => FileResult {
+            file: None,
+            error: Some(
+                serde_json::to_value(e)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unreadable".into()),
+            ),
+            display_name: item.display_name,
+            count: None,
+        },
     }
 }
 

@@ -4,4 +4,6 @@ Saves pictures of a video's frames as JPG or PNG (ADR 0004: `outputs.format: cho
 
 Each frame is taken with a fast seek followed by an exact decode, so taking a few frames from a long video is quick. One video can give at most 1,000 pictures.
 
-Engines: FFmpeg.
+With the layout "contact sheet" each video gives one picture instead, `clip-sheet.jpg` (or `.png`): every frame in a grid, captioned with its time and titled with the video's name. A sheet holds 4 to 36 frames, which is checked before the job starts; each frame is decoded at thumbnail size (up to 480 px wide), so the sheet doesn't depend on the "Size" setting.
+
+Engines: FFmpeg, and Pillow for contact sheets.

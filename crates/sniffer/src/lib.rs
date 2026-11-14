@@ -236,6 +236,11 @@ pub struct FileDescriptor {
     pub cloud_placeholder: bool,
     /// `true` for unambiguous, local files in a known format.
     pub actionable: bool,
+    /// For a file that came from a dropped folder: that folder's name, then
+    /// the directories below it, with `/` separators (`photos/2024/trip`).
+    /// Set by the app core; never an absolute path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 impl FileDescriptor {
@@ -255,6 +260,7 @@ impl FileDescriptor {
             macro_enabled: d.macro_enabled,
             cloud_placeholder,
             actionable,
+            folder: None,
         }
     }
 }

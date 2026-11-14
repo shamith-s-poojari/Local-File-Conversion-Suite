@@ -340,5 +340,9 @@ def test_kit_covers_every_shipping_adapter() -> None:
         "video-frames",
         "data-combine",
         "data-split",
+        "file-clean",
+        "media-clean",
+        "file-disarm",
+        "contact-sheet",
     }
     assert sys.version_info >= (3, 12)

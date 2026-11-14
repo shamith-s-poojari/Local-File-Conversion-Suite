@@ -123,7 +123,7 @@ class DataSplitAdapter(Adapter):
                     write_csv(out, rows)
                 else:
                     write_xlsx(ctx, out, [Table(table.name, rows)], stage="split")
-                outputs.append(OutputFile(out))
+                outputs.append(OutputFile(out, source=i))
                 ctx.progress("split", n + 1, len(parts))
         return outputs
 

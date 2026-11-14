@@ -325,7 +325,11 @@ impl Runner {
                             &result,
                             (spec.parts.len() > 1).then_some(next),
                         )?;
-                        claimed.extend(taken.into_iter().map(|o| (o, part.output_format)));
+                        claimed.extend(
+                            taken
+                                .into_iter()
+                                .map(|o| (with_job_source(o, &part.inputs), part.output_format)),
+                        );
                         next += 1;
                     }
                     // Spec 10.2: retry once, alone, at the full budget.
@@ -513,6 +517,26 @@ pub fn warning_catalog() -> &'static HashSet<String> {
             .filter_map(|c| c.as_str().map(str::to_owned))
             .collect()
     })
+}
+
+/// A worker numbers `source` among its own part's inputs; the job record
+/// uses the job's staged input index (ADR 0005). An index the part doesn't
+/// have is dropped rather than trusted.
+fn with_job_source(mut output: Value, part_inputs: &[usize]) -> Value {
+    let global = output["source"]
+        .as_u64()
+        .and_then(|i| usize::try_from(i).ok())
+        .and_then(|i| part_inputs.get(i).copied());
+    match (output.as_object_mut(), global) {
+        (Some(o), Some(g)) => {
+            o.insert("source".into(), json!(g));
+        }
+        (Some(o), None) => {
+            o.remove("source");
+        }
+        _ => {}
+    }
+    output
 }
 
 /// The outputs a part's worker claims. With several parts, each part's

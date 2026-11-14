@@ -12,7 +12,7 @@ every output so the shared saving rules hold everywhere.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -365,6 +365,330 @@ def flatten_forms(pdf: pikepdf.Pdf) -> None:
         del pdf.Root[Name.AcroForm]
 
 
+# ----------------------------------------------------------- hidden layers
+
+
+def hidden_ocgs(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
+    """Optional-content groups that are off in the default configuration."""
+    props = pdf.Root.get(Name.OCProperties)
+    if not isinstance(props, pikepdf.Dictionary):
+        return set()
+    every = {o.objgen for o in props.get(Name.OCGs, pikepdf.Array()) if o.is_indirect}
+    default = props.get(Name.D)
+    if not isinstance(default, pikepdf.Dictionary):
+        return set()
+    off = {o.objgen for o in default.get(Name.OFF, pikepdf.Array()) if o.is_indirect}
+    if default.get(Name.BaseState) == Name.OFF:
+        on = {o.objgen for o in default.get(Name.ON, pikepdf.Array()) if o.is_indirect}
+        off |= every - on
+    return off
+
+
+def _is_hidden(oc: Any, hidden: set[tuple[int, int]]) -> bool:
+    """An OCG or OCMD that involves any hidden group. Erring towards hidden
+    removes more, never less, which is the safe side for redaction."""
+    if not isinstance(oc, pikepdf.Dictionary):
+        return False
+    if oc.is_indirect and oc.objgen in hidden:
+        return True
+    groups = oc.get(Name.OCGs)
+    if isinstance(groups, pikepdf.Dictionary):
+        groups = [groups]
+    if isinstance(groups, (pikepdf.Array, list)):
+        return any(g.is_indirect and g.objgen in hidden for g in groups)
+    return False
+
+
+def _strip_hidden_content(
+    pdf: pikepdf.Pdf, owner: Any, resources: Any, hidden: set[tuple[int, int]], seen: set
+) -> None:
+    """Remove ``/OC … BDC … EMC`` sections and ``Do`` of XObjects that belong
+    to hidden groups, in ``owner``'s content and in nested form XObjects."""
+    props = resources.get(Name.Properties) if isinstance(resources, pikepdf.Dictionary) else None
+    xobjects = resources.get(Name.XObject) if isinstance(resources, pikepdf.Dictionary) else None
+    out = []
+    skip_depth = 0
+    depth = 0
+    changed = False
+    for operands, operator in pikepdf.parse_content_stream(owner):
+        op = str(operator)
+        if op in ("BDC", "BMC"):
+            depth += 1
+            if skip_depth:
+                continue
+            if op == "BDC" and len(operands) == 2 and operands[0] == Name.OC:
+                tag = operands[1]
+                oc = props.get(tag) if isinstance(tag, pikepdf.Name) and props is not None else tag
+                if _is_hidden(oc, hidden):
+                    skip_depth = depth
+                    changed = True
+                    continue
+        elif op == "EMC":
+            if skip_depth:
+                if depth == skip_depth:
+                    skip_depth = 0
+                depth -= 1
+                continue
+            depth -= 1
+        elif skip_depth:
+            continue
+        elif op == "Do" and xobjects is not None:
+            xobj = xobjects.get(operands[0])
+            if isinstance(xobj, pikepdf.Stream):
+                if _is_hidden(xobj.stream_dict.get(Name.OC), hidden):
+                    changed = True
+                    continue
+                if xobj.stream_dict.get(Name.Subtype) == Name.Form and xobj.objgen not in seen:
+                    seen.add(xobj.objgen)
+                    _strip_hidden_content(
+                        pdf, xobj, xobj.stream_dict.get(Name.Resources), hidden, seen
+                    )
+        out.append((operands, operator))
+    if changed:
+        data = pikepdf.unparse_content_stream(out)
+        if isinstance(owner, pikepdf.Page):
+            owner.obj.Contents = pdf.make_stream(data)
+        else:
+            owner.write(data)
+
+
+def remove_hidden_layers(pdf: pikepdf.Pdf) -> bool:
+    """Spec 13.8 strip step: content in layers that are off by default goes.
+    Returns True if the document had optional content at all."""
+    if Name.OCProperties not in pdf.Root:
+        return False
+    hidden = hidden_ocgs(pdf)
+    if hidden:
+        seen: set[tuple[int, int]] = set()
+        for page in pdf.pages:
+            _strip_hidden_content(pdf, page, page.obj.get(Name.Resources), hidden, seen)
+    # What's left is visible content; drop the layer machinery so no viewer
+    # can toggle anything.
+    del pdf.Root[Name.OCProperties]
+    return True
+
+
+# ---------------------------------------------------------- active content
+
+_ACTION_KINDS = {
+    "/JavaScript": "javascript",
+    "/Launch": "launch",
+    "/SubmitForm": "forms",
+    "/ImportData": "forms",
+    "/GoToR": "remote",
+    "/GoToE": "remote",
+    "/Rendition": "media",
+    "/RichMediaExecute": "media",
+    "/Sound": "media",
+    "/Movie": "media",
+    "/Hide": "hide",
+}
+"""Action types that never survive "make safe to open". ``SetOCGState`` stays."""
+
+_ANNOT_KINDS = {
+    "/FileAttachment": "embedded",
+    "/RichMedia": "media",
+    "/Screen": "media",
+    "/Movie": "media",
+    "/Sound": "media",
+    "/3D": "media",
+}
+
+MAX_ACTION_CHAIN = 64
+MAX_DIRECT_DEPTH = 64
+
+
+class _Sweep:
+    """One pass over every object, either counting or removing active content.
+
+    Counting and removing share this code so a detector and a remover can
+    never disagree about what "active" means.
+    """
+
+    def __init__(
+        self,
+        pdf: pikepdf.Pdf,
+        remove: bool,
+        remove_links: bool,
+        check: Callable[[], None] | None = None,
+    ) -> None:
+        self.pdf = pdf
+        self.check = check
+        self.remove = remove
+        self.remove_links = remove_links
+        self.counts: dict[str, int] = {}
+
+    def hit(self, kind: str, n: int = 1, form: bool = False) -> None:
+        if n <= 0:
+            return
+        self.counts[kind] = self.counts.get(kind, 0) + n
+        if form:
+            self.counts["formActions"] = self.counts.get("formActions", 0) + n
+
+    def kind_of(self, action: Any) -> str | None:
+        if not isinstance(action, pikepdf.Dictionary):
+            return None
+        s = str(action.get(Name.S, ""))
+        if s == "/URI" and self.remove_links:
+            return "links"
+        return _ACTION_KINDS.get(s)
+
+    def next_chain(self, action: pikepdf.Dictionary, form: bool, depth: int = 0) -> None:
+        """Actions chained with /Next: drop the bad ones, keep the rest."""
+        nxt = action.get(Name.Next)
+        if nxt is None or depth > MAX_ACTION_CHAIN:
+            return
+        if isinstance(nxt, pikepdf.Dictionary):
+            kind = self.kind_of(nxt)
+            if kind:
+                self.hit(kind, form=form)
+                if self.remove:
+                    del action[Name.Next]
+            else:
+                self.next_chain(nxt, form, depth + 1)
+        elif isinstance(nxt, pikepdf.Array):
+            kept = []
+            changed = False
+            for item in list(nxt)[:1000]:
+                kind = self.kind_of(item)
+                if kind:
+                    self.hit(kind, form=form)
+                    changed = True
+                    continue
+                if isinstance(item, pikepdf.Dictionary):
+                    self.next_chain(item, form, depth + 1)
+                kept.append(item)
+            if changed and self.remove:
+                action[Name.Next] = pikepdf.Array(kept)
+
+    def action_value(self, holder: Any, key: Name, form: bool) -> None:
+        action = holder.get(key)
+        kind = self.kind_of(action)
+        if kind:
+            self.hit(kind, form=form)
+            if self.remove:
+                del holder[key]
+        elif isinstance(action, pikepdf.Dictionary):
+            self.next_chain(action, form)
+
+    def holder(self, d: Any) -> None:
+        subtype = str(d.get(Name.Subtype, ""))
+        form = subtype == "/Widget" or Name.FT in d
+        if Name.AA in d:
+            aa = d[Name.AA]
+            self.hit("aa", form=form)
+            if isinstance(aa, pikepdf.Dictionary):
+                for key in list(aa.keys()):
+                    kind = self.kind_of(aa.get(key))
+                    if kind:
+                        self.hit(kind, form=form)
+            if self.remove:
+                del d[Name.AA]
+        if Name.A in d:
+            self.action_value(d, Name.A, form)
+        if Name.AF in d:
+            af = d[Name.AF]
+            self.hit("embedded", len(af) if isinstance(af, pikepdf.Array) else 1)
+            if self.remove:
+                del d[Name.AF]
+        annots = d.get(Name.Annots)
+        if isinstance(annots, pikepdf.Array):
+            for i in range(len(annots) - 1, -1, -1):
+                annot = annots[i]
+                if not isinstance(annot, pikepdf.Dictionary):
+                    continue
+                kind = _ANNOT_KINDS.get(str(annot.get(Name.Subtype, "")))
+                if kind:
+                    self.hit(kind)
+                    if self.remove:
+                        del annots[i]
+
+    def root(self) -> None:
+        root = self.pdf.Root
+        action = root.get(Name.OpenAction)
+        if isinstance(action, pikepdf.Dictionary):
+            kind = self.kind_of(action)
+            plain_goto = action.get(Name.S) == Name.GoTo
+            if kind:
+                self.hit(kind)
+            elif plain_goto:
+                self.next_chain(action, False)
+            if kind or not plain_goto:
+                self.hit("aa")
+                if self.remove:
+                    del root[Name.OpenAction]
+        names = root.get(Name.Names)
+        if isinstance(names, pikepdf.Dictionary):
+            if Name.JavaScript in names:
+                self.hit("javascript")
+                if self.remove:
+                    del names[Name.JavaScript]
+            if Name.EmbeddedFiles in names:
+                self.hit("embedded", _tree_size(names[Name.EmbeddedFiles]))
+                if self.remove:
+                    del names[Name.EmbeddedFiles]
+        form = root.get(Name.AcroForm)
+        if isinstance(form, pikepdf.Dictionary) and Name.XFA in form:
+            self.hit("xfa", form=True)
+            if self.remove:
+                del form[Name.XFA]
+
+    def run(self) -> dict[str, int]:
+        self.root()
+        for n, obj in enumerate(self.pdf.objects):
+            if self.check is not None and n % 256 == 0:
+                self.check()
+            if isinstance(obj, pikepdf.Stream):
+                stack: list[Any] = [obj.stream_dict]
+            elif isinstance(obj, (pikepdf.Dictionary, pikepdf.Array)):
+                stack = [obj]
+            else:
+                continue
+            depth_budget = MAX_DIRECT_DEPTH * 1000
+            while stack and depth_budget > 0:
+                depth_budget -= 1
+                node = stack.pop()
+                if isinstance(node, pikepdf.Dictionary):
+                    self.holder(node)
+                    children = [node[k] for k in list(node.keys())]
+                else:
+                    children = list(node)
+                stack.extend(
+                    c
+                    for c in children
+                    if isinstance(c, (pikepdf.Dictionary, pikepdf.Array)) and not c.is_indirect
+                )
+        return self.counts
+
+
+def _tree_size(tree: Any) -> int:
+    try:
+        return max(1, len(pikepdf.NameTree(tree)))
+    except Exception:  # noqa: BLE001 - a damaged tree still counts as present
+        return 1
+
+
+def scan_active_content(pdf: pikepdf.Pdf) -> dict[str, int]:
+    """Read-only counts of what ``remove_active_content`` would remove, by kind:
+    ``javascript``, ``aa`` (automatic actions), ``launch``, ``forms``, ``remote``,
+    ``media``, ``hide``, ``embedded``, ``xfa``. Plain web links are not counted."""
+    return _Sweep(pdf, remove=False, remove_links=False).run()
+
+
+def remove_active_content(
+    pdf: pikepdf.Pdf,
+    *,
+    remove_links: bool = False,
+    check: Callable[[], None] | None = None,
+) -> dict[str, int]:
+    """Remove scripts, automatic and external actions, attachments, embedded
+    media and XFA. Returns counts by kind (see ``scan_active_content``), plus
+    ``links`` when ``remove_links`` removes ``/URI`` actions, and ``formActions``
+    for how many of the removals were on form fields. ``check`` is called now and
+    then (pass ``ctx.check_cancelled``) so a long document stays cancellable."""
+    return _Sweep(pdf, remove=True, remove_links=remove_links, check=check).run()
+
+
 # ------------------------------------------------------------------ adapter
 
 
@@ -415,11 +739,14 @@ class PdfAdapter(Adapter):
                 warnings.append(WarningItem(code="XFA_UNSUPPORTED"))
             if has_active_content(pdf):
                 warnings.append(WarningItem(code="ACTIVE_CONTENT_FOUND"))
+            from . import reveal  # noqa: PLC0415
+
             return InspectReport(
                 pages=len(pdf.pages),
                 encryption=encryption,  # type: ignore[arg-type]
                 signed=is_signed(pdf),
                 warnings=warnings,
+                findings=reveal.open_pdf_findings(pdf),
             )
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:

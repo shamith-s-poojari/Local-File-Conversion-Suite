@@ -63,3 +63,53 @@ def test_interval_and_width(tmp_path: Path) -> None:
     with Image.open(r.outputs[-1]) as img:
         assert img.format == "PNG"
         assert img.width == 640
+
+
+def test_sheet_is_one_picture_with_every_frame(tmp_path: Path) -> None:
+    src = files.video_file(tmp_path / "a.mp4", "mp4", seconds=4.0, size="320x240")
+    r = run_in_process(
+        ADAPTER,
+        tmp_path / "job",
+        [src],
+        {"to": "png", "layout": "sheet", "count": 6, "fileTitles": ["clip"]},
+    )
+    assert not r.errors
+    assert r.names == ["clip-sheet.png"]
+    with Image.open(r.outputs[0]) as img:
+        assert img.format == "PNG"
+        # 6 frames: 3 columns of 4:3 cells over 2 rows, with captions and a title.
+        assert img.width > 3 * 320
+        assert img.height > 2 * 240
+
+
+def test_sheet_in_jpg_and_by_interval(tmp_path: Path) -> None:
+    src = files.video_file(tmp_path / "a.mp4", "mp4", seconds=6.0, size="160x120")
+    r = run_in_process(
+        ADAPTER,
+        tmp_path / "job",
+        [src],
+        {"to": "jpg", "layout": "sheet", "mode": "interval", "every": 1, "fileTitles": ["clip"]},
+    )
+    assert not r.errors
+    assert r.names == ["clip-sheet.jpg"]
+    with Image.open(r.outputs[0]) as img:
+        assert img.format == "JPEG"
+
+
+def test_sheet_frame_count_is_checked_up_front(tmp_path: Path) -> None:
+    src = files.video_file(tmp_path / "a.mp4", "mp4", seconds=4.0, size="160x120")
+    few = run_in_process(
+        ADAPTER, tmp_path / "a", [src], {"to": "jpg", "layout": "sheet", "count": 3}
+    )
+    assert few.errors and few.errors[0].param == "count"
+    many = run_in_process(
+        ADAPTER, tmp_path / "b", [src], {"to": "jpg", "layout": "sheet", "count": 50}
+    )
+    assert many.errors and many.errors[0].param == "count"
+    one_second = run_in_process(
+        ADAPTER,
+        tmp_path / "c",
+        [src],
+        {"to": "jpg", "layout": "sheet", "mode": "interval", "every": 30},
+    )
+    assert one_second.errors and one_second.errors[0].param == "every"

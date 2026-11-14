@@ -27,7 +27,18 @@ import {
 } from "../icons";
 import type { Context, Event, FileView } from "../machines/app";
 import { fileIds } from "../machines/app";
-import { errorMessage, formatBytes, installHint, SNIFF_ERRORS, warningText } from "../text";
+import { isAction, suggest, type Suggestion } from "../suggestions";
+import {
+  ACTION_ERRORS,
+  ACTIVE_KINDS,
+  errorMessage,
+  FINDING_LABELS,
+  folderTruncatedText,
+  formatBytes,
+  installHint,
+  SNIFF_ERRORS,
+  warningText,
+} from "../text";
 import { Password } from "../widgets/Password";
 import { Thumbnail } from "../widgets/Thumbnail";
 import { defaults, missingRequired, SchemaForm } from "./SchemaForm";
@@ -54,13 +65,18 @@ const TOOLS: Record<string, string> = {
   "video-frames": "Save pictures from the video, spread evenly or every few seconds.",
   "data-combine": "Stack rows from several files into one, or put each on its own sheet.",
   "data-split": "Break a table into files of so many rows, or one per value in a column.",
+  "file-clean": "Remove location, camera, author, dates and comments. Pictures don't change.",
+  "media-clean": "Remove location, device, dates and tags without re-encoding.",
+  "file-disarm": "Remove macros, scripts, embedded files and anything that loads from outside.",
+  "contact-sheet": "Thumbnails of pictures or PDF pages on one sheet, with names.",
 };
 
 /** Tool names on the home screen, by the family whose files they take (ADR 0004). */
 const FAMILY_TOOLS: Partial<Record<Family, string[]>> = {
-  image: ["Rotate and resize", "Compress", "Animated GIF", "Images to one PDF"],
-  audio: ["Join", "Volume, fade and speed"],
-  video: ["Join", "Rotate and speed", "Save frames"],
+  document: ["Make safe to open", "Remove hidden details"],
+  image: ["Rotate and resize", "Compress", "Animated GIF", "Images to one PDF", "Contact sheet", "Remove hidden details"],
+  audio: ["Join", "Volume, fade and speed", "Remove hidden details"],
+  video: ["Join", "Rotate and speed", "Save frames or a contact sheet", "Remove hidden details"],
   data: ["Combine", "Split"],
 };
 
@@ -73,6 +89,8 @@ const PDF_TOOLS = [
   "Protect or unlock",
   "Watermark",
   "Redact",
+  "Make safe to open",
+  "Contact sheet",
 ];
 
 const PREVIEWABLE: Family[] = ["image", "audio", "video"];
@@ -156,15 +174,61 @@ function Warnings({ warnings, prominent }: { warnings: Warning[]; prominent?: bo
   );
 }
 
+/** What a file gives away or could do when opened (ADR 0005). */
+function Reveals({ f }: { f: FileView }) {
+  const findings = f.inspect?.findings ?? [];
+  const macro = f.file?.macroEnabled === true;
+  if (findings.length === 0 && !macro) return null;
+  const kinds = [...new Set(findings.map((x) => x.kind))];
+  const active = kinds.filter((k) => ACTIVE_KINDS.includes(k));
+  const privacy = kinds.filter((k) => !ACTIVE_KINDS.includes(k));
+  return (
+    <details className="reveals">
+      <summary>
+        {(active.length > 0 || macro) && (
+          <span className="caution">
+            <WarningIcon /> Can run or load things when opened
+          </span>
+        )}
+        {privacy.length > 0 && (
+          <span className="reveal-line">Reveals: {privacy.map((k) => FINDING_LABELS[k] ?? k).join(", ")}</span>
+        )}
+      </summary>
+      <ul>
+        {macro && !kinds.includes("macros") && <li>Macro-enabled file</li>}
+        {findings.map((x, i) => (
+          <li key={i}>
+            <span className="finding-kind">{FINDING_LABELS[x.kind] ?? x.kind}</span>
+            {x.detail && <span className="mono">{x.detail}</span>}
+          </li>
+        ))}
+      </ul>
+      <p className="hint">Found on this device. Nothing was sent anywhere.</p>
+    </details>
+  );
+}
+
+function FileProblem({ f }: { f: FileView }) {
+  if (!f.error) return null;
+  const text =
+    f.error === "folderTruncated" ? folderTruncatedText(f.count) : (SNIFF_ERRORS[f.error] ?? describeFileError(f.error));
+  return <p className={f.error === "folderTruncated" ? "hint warn-text" : "hint error"}>{text}</p>;
+}
+
+function actionError(e: unknown): string {
+  const err = e as { code?: string; reason?: string };
+  return (err.reason && ACTION_ERRORS[err.reason]) ?? errorMessage(err.code ?? "E_INTERNAL").what;
+}
+
 // ------------------------------------------------------------------- home
 
 export function Home({ api, send, diag }: { api: Api; send: Send; diag: Diagnostics | null }) {
   const [busy, setBusy] = useState(false);
   const disabled = diag !== null && !diag.processingEnabled;
-  const choose = async () => {
+  const choose = async (folder = false) => {
     setBusy(true);
     try {
-      const results = await api.pickFiles();
+      const results = folder ? await api.pickFolder() : await api.pickFiles();
       if (results.length) send({ type: "FILES_ADDED", results });
     } finally {
       setBusy(false);
@@ -197,16 +261,21 @@ export function Home({ api, send, diag }: { api: Api; send: Send; diag: Diagnost
           <span className="drop-icon">
             <UploadIcon />
           </span>
-          <p className="drop-title">Drop files anywhere in this window</p>
+          <p className="drop-title">Drop files or folders anywhere in this window</p>
           <p id="drop-help" className="hint">
-            Up to 200 at once. Mixed types are fine.
+            Up to 200 at once. Mixed types are fine. You can also paste a picture or a table.
           </p>
-          <button type="button" className="primary lg" onClick={choose} disabled={busy || disabled}>
-            <span>{busy ? "Opening…" : "Choose files"}</span>
-            <span className="btn-icon">
-              <ArrowRight />
-            </span>
-          </button>
+          <div className="drop-actions">
+            <button type="button" className="primary lg" onClick={() => choose()} disabled={busy || disabled}>
+              <span>{busy ? "Opening…" : "Choose files"}</span>
+              <span className="btn-icon">
+                <ArrowRight />
+              </span>
+            </button>
+            <button type="button" className="lg" onClick={() => choose(true)} disabled={busy || disabled}>
+              Choose folder
+            </button>
+          </div>
         </div>
       </div>
 
@@ -322,7 +391,8 @@ function FileRow({ api, f, send }: { api: Api; f: FileView; send: Send }) {
           </button>
         )}
       </div>
-      {f.error && <p className="hint error">{SNIFF_ERRORS[f.error] ?? describeFileError(f.error)}</p>}
+      <FileProblem f={f} />
+      <Reveals f={f} />
       {f.file?.extensionMismatch && (
         <p className="hint">The name says one type, but the content is {f.file.format.toUpperCase()}. It will be treated as {f.file.format.toUpperCase()}.</p>
       )}
@@ -440,6 +510,21 @@ export function Configure({ api, ctx, send, registry }: { api: Api; ctx: Context
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, ids.join(",")]);
+  const [duplicates, setDuplicates] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setDuplicates(0);
+    if (ids.length > 1) {
+      Promise.resolve()
+        .then(() => api.findDuplicates(ids))
+        .then((n) => live && setDuplicates(n))
+        .catch(() => {});
+    }
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, ids.join(",")]);
 
   const adapter: AdapterEntry | undefined = registry?.adapters.find((a) => a.manifest.id === ctx.operation);
   const first = ctx.files.find((f) => f.file?.actionable);
@@ -485,10 +570,27 @@ export function Configure({ api, ctx, send, registry }: { api: Api; ctx: Context
     const params = a && others.length === 0 ? defaults(a.paramsSchema) : {};
     send({ type: "SELECT_CONVERSION", to: c.to, adapter: id, params });
   };
-  const chooseOperation = (t: OperationTarget) => {
+  const chooseOperation = (t: OperationTarget, extra: Record<string, unknown> = {}) => {
     const a = registry?.adapters.find((x) => x.manifest.id === t.adapter);
-    send({ type: "SELECT_OPERATION", operation: t.adapter, params: a ? defaults(a.paramsSchema, true) : {} });
+    send({ type: "SELECT_OPERATION", operation: t.adapter, params: { ...(a ? defaults(a.paramsSchema, true) : {}), ...extra } });
   };
+  const suggestions = suggest(ctx.files, targets, duplicates);
+  const chooseSuggestion = (s: Suggestion) => {
+    if ("to" in s) {
+      const c = conversions.find((x) => x.to === s.to);
+      if (c) chooseConversion(c);
+      return;
+    }
+    const t = targets?.operations.find((o) => o.adapter === s.operation);
+    if (t) chooseOperation(t, s.params);
+  };
+  const suggestionChecked = (s: Suggestion) =>
+    "to" in s
+      ? ctx.to === s.to
+      : !ctx.to && ctx.operation === s.operation && Object.entries(s.params).every(([k, v]) => ctx.params[k] === v);
+  // "Convert all to JPG" with some JPGs already selected: offer to leave them out.
+  const sameFormat = ctx.to ? ctx.files.filter((f) => f.file?.actionable && f.file.format === ctx.to).length : 0;
+  const offerSkip = sameFormat > 0 && sameFormat < ids.length;
 
   const byFamily = new Map<Family, ConversionTarget[]>();
   for (const c of conversions) {
@@ -530,6 +632,9 @@ export function Configure({ api, ctx, send, registry }: { api: Api; ctx: Context
                     {f.file && <FormatTag format={f.file.format} />}
                     <span className="mono">{fileMeta(f)}</span>
                   </span>
+                  {f.file?.folder && <span className="hint folder-path">{f.file.folder}</span>}
+                  <FileProblem f={f} />
+                  <Reveals f={f} />
                 </div>
                 {f.file && (
                   <button
@@ -547,6 +652,32 @@ export function Configure({ api, ctx, send, registry }: { api: Api; ctx: Context
         </aside>
 
         <div className="choices">
+          {suggestions.length > 0 && (
+            <section className="choice-section suggestions" aria-labelledby="suggested">
+              <h2 id="suggested" className="section-title">
+                Suggested
+              </h2>
+              <div className="chips">
+                {suggestions.map((s) =>
+                  isAction(s) ? (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className={`chip${suggestionChecked(s) ? " checked" : ""}`}
+                      aria-pressed={suggestionChecked(s)}
+                      onClick={() => chooseSuggestion(s)}
+                    >
+                      {s.text}
+                    </button>
+                  ) : (
+                    <span key={s.id} className="chip note">
+                      {s.text}
+                    </span>
+                  ),
+                )}
+              </div>
+            </section>
+          )}
           <section className="choice-section" aria-labelledby="convert-to">
             <h2 id="convert-to" className="section-title">
               {mixed ? "Convert all to" : "Convert to"}
@@ -615,6 +746,18 @@ export function Configure({ api, ctx, send, registry }: { api: Api; ctx: Context
             </section>
           )}
 
+          {offerSkip && (
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={ctx.params.skipSame === true}
+                onChange={() => send({ type: "SET_PARAMS", params: { ...ctx.params, skipSame: ctx.params.skipSame !== true } })}
+              />
+              <span>
+                Skip {sameFormat} file{sameFormat === 1 ? "" : "s"} already in {formatInfo(ctx.to!).label}
+              </span>
+            </label>
+          )}
           {hiddenBestEffort && (
             <label className="toggle">
               <input type="checkbox" checked={ctx.showBestEffort} onChange={() => send({ type: "TOGGLE_BEST_EFFORT" })} />
@@ -815,6 +958,23 @@ function stageLabel(stage: string): string {
 export function Result({ api, ctx, send, state }: { api: Api; ctx: Context; send: Send; state: string }) {
   const job = ctx.job;
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [layoutPossible, setLayoutPossible] = useState(false);
+  const [keepLayout, setKeepLayout] = useState(true);
+  const jobId = job?.jobId;
+  const many = (job?.outputs.length ?? 0) > 1;
+  useEffect(() => {
+    let live = true;
+    setLayoutPossible(false);
+    if (jobId && many) {
+      Promise.resolve()
+        .then(() => api.canKeepLayout(jobId))
+        .then((ok) => live && setLayoutPossible(ok))
+        .catch(() => {});
+    }
+    return () => {
+      live = false;
+    };
+  }, [api, jobId, many]);
   if (!job) return null;
   const checks = job.stages.filter((s) => s.startsWith("verified-"));
   const busy = state === "saving" || state === "confirming";
@@ -875,7 +1035,18 @@ export function Result({ api, ctx, send, state }: { api: Api; ctx: Context; send
             <button type="button" onClick={() => send({ type: "ADJUST" })}>
               Adjust
             </button>
-            <button type="button" className="primary" onClick={() => send({ type: "SAVE" })} disabled={busy}>
+            {layoutPossible && (
+              <label className="toggle inline">
+                <input type="checkbox" checked={keepLayout} onChange={() => setKeepLayout(!keepLayout)} />
+                <span>Keep folder layout</span>
+              </label>
+            )}
+            <button
+              type="button"
+              className="primary"
+              onClick={() => send({ type: "SAVE", keepLayout: layoutPossible && keepLayout })}
+              disabled={busy}
+            >
               <span>{busy ? "Saving…" : n > 1 ? "Save all…" : "Save…"}</span>
               <span className="btn-icon">
                 <ArrowRight />
@@ -888,7 +1059,24 @@ export function Result({ api, ctx, send, state }: { api: Api; ctx: Context; send
   );
 }
 
-function OutputCard({ api, jobId, index, o }: { api: Api; jobId: string; index: number; o: JobSnapshot["outputs"][number] }) {
+/** Results the core can put on the clipboard: pictures (as an image) and text. */
+const COPYABLE = [
+  "png", "jpg", "webp", "gif", "bmp", "tiff", "avif", "heic", "svg", "ico",
+  "txt", "md", "csv", "json", "yaml", "html",
+];
+
+function OutputCard({
+  api,
+  jobId,
+  index,
+  o,
+}: {
+  api: Api;
+  jobId: string;
+  index: number;
+  o: JobSnapshot["outputs"][number];
+}) {
+  const [copy, setCopy] = useState<"idle" | "done" | string>("idle");
   const format = (o.extension || "unknown") as Format;
   const family = familyOf(format);
   const preview: ReactElement = canPreview(format) ? (
@@ -907,6 +1095,25 @@ function OutputCard({ api, jobId, index, o }: { api: Api; jobId: string; index: 
           <FormatTag format={format} />
           <span className="mono">{formatBytes(o.sizeBytes)}</span>
         </span>
+        {COPYABLE.includes(format) && (
+          <button
+            type="button"
+            className="ghost sm"
+            onClick={() =>
+              api
+                .copyOutput(jobId, index)
+                .then(() => setCopy("done"))
+                .catch((e) => setCopy(actionError(e)))
+            }
+          >
+            {copy === "done" ? "Copied" : "Copy"}
+          </button>
+        )}
+        {copy !== "idle" && copy !== "done" && (
+          <span className="hint error" role="alert">
+            {copy}
+          </span>
+        )}
       </div>
     </li>
   );

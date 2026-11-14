@@ -113,6 +113,11 @@ export const WARNINGS: Record<string, string> = {
   KEPT_ORIGINAL: "Some files were already as small as they could get, so they were kept unchanged.",
   TARGET_NOT_REACHED: "Some files couldn't get under the size you chose. They were made as small as possible.",
   COLUMNS_MISMATCHED: "The files had different columns. Missing values were left empty.",
+  ACTIVE_CONTENT_REMOVED: "Scripts, automatic actions or embedded programs were removed. What the file shows is unchanged.",
+  MACROS_REMOVED: "Macros were removed. The file opens without asking to run code.",
+  EXTERNAL_LINKS_REMOVED: "Things the file loaded from outside (templates, pictures, linked objects) were removed.",
+  DETAILS_REMOVED: "Hidden details such as location, camera, author and dates were removed.",
+  TRACKED_CHANGES_KEPT: "The file still has tracked changes, which show earlier wording. Accept or reject them in your editor first.",
   W_UNKNOWN: "The engine reported an unusual warning.",
 };
 
@@ -124,7 +129,47 @@ export const SNIFF_ERRORS: Record<string, string> = {
   permissionDenied: "You don't have permission to read this file.",
   locked: "Another program has this file open.",
   unreadable: "The file couldn't be read.",
+  emptyFolder: "The folder has no files that can be used.",
 };
+
+/** A folder had more files than fit under the 200-file limit. */
+export function folderTruncatedText(count: number | undefined): string {
+  const n = count ?? 0;
+  return `${n} more file${n === 1 ? "" : "s"} in this folder weren't added: up to 200 files at once.`;
+}
+
+/** Reasons the paste, copy and skip commands give (CommandError.reason). */
+export const ACTION_ERRORS: Record<string, string> = {
+  emptyPaste: "There's nothing to paste.",
+  notAnImage: "Only PNG and JPEG pictures can be pasted.",
+  notText: "The pasted text couldn't be read.",
+  pasteTooLarge: "What you pasted is over 50 MB.",
+  tooManyFiles: "That's more than 200 files.",
+  allSkipped: "Every file is already in that format.",
+  notCopyable: "Only pictures and text results can be copied.",
+  tooLargeToCopy: "The result is too large to copy.",
+  clipboardUnavailable: "The clipboard isn't available.",
+};
+
+/** What each kind of finding is called in "Reveals: …" (ADR 0005). */
+export const FINDING_LABELS: Record<string, string> = {
+  location: "location",
+  device: "camera or device",
+  author: "author",
+  software: "software",
+  dates: "dates",
+  comments: "comments",
+  trackedChanges: "tracked changes",
+  hiddenContent: "hidden content",
+  tags: "tags",
+  activeContent: "active content",
+  macros: "macros",
+  externalLinks: "outside links",
+  embeddedFiles: "embedded files",
+};
+
+/** Kinds that mean the file can do something when it's opened. */
+export const ACTIVE_KINDS = ["activeContent", "macros", "externalLinks", "embeddedFiles"];
 
 export function errorMessage(code: string): Message {
   return ERRORS[code] ?? ERRORS.E_INTERNAL!;

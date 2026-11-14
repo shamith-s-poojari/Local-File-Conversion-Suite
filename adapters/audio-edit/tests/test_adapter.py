@@ -19,6 +19,7 @@ def test_each_file_keeps_its_format(tmp_path: Path) -> None:
     r = run_in_process(ADAPTER, tmp_path / "job", [a, b], {"volume": -6, "fileTitles": ["a", "b"]})
     assert not r.errors
     assert r.names == ["a-edited.wav", "b-edited.mp3"]
+    assert r.sources == [0, 1]
     codecs = [probe(o)["streams"][0]["codec_name"] for o in r.outputs]
     assert codecs == ["pcm_s16le", "mp3"]
 

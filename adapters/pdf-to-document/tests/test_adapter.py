@@ -92,6 +92,7 @@ def test_one_output_per_input(tmp_path: Path) -> None:
     b = corpus.build("text-1", tmp_path / "in")
     r = convert(tmp_path, [a, b], "txt")
     assert r.names == ["text-3.txt", "text-1.txt"]
+    assert r.sources == [0, 1]
     assert r.outputs[0].read_text("utf-8").count("\n\n") >= 2
 
 

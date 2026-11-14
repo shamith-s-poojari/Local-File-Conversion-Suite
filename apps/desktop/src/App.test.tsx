@@ -31,8 +31,8 @@ test("a file that needs an open password asks for it", async () => {
   const api = {
     inspectFile: async (id: string): Promise<InspectInfo> =>
       id === "locked"
-        ? { pages: 0, encryption: "openPassword", signed: null, warnings: [] }
-        : { pages: 3, encryption: "none", signed: false, warnings: [] },
+        ? { pages: 0, encryption: "openPassword", signed: null, warnings: [], findings: [] }
+        : { pages: 3, encryption: "none", signed: false, warnings: [], findings: [] },
   } as unknown as Api;
   const [locked, open] = await inspectAll(api, [file("locked"), file("open")]);
   expect(locked?.needs).toBe("password");
@@ -157,4 +157,20 @@ test("the home screen lists tools for every kind of file", () => {
   for (const t of ["Compress", "Animated GIF", "Volume, fade and speed", "Save frames", "Combine", "Page numbers"]) {
     expect(home).toContain(t);
   }
+});
+
+test("pasted text from a spreadsheet becomes a table, other text stays text", async () => {
+  const { looksTabular, readPaste } = await import("./App");
+  expect(looksTabular("a\tb\n1\t2\n3\t4\n")).toBe(true);
+  expect(looksTabular("a\tb")).toBe(false); // one line isn't a table
+  expect(looksTabular("Dear Sam,\nthanks\tfor everything\nsee you")).toBe(false);
+  const data = (text: string, files: File[] = []) =>
+    ({ files, getData: (t: string) => (t === "text/plain" ? text : "") }) as unknown as DataTransfer;
+  expect((await readPaste(data("x\ty\n1\t2")))?.kind).toBe("table");
+  expect((await readPaste(data("# Notes")))?.kind).toBe("text");
+  expect(await readPaste(data("   "))).toBeNull();
+  const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "a.png", { type: "image/png" });
+  const pasted = await readPaste(data("ignored", [png]));
+  expect(pasted?.kind).toBe("image");
+  expect(pasted?.bytes.length).toBe(4);
 });

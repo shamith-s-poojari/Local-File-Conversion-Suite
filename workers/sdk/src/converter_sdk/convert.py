@@ -8,11 +8,13 @@ inputs' original names (without extension) in ``params["fileTitles"]``.
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from .adapter import Adapter, ValidationReport
-from .context import JobContext
+from .context import JobContext, OutputFile
 from .errors import AdapterError
 from .protocol import ValidationIssue
 
@@ -38,6 +40,65 @@ class ConversionAdapter(Adapter):
 
     EDGES: ClassVar[dict[tuple[str, str], Tier]] = {}
     fidelity: ClassVar[Tier] = "L"  # replaced per job by the edges actually used
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        run = cls.__dict__.get("execute_conversion")
+        if run is None or getattr(run, "_sets_sources", False):
+            return
+
+        def execute_conversion(
+            self: ConversionAdapter, ctx: JobContext, params: dict[str, Any]
+        ) -> list[OutputFile]:
+            return self.attach_sources(ctx, params, run(self, ctx, params))
+
+        execute_conversion._sets_sources = True  # type: ignore[attr-defined]
+        execute_conversion.__doc__ = run.__doc__
+        cls.execute_conversion = execute_conversion  # type: ignore[method-assign]
+
+    # --------------------------------------------------------------- sources
+
+    @staticmethod
+    def output_file(path: Path, index: int, pages: int | None = None) -> OutputFile:
+        """An output that came from input ``index``. Adapters can build their
+        outputs with this to state the source explicitly."""
+        return OutputFile(path, pages=pages, source=index)
+
+    def attach_sources(
+        self, ctx: JobContext, params: dict[str, Any], outputs: list[OutputFile]
+    ) -> list[OutputFile]:
+        """Fills ``OutputFile.source`` for outputs that don't state it, so a
+        dropped folder's layout can be kept when saving (ADR 0005).
+
+        Outputs an adapter marked itself are kept. For the rest: one input
+        owns everything; as many outputs as inputs are taken to be one per
+        input, in order; otherwise an output belongs to the input whose title
+        starts its name, when only one input has that longest title. Outputs
+        that combine several inputs stay without a source."""
+        count = len(ctx.inputs)
+        if count == 0 or not outputs or any(o.source is not None for o in outputs):
+            return outputs
+        if count == 1:
+            return [dataclasses.replace(o, source=0) for o in outputs]
+        if len(outputs) == count:
+            return [dataclasses.replace(o, source=n) for n, o in enumerate(outputs)]
+        titles = [self.title(params, i) for i in range(count)]
+        result = []
+        for o in outputs:
+            try:
+                stem = ctx.suggested_name(o.path).rsplit(".", 1)[0]
+            except AdapterError:
+                result.append(o)
+                continue
+            matches = [
+                (len(t), i)
+                for i, t in enumerate(titles)
+                if stem == t or re.match(re.escape(t) + r"[^0-9A-Za-z]", stem)
+            ]
+            best = max((m[0] for m in matches), default=None)
+            owners = [i for length, i in matches if length == best]
+            result.append(dataclasses.replace(o, source=owners[0]) if len(owners) == 1 else o)
+        return result
 
     # ----------------------------------------------------------- edge table
 

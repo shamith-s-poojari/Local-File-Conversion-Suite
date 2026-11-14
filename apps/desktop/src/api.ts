@@ -26,12 +26,19 @@ export interface FileDescriptor {
   macroEnabled: boolean;
   cloudPlaceholder: boolean;
   actionable: boolean;
+  /** For a file from a dropped folder: the folder's name, then the folders
+   * below it, `/`-separated (`photos/2024/trip`). Never a path. */
+  folder?: string;
 }
 
 export interface FileResult {
   file?: FileDescriptor;
+  /** Also `emptyFolder` (a dropped folder had no usable files) and
+   * `folderTruncated` (`count` files of dropped folders didn't fit under the
+   * 200-file limit; `displayName` is the folder). */
   error?: string;
   displayName: string;
+  count?: number;
 }
 
 export interface MediaInfo {
@@ -56,6 +63,28 @@ export interface InspectInfo {
   signed: boolean | null;
   warnings: string[];
   media?: MediaInfo;
+  /** What the file reveals or could do when opened (ADR 0005). */
+  findings: Finding[];
+}
+
+export type FindingKind =
+  | "location"
+  | "device"
+  | "author"
+  | "software"
+  | "dates"
+  | "comments"
+  | "trackedChanges"
+  | "hiddenContent"
+  | "activeContent"
+  | "macros"
+  | "externalLinks"
+  | "embeddedFiles"
+  | "tags";
+
+export interface Finding {
+  kind: FindingKind;
+  detail?: string;
 }
 
 export interface CommandError {
@@ -86,6 +115,8 @@ export interface OutputFile {
   suggestedName: string;
   extension: string;
   sizeBytes: number;
+  /** The input this output came from, for keeping a folder's layout. */
+  source?: number;
 }
 
 export interface JobSnapshot {
@@ -188,6 +219,12 @@ export interface Diagnostics {
   platform?: string;
 }
 
+export interface ConversionStarted {
+  jobId: string;
+  /** Files left out because they were already in the target format. */
+  skipped: number;
+}
+
 export interface SaveResult {
   status: "saved" | "cancelled" | "confirmOverwrite";
   count: number;
@@ -197,24 +234,41 @@ export interface SaveResult {
 /** The commands, one function each. Errors reject with a `CommandError`. */
 export const api = {
   pickFiles: () => invoke<FileResult[]>("pick_files"),
+  /** Native folder dialog; adds the folder's files. */
+  pickFolder: () => invoke<FileResult[]>("pick_folder"),
+  /** Something pasted in the window; Rust checks the bytes (max 50 MB). */
+  addPasted: (kind: "image" | "table" | "text", bytes: Uint8Array) =>
+    invoke<FileResult[]>("add_pasted", bytes, { headers: { "x-paste-kind": kind } }),
   removeFile: (fileId: string) => invoke<void>("remove_file", { fileId }),
   resolveFile: (fileId: string, format?: Format, allowDownload?: boolean) =>
     invoke<FileDescriptor>("resolve_file", { fileId, format, allowDownload }),
   submitPassword: (fileId: string, password: string) =>
     invoke<InspectInfo>("submit_password", { fileId, password }),
   inspectFile: (fileId: string) => invoke<InspectInfo>("inspect_file", { fileId }),
+  findDuplicates: (fileIds: string[]) => invoke<number>("find_duplicates", { fileIds }),
   getTargets: (fileIds: string[]) => invoke<Targets>("get_targets", { fileIds }),
   getRegistry: () => invoke<Registry>("get_registry"),
   createJob: (operationId: string, fileIds: string[], params: Record<string, unknown>) =>
     invoke<string>("create_job", { operationId, fileIds, params }),
   createConversion: (fileIds: string[], to: Format, params: Record<string, unknown>) =>
     invoke<string>("create_conversion", { fileIds, to, params }),
+  /** Like `createConversion`; put `skipSame: true` in `params` to leave out
+   * files already in the target format, and read how many were left out. */
+  createConversionSkipping: (fileIds: string[], to: Format, params: Record<string, unknown>) =>
+    invoke<ConversionStarted>("create_conversion_skipping", { fileIds, to, params }),
   cancelJob: (jobId: string) => invoke<boolean>("cancel_job", { jobId }),
   requestPreview: (reference: string, page: number, dpi: number) =>
     invoke<Preview>("request_preview", { reference, page, dpi }),
   getPageText: (reference: string, page: number) =>
     invoke<PageText>("get_page_text", { reference, page }),
-  saveOutputs: (jobId: string) => invoke<SaveResult>("save_outputs", { jobId }),
+  saveOutputs: (jobId: string, keepLayout = false) =>
+    invoke<SaveResult>("save_outputs", { jobId, keepLayout }),
+  /** Whether saving can recreate the dropped folder's layout. */
+  canKeepLayout: (jobId: string) => invoke<boolean>("can_keep_layout", { jobId }),
+  /** Copies one output to the clipboard (PNG as an image; txt, md, csv,
+   * json, yaml, html as text). Rejects with reason `notCopyable` otherwise. */
+  copyOutput: (jobId: string, index: number) =>
+    invoke<void>("copy_output", { jobId, index }),
   confirmSave: (jobId: string) => invoke<SaveResult>("confirm_save", { jobId }),
   discardJob: (jobId: string) => invoke<void>("discard_job", { jobId }),
   getSnapshot: () => invoke<Snapshot>("get_snapshot"),

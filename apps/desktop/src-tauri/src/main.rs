@@ -31,37 +31,12 @@ fn main() -> std::process::ExitCode {
 /// repository and its virtualenv; packaged builds (T21) use bundle resources.
 fn app_config(handle: &tauri::AppHandle) -> Result<AppConfig, String> {
     let runner = std::env::current_exe().map_err(|e| e.to_string())?;
-    let (resources, python) = if cfg!(debug_assertions) {
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let repo = repo.canonicalize().map_err(|e| e.to_string())?;
-        let python = if cfg!(windows) {
-            repo.join(".venv/Scripts/python.exe")
-        } else {
-            repo.join(".venv/bin/python")
-        };
-        (repo, python)
+    let resources = if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
     } else {
-        let res = handle.path().resource_dir().map_err(|e| e.to_string())?;
-        let python = if cfg!(windows) {
-            res.join("python/python.exe")
-        } else {
-            res.join("python/bin/python3")
-        };
-        (res, python)
+        handle.path().resource_dir().map_err(|e| e.to_string())?
     };
-    if !python.is_file() {
-        return Err("the worker runtime is missing (run `uv sync` in development)".into());
-    }
-    Ok(AppConfig {
-        data_root: None,
-        adapters_dir: resources.join("adapters"),
-        resources,
-        python,
-        runner,
-        runner_args: vec![RUNNER_FLAG.into()],
-        user_memory_limit: None,
-        include_dev_adapters: false,
-    })
+    AppConfig::locate(Some(resources), runner, vec![RUNNER_FLAG.into()])
 }
 
 fn open_core(handle: &tauri::AppHandle, previews: Arc<preview::PreviewRegistry>) -> Core {
@@ -86,6 +61,7 @@ fn run() {
     let previews = Arc::new(preview::PreviewRegistry::default());
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(previews.clone())
         .manage(Arc::new(PendingSaves::default()))
         .register_uri_scheme_protocol("preview", |ctx, request| {
@@ -96,19 +72,25 @@ fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::pick_files,
+            commands::pick_folder,
+            commands::add_pasted,
             commands::remove_file,
             commands::resolve_file,
             commands::submit_password,
             commands::inspect_file,
+            commands::find_duplicates,
             commands::get_targets,
             commands::get_registry,
             commands::create_job,
             commands::create_conversion,
+            commands::create_conversion_skipping,
             commands::cancel_job,
             commands::request_preview,
             commands::get_page_text,
             commands::save_outputs,
             commands::confirm_save,
+            commands::can_keep_layout,
+            commands::copy_output,
             commands::discard_job,
             commands::get_snapshot,
             commands::get_diagnostics,

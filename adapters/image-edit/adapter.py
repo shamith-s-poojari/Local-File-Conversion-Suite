@@ -130,7 +130,7 @@ class ImageEditAdapter(Adapter):
             title = ConversionAdapter.title(params, i)
             out = ctx.output_path(f"{title}-edited.{fmt}")
             out.write_bytes(data)
-            outputs.append(OutputFile(out))
+            outputs.append(OutputFile(out, source=i))
             ctx.progress("edit", i + 1, total)
         if downscaled:
             ctx.warn("IMAGE_DOWNSCALED")
