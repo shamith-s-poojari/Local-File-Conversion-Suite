@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -519,10 +520,19 @@ def run_verifier(ctx: JobContext, output: Path, spec: dict[str, Any]) -> dict[st
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        # Read and dropped, not DEVNULL: a Windows AppContainer is denied
+        # the null device. It can hold document text, so it's never kept.
+        stderr=subprocess.PIPE,
     )
-    if proc.stdin is None or proc.stdout is None:  # pragma: no cover - Popen with PIPE
+    if proc.stdin is None or proc.stdout is None or proc.stderr is None:  # pragma: no cover
         raise AdapterError("E_INTERNAL", {"reason": "verifierPipes"})
+    err = proc.stderr
+
+    def drop_stderr() -> None:
+        while err.read(65536):
+            pass
+
+    threading.Thread(target=drop_stderr, daemon=True).start()
     proc.stdin.write(request.encode("utf-8"))
     proc.stdin.close()
     deadline = time.monotonic() + VERIFY_TIMEOUT_S

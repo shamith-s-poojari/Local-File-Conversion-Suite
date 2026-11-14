@@ -295,7 +295,6 @@ def placement(x0: float, y0: float, w: float, h: float, rotate: int) -> list[flo
     return [1, 0, 0, 1, x0, y0]
 
 
-
 # ------------------------------------------------------------------- saving
 
 

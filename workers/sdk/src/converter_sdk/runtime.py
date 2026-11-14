@@ -316,12 +316,24 @@ def _take_protocol_channel() -> tuple[Any, Any]:
     proto_in = os.fdopen(os.dup(0), "rb")
     sys.stdout.flush()
     os.dup2(2, 1)
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    os.close(devnull)
+    empty = _empty_input()
+    os.dup2(empty, 0)
+    os.close(empty)
     sys.stdout = sys.stderr
-    sys.stdin = open(os.devnull, encoding="utf-8")  # noqa: SIM115 - lives for the process
+    sys.stdin = os.fdopen(os.dup(0), encoding="utf-8")  # lives for the process
     return proto_in, proto_out
+
+
+def _empty_input() -> int:
+    """A descriptor that reads end of file at once: the null device, or a
+    pipe with no writer where the null device can't be opened (a Windows
+    AppContainer is denied ``NUL``)."""
+    try:
+        return os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        read, write = os.pipe()
+        os.close(write)
+        return read
 
 
 def _builtin_mime_types() -> None:

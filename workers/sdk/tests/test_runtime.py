@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import queue
 import threading
 import time
@@ -298,3 +299,22 @@ def test_workers_never_read_the_system_mime_tables(
     runtime._builtin_mime_types()
     assert mimetypes.guess_type("a.local") == (None, None)
     assert mimetypes.guess_type("a.png")[0] == "image/png"
+
+
+def test_empty_input_without_the_null_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows AppContainer is denied NUL; stdin becomes a pipe at EOF."""
+    from converter_sdk import runtime  # noqa: PLC0415
+
+    real_open = os.open
+
+    def deny_null(path: str, flags: int, *args: int) -> int:
+        if path == os.devnull:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(runtime.os, "open", deny_null)
+    fd = runtime._empty_input()
+    try:
+        assert os.read(fd, 10) == b""
+    finally:
+        os.close(fd)

@@ -59,13 +59,17 @@ def run(
     ctx.work_dir.mkdir(exist_ok=True)
     proc = subprocess.Popen(  # noqa: S603 - argv comes from the adapter, not the user
         [os.fspath(a) for a in argv],
-        stdin=subprocess.DEVNULL,
+        # A pipe closed at once, not DEVNULL: a Windows AppContainer is
+        # denied the null device.
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=full_env,
         cwd=cwd or ctx.work_dir,
         **_NEW_GROUP,
     )
+    if proc.stdin is not None:
+        proc.stdin.close()
     group = _Group(proc)
     stdout, stderr = proc.stdout, proc.stderr
     if stdout is None or stderr is None:  # both are pipes; never None
