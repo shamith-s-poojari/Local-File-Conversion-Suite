@@ -19,9 +19,22 @@ use crate::SandboxLauncher;
 
 /// Embedded so the probe can't go missing or be swapped on disk.
 const PROBE: &str = include_str!("../probe/probe.py");
-const PROBE_JOB_ID: &str = "j_probe";
 const ACCESS_LIMIT: u64 = 1024 * 1024 * 1024;
 const ALLOC_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// A job ID for one self-test, unique across processes. The Windows
+/// AppContainer profile is named after it and deleted after each run, so
+/// two self-tests at once (the app and `lfcs`, or parallel tests) must not
+/// share one.
+fn probe_job_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    format!(
+        "j_probe_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Must be refused.
 const DENIED: &[&str] = &[
@@ -69,7 +82,8 @@ pub fn self_test(
             passed: false,
         });
     }
-    let root = scratch.join("probe");
+    let id = probe_job_id();
+    let root = scratch.join(format!("probe-{id}"));
     let _ = fs::remove_dir_all(&root);
     let job = root.join("job-a");
     let other = root.join("job-b");
@@ -99,6 +113,7 @@ pub fn self_test(
     });
     let access = run(
         launcher,
+        &id,
         &job,
         ACCESS_LIMIT,
         vec!["access".into(), config.to_string().into()],
@@ -136,7 +151,7 @@ pub fn self_test(
         passed: !other.join("written.txt").exists(),
     });
 
-    let alloc = run(launcher, &job, ALLOC_LIMIT, vec!["alloc".into()])?;
+    let alloc = run(launcher, &id, &job, ALLOC_LIMIT, vec!["alloc".into()])?;
     let reported = String::from_utf8_lossy(&alloc.stdout)
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -159,6 +174,7 @@ pub fn self_test(
 
 fn run(
     launcher: &SandboxLauncher,
+    id: &str,
     job: &Path,
     limit: u64,
     args: Vec<OsString>,
@@ -169,7 +185,7 @@ fn run(
         canonical(job).join("probe.py").into_os_string(),
     ];
     argv.extend(args);
-    let mut cmd = launcher.wrap(PROBE_JOB_ID, job, limit, argv)?;
+    let mut cmd = launcher.wrap(id, job, limit, argv)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
