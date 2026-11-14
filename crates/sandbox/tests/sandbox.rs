@@ -8,12 +8,17 @@
 //! must work.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use converter_jobstore::{DataRoot, InputSource, JobState, JobStore, StoreConfig, SyncRoots};
+use converter_jobstore::{
+    DataRoot, InputSource, JobId, JobState, JobStore, StoreConfig, SyncRoots,
+};
 use converter_sandbox::{probe, SandboxConfig, SandboxLauncher};
-use converter_scheduler::{FixedMemory, JobSpec, Runner, RunnerConfig, Timing};
+use converter_scheduler::{
+    FixedMemory, JobSpec, LaunchSpec, Launcher, Runner, RunnerConfig, Timing,
+};
 use converter_sniffer::Format;
 use serde_json::json;
 
@@ -143,4 +148,42 @@ fn a_job_runs_end_to_end_inside_the_sandbox() {
         .find(|j| j.job_id == id)
         .unwrap();
     assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
+}
+
+/// Each adapter's worker starts in the sandbox and says hello. On failure
+/// the worker's stderr is shown, which the app keeps to itself (it can
+/// hold document text) but a test with no documents can print.
+#[test]
+fn real_adapters_start_inside_the_sandbox() {
+    let Some(l) = launcher() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    if !available(&l, tmp.path()) {
+        return;
+    }
+    l.prepare().expect("runtime grants");
+    for adapter in ["dev-fake", "pdf-redact", "image-convert", "data-convert"] {
+        let job = tmp.path().join(adapter);
+        for d in ["in", "out", "work"] {
+            std::fs::create_dir_all(job.join(d)).unwrap();
+        }
+        let spec = LaunchSpec {
+            adapter_id: adapter.into(),
+            job_id: JobId::parse("j_hello").unwrap(),
+            job_dir: job,
+            memory_limit: Some(1 << 30),
+        };
+        let mut cmd = l.command(&spec).expect("worker command");
+        // No requests: the worker says hello, sees end of input and exits.
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = cmd.output().expect("the runner starts");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(r#""type":"hello""#),
+            "{adapter} didn't say hello (exit {:?})\nstdout: {stdout}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
