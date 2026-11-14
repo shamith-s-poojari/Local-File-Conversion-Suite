@@ -393,10 +393,12 @@ fn run_tool(app: &App, ids: &[String], tool: &str, params: serde_json::Value) ->
     names
 }
 
-/// Makes files with a Python snippet; `{dir}` is the test folder.
+/// Makes files with a Python snippet; `{dir}` is the test folder, written
+/// with forward slashes so a Windows path's `\U` isn't read as an escape.
 fn python_make(python: &Path, dir: &Path, code: &str) {
+    let dir = dir.to_str().unwrap().replace('\\', "/");
     let ok = Command::new(python)
-        .args(["-I", "-c", &code.replace("{dir}", dir.to_str().unwrap())])
+        .args(["-I", "-c", &code.replace("{dir}", &dir)])
         .status()
         .unwrap()
         .success();
