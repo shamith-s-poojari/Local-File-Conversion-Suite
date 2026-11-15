@@ -1,0 +1,27 @@
+id: video-convert
+kind: conversion
+title: Convert video
+workerClass: media
+edges:
+  - { from: [mp4, mov, mkv, webm, avi], to: aac, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: aiff, tier: E }
+  - { from: [mp4, mov, mkv, webm, gif], to: avi, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: flac, tier: E }
+  - { from: [mp4, mov, mkv, webm, avi], to: gif, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: m4a, tier: L }
+  - { from: [mp4, mov], to: mkv, tier: H }
+  - { from: [webm, avi, gif], to: mkv, tier: L }
+  - { from: [mp4, mkv], to: mov, tier: H }
+  - { from: [webm, avi, gif], to: mov, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: mp3, tier: L }
+  - { from: [mov, mkv], to: mp4, tier: H }
+  - { from: [webm, avi, gif], to: mp4, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: ogg, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: opus, tier: L }
+  - { from: [mp4, mov, mkv, webm, avi], to: wav, tier: E }
+  - { from: [mp4, mov, mkv, avi, gif], to: webm, tier: L }
+fidelityNotes: [AUDIO_DOWNMIXED, STREAMS_DROPPED]
+limits: { timeoutBaseS: 600, timeoutSPerMb: 30, noProgressS: 300, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

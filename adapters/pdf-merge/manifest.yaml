@@ -1,0 +1,13 @@
+id: pdf-merge
+kind: operation
+title: Merge PDFs
+workerClass: pdf
+inputs: { formats: [pdf], min: 2, max: 200 }
+outputs: { format: pdf, cardinality: one }
+fidelity: E
+fidelityNotes:
+  [FORMS_FLATTENED, TAGS_DROPPED, OUTLINE_DROPPED, SIGNATURE_INVALIDATED, XFA_UNSUPPORTED, ACTIVE_CONTENT_FOUND]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 1, noProgressS: 120, diskFactor: 2.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pikepdf]

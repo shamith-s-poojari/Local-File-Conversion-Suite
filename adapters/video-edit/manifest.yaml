@@ -1,0 +1,12 @@
+id: video-edit
+kind: operation
+title: Rotate, flip or change speed
+workerClass: media
+inputs: { formats: [mp4, mov, mkv, webm, avi], min: 1, max: 50 }
+outputs: { format: same, cardinality: many }
+fidelity: L
+fidelityNotes: [STREAMS_DROPPED]
+limits: { timeoutBaseS: 600, timeoutSPerMb: 30, noProgressS: 300, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

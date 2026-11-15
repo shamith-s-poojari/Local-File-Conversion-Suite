@@ -1,0 +1,14 @@
+cases:
+  - name: heavy-balanced
+    inputs: [heavy]
+    params: {}
+    expect: { pages: [40] }
+  - name: text-lossless
+    inputs: [text-3]
+    params: { level: lossless }
+    expect: { pages: [3] }
+negative:
+  params: {}
+cancel:
+  inputs: [big]
+  params: { level: strong }

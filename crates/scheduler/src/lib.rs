@@ -23,7 +23,7 @@ pub use queue::{
     hard_limit, phase1_pools, Admission, Scheduler, Ticket, MIN_HARD_LIMIT, STARVATION_AFTER,
 };
 pub use runner::{
-    pool_for, warning_catalog, JobSpec, Runner, RunnerConfig, GENERIC_WARNING_CODE,
+    pool_for, warning_catalog, JobPart, JobSpec, Runner, RunnerConfig, GENERIC_WARNING_CODE,
     MAX_DETAIL_BYTES,
 };
 pub use verify::verify_outputs;

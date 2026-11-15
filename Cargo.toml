@@ -1,10 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/cli",
     "apps/desktop/src-tauri",
+    "crates/app-core",
     "crates/jobstore",
     "crates/protocol",
     "crates/router",
+    "crates/sandbox",
     "crates/scheduler",
     "crates/sniffer",
 ]

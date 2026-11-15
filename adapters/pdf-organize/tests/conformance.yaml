@@ -1,0 +1,13 @@
+cases:
+  - name: reorder-rotate-duplicate
+    inputs: [text-5]
+    params:
+      pages: [{ source: 5, rotate: 90 }, { source: 1 }, { source: 1, rotate: 180 }]
+    expect: { pages: [3] }
+negative:
+  params: { pages: [{ source: 1 }] }
+cancel:
+  inputs: [big]
+  params: {}
+  # Builds params.pages as 4,000 copies of the item, so the job runs long enough.
+  repeat: { param: pages, item: { source: 1, rotate: 90 }, times: 4000 }

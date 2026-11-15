@@ -1,0 +1,26 @@
+# Tables and structured data without LibreOffice (ADR 0003). Excel to
+# Markdown stays off: the blueprint matrix doesn't offer it. Where
+# office-convert offers the same pair (CSV to Excel, Excel to CSV), the
+# planner picks the better tier, then the cheaper adapter.
+id: data-convert
+kind: conversion
+title: Convert CSV, JSON, YAML and Excel
+workerClass: render
+edges:
+  - { from: [csv], to: json, tier: H }
+  - { from: [csv], to: yaml, tier: H }
+  - { from: [csv], to: xlsx, tier: H }
+  - { from: [csv], to: md, tier: H }
+  - { from: [csv], to: html, tier: H }
+  - { from: [json], to: yaml, tier: H }
+  - { from: [yaml], to: json, tier: H }
+  - { from: [json, yaml], to: csv, tier: R }
+  - { from: [json, yaml], to: xlsx, tier: R }
+  - { from: [xlsx], to: json, tier: R }
+  - { from: [xlsx], to: yaml, tier: R }
+  - { from: [xlsx], to: csv, tier: R }
+fidelityNotes: [NESTED_DATA_FLATTENED, FORMULAS_DROPPED, SHEETS_SPLIT, COMMENTS_DROPPED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 10, noProgressS: 120, diskFactor: 4.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [openpyxl, pyyaml]

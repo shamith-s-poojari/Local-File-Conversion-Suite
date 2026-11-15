@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Compress PDF",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "level": {
+      "title": "Compression",
+      "enum": ["balanced", "strong", "lossless"],
+      "default": "balanced",
+      "x-labels": {
+        "balanced": "Balanced: pictures at 150 dpi, good for reading on screen and printing",
+        "strong": "Strong: pictures at 96 dpi, smallest file",
+        "lossless": "Lossless: pictures untouched, only the file's structure is packed"
+      }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# WebView runtime destinations allowed by capture.sh --app (spec 14.5 item 4).
+# One IP address per line. Filled from spike S4's measurements, with each
+# entry explained in docs/privacy.md. Empty means no WebView traffic is
+# allowed: any destination fails the test until S4 records and discloses it.

@@ -1,0 +1,16 @@
+cases:
+  - name: pictures
+    inputs: [image-png, image-jpg, image-webp, image-tiff]
+    params: { fileTitles: [a, b, c, d] }
+    expect: { outputs: 4 }
+  - name: documents
+    inputs: [doc-pdf-report, doc-docx, doc-xlsx]
+    params: { removeComments: true }
+    expect: { outputs: 3 }
+negative:
+  params: { removeComments: true }
+  inputs: [image-png]
+  bad: [corrupt-png, truncated-png, corrupt-jpg, truncated-jpg, corrupt-docx, truncated-docx]
+cancel:
+  inputs: [image-big-png, image-big-png, image-big-png, image-big-png, image-big-png, image-big-png]
+  params: { removeComments: true }

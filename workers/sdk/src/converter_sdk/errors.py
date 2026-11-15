@@ -18,6 +18,7 @@ ErrorCode = Literal[
     "E_SANDBOX_UNAVAILABLE",
     "E_INSTALL_CORRUPT",
     "E_REDACTION_VERIFICATION_FAILED",
+    "E_NO_TEXT",
     "E_INTERNAL",
 ]
 

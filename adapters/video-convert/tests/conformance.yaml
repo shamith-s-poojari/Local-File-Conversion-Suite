@@ -1,0 +1,19 @@
+cases:
+  - name: mov-to-mp4
+    inputs: [video-mov]
+    params: { to: mp4 }
+    expect: { outputs: 1 }
+  - name: mp4-to-webm-small
+    inputs: [video-mp4]
+    params: { to: webm, quality: small, maxHeight: 180 }
+  - name: soundtrack-to-mp3
+    inputs: [video-mkv, video-avi]
+    params: { to: mp3 }
+    expect: { outputs: 2 }
+negative:
+  params: { to: mkv, quality: high }
+  inputs: [video-mp4]
+  bad: [corrupt-mp4, truncated-mp4]
+cancel:
+  inputs: [video-long-mp4]
+  params: { to: webm, quality: high }

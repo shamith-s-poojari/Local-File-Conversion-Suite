@@ -1,0 +1,16 @@
+cases:
+  - name: audio-and-video
+    inputs: [audio-mp3, audio-flac, video-mp4, video-mkv, video-webm]
+    params: { fileTitles: [a, b, c, d, e] }
+    expect: { outputs: 5 }
+  - name: cover-art
+    inputs: [audio-mp3, video-mov]
+    params: { removeCoverArt: true }
+    expect: { outputs: 2 }
+negative:
+  params: {}
+  inputs: [audio-wav]
+  bad: [corrupt-mp3, truncated-mp3, corrupt-mp4, truncated-mp4]
+cancel:
+  inputs: [video-long-mp4]
+  params: {}

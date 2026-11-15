@@ -1,0 +1,19 @@
+id: audio-convert
+kind: conversion
+title: Convert audio
+workerClass: media
+edges:
+  - { from: [mp3, wav, flac, ogg, opus, m4a, aiff], to: aac, tier: L }
+  - { from: [mp3, wav, flac, ogg, opus, m4a, aac], to: aiff, tier: E }
+  - { from: [mp3, wav, ogg, opus, m4a, aac, aiff], to: flac, tier: E }
+  - { from: [aac], to: m4a, tier: E }
+  - { from: [mp3, wav, flac, ogg, opus, aiff], to: m4a, tier: L }
+  - { from: [wav, flac, ogg, opus, m4a, aac, aiff], to: mp3, tier: L }
+  - { from: [mp3, wav, flac, opus, m4a, aac, aiff], to: ogg, tier: L }
+  - { from: [mp3, wav, flac, ogg, m4a, aac, aiff], to: opus, tier: L }
+  - { from: [mp3, flac, ogg, opus, m4a, aac, aiff], to: wav, tier: E }
+fidelityNotes: [AUDIO_RESAMPLED, AUDIO_DOWNMIXED, STREAMS_DROPPED]
+limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 180, diskFactor: 12.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

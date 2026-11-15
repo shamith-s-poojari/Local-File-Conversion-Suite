@@ -1,0 +1,12 @@
+id: audio-join
+kind: operation
+title: Join audio files
+workerClass: media
+inputs: { formats: [mp3, wav, flac, ogg, opus, m4a, aac, aiff], min: 2, max: 100 }
+outputs: { format: chosen, cardinality: one }
+fidelity: L
+fidelityNotes: [AUDIO_RESAMPLED, STREAMS_DROPPED]
+limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 180, diskFactor: 12.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

@@ -1,0 +1,21 @@
+cases:
+  - name: markdown-to-pdf
+    inputs: [doc-md]
+    params: { to: pdf }
+    expect: { outputs: 1 }
+  - name: html-to-markdown
+    inputs: [doc-html]
+    params: { to: md }
+  - name: book-to-pdf
+    inputs: [doc-epub]
+    params: { to: pdf, pageSize: letter }
+  - name: book-to-html
+    inputs: [doc-epub]
+    params: { to: html }
+negative:
+  params: { to: pdf }
+  inputs: [doc-epub]
+  bad: [corrupt-epub, truncated-epub]
+cancel:
+  inputs: [doc-md-long]
+  params: { to: pdf }

@@ -1,0 +1,16 @@
+cases:
+  - name: mixed
+    inputs: [active, doc-docx, doc-xlsx, image-svg, doc-html]
+    params: { fileTitles: [a, b, c, d, e] }
+    expect: { outputs: 5 }
+  - name: remove-links
+    inputs: [text-3, doc-docx]
+    params: { removeLinks: true }
+    expect: { outputs: 2 }
+negative:
+  params: {}
+  inputs: [doc-docx]
+  bad: [corrupt-docx, truncated-docx]
+cancel:
+  inputs: [big]
+  params: {}

@@ -9,5 +9,12 @@ description = "Privacy-first local file converter"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+converter-app-core = { path = "../../../crates/app-core" }
+converter-jobstore = { path = "../../../crates/jobstore" }
+converter-sandbox = { path = "../../../crates/sandbox" }
 getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["image-png"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"

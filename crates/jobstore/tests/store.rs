@@ -94,6 +94,7 @@ impl Fixture {
                         suggested_name: (*name).into(),
                         extension: "pdf".into(),
                         size_bytes: bytes.len() as u64,
+                        source: None,
                     })
                     .collect(),
             )
@@ -145,6 +146,7 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
                 suggested_name: "merged.pdf".into(),
                 extension: "pdf".into(),
                 size_bytes: 8,
+                source: None,
             }],
         )
         .unwrap();
@@ -311,6 +313,7 @@ fn record_outputs_distrusts_the_worker() {
         suggested_name: "x.pdf".into(),
         extension: "pdf".into(),
         size_bytes: size,
+        source: None,
     };
     for bad in [
         out("../escape.pdf", 1),
@@ -362,6 +365,17 @@ fn save_single_file_atomically_then_delete_job() {
     assert_eq!(std::fs::read_dir(&dest_dir).unwrap().count(), 1);
     assert!(!root.exists());
     assert!(f.store.snapshot().jobs.is_empty());
+    // A saved result gets ordinary permissions, not the job's private 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_ne!(
+            mode, 0o600,
+            "saved files must be readable like any new file"
+        );
+        assert_eq!(mode & 0o600, 0o600);
+    }
 }
 
 #[test]

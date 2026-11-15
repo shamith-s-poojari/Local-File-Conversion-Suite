@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Combine spreadsheets",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "order": {
+      "title": "File order",
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "maxItems": 200,
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in order; the core passes inputs in this order."
+    },
+    "to": {
+      "title": "Save as",
+      "enum": ["xlsx", "csv"],
+      "default": "xlsx",
+      "x-labels": { "xlsx": "Excel workbook", "csv": "CSV file" }
+    },
+    "mode": {
+      "title": "Combine by",
+      "enum": ["rows", "sheets"],
+      "default": "rows",
+      "x-labels": { "rows": "Stacking the rows into one table", "sheets": "Keeping each file as its own sheet" },
+      "x-when": { "to": ["xlsx"] }
+    },
+    "firstRowIsHeader": {
+      "title": "The first row holds column names",
+      "description": "Columns are then matched by name, and the names appear once at the top.",
+      "type": "boolean",
+      "default": true
+    },
+    "addSource": {
+      "title": "Add a column with each row's file name",
+      "type": "boolean",
+      "default": false
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

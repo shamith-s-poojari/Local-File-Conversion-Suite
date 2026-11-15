@@ -71,6 +71,31 @@ class WarningCode(
             "REDACTED_TEXT_REMAINS_ELSEWHERE",
             "GLYPH_UNSUPPORTED",
             "W_LARGE_JOB",
+            "TRANSPARENCY_FLATTENED",
+            "ANIMATION_FLATTENED",
+            "IMAGE_DOWNSCALED",
+            "COLORS_REDUCED",
+            "METADATA_DROPPED",
+            "AUDIO_RESAMPLED",
+            "AUDIO_DOWNMIXED",
+            "STREAMS_DROPPED",
+            "LAYOUT_APPROXIMATED",
+            "FORMULAS_DROPPED",
+            "SHEETS_SPLIT",
+            "ONLY_FIRST_SHEET",
+            "IMAGES_DROPPED",
+            "EMBEDDED_FONTS_MISSING",
+            "NESTED_DATA_FLATTENED",
+            "COMMENTS_DROPPED",
+            "REENCODED",
+            "KEPT_ORIGINAL",
+            "TARGET_NOT_REACHED",
+            "COLUMNS_MISMATCHED",
+            "ACTIVE_CONTENT_REMOVED",
+            "MACROS_REMOVED",
+            "EXTERNAL_LINKS_REMOVED",
+            "DETAILS_REMOVED",
+            "TRACKED_CHANGES_KEPT",
         ]
     ]
 ):
@@ -86,6 +111,31 @@ class WarningCode(
             "REDACTED_TEXT_REMAINS_ELSEWHERE",
             "GLYPH_UNSUPPORTED",
             "W_LARGE_JOB",
+            "TRANSPARENCY_FLATTENED",
+            "ANIMATION_FLATTENED",
+            "IMAGE_DOWNSCALED",
+            "COLORS_REDUCED",
+            "METADATA_DROPPED",
+            "AUDIO_RESAMPLED",
+            "AUDIO_DOWNMIXED",
+            "STREAMS_DROPPED",
+            "LAYOUT_APPROXIMATED",
+            "FORMULAS_DROPPED",
+            "SHEETS_SPLIT",
+            "ONLY_FIRST_SHEET",
+            "IMAGES_DROPPED",
+            "EMBEDDED_FONTS_MISSING",
+            "NESTED_DATA_FLATTENED",
+            "COMMENTS_DROPPED",
+            "REENCODED",
+            "KEPT_ORIGINAL",
+            "TARGET_NOT_REACHED",
+            "COLUMNS_MISMATCHED",
+            "ACTIVE_CONTENT_REMOVED",
+            "MACROS_REMOVED",
+            "EXTERNAL_LINKS_REMOVED",
+            "DETAILS_REMOVED",
+            "TRACKED_CHANGES_KEPT",
         ],
         Field(
             description="Warning codes in the catalog (spec section 13.1). Workers may send other codes; the core shows those as a generic warning, so the wire format accepts any WarningCodeString."
@@ -417,6 +467,7 @@ class WorkerError(BaseModel):
             "E_SANDBOX_UNAVAILABLE",
             "E_INSTALL_CORRUPT",
             "E_REDACTION_VERIFICATION_FAILED",
+            "E_NO_TEXT",
             "E_INTERNAL",
         ],
         Field(
@@ -427,33 +478,32 @@ class WorkerError(BaseModel):
     retryable: bool
 
 
-class InspectResult(BaseModel):
+class Finding(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    v: Annotated[
-        Literal[1],
-        Field(
-            description="The protocol version this schema describes. App and workers ship together, so they must match exactly (spec section 7.5)."
-        ),
-    ] = 1
-    type: Literal["inspectResult"] = "inspectResult"
-    jobId: Annotated[
-        str,
-        Field(
-            description="Opaque job identifier chosen by the core.",
-            pattern="^[A-Za-z0-9_-]{1,64}$",
-        ),
+    kind: Literal[
+        "location",
+        "device",
+        "author",
+        "software",
+        "dates",
+        "comments",
+        "trackedChanges",
+        "hiddenContent",
+        "activeContent",
+        "macros",
+        "externalLinks",
+        "embeddedFiles",
+        "tags",
     ]
-    pages: Annotated[int, Field(ge=0, le=100000)]
-    encryption: Annotated[
-        Literal["none", "permissionsOnly", "openPassword"],
+    detail: Annotated[
+        str | None,
         Field(
-            description="Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password."
+            description="A short value to show, such as a camera model. Never document text.",
+            max_length=200,
         ),
-    ]
-    signed: bool | None = None
-    warnings: Annotated[list[WarningItem] | None, Field(max_length=64)] = None
+    ] = None
 
 
 class ValidationIssue(BaseModel):
@@ -475,6 +525,7 @@ class ValidationIssue(BaseModel):
             "E_SANDBOX_UNAVAILABLE",
             "E_INSTALL_CORRUPT",
             "E_REDACTION_VERIFICATION_FAILED",
+            "E_NO_TEXT",
             "E_INTERNAL",
         ],
         Field(
@@ -563,6 +614,14 @@ class ExecuteOutput(BaseModel):
         str,
         Field(description="Lowercase hex SHA-256 digest.", pattern="^[0-9a-f]{64}$"),
     ]
+    source: Annotated[
+        int | None,
+        Field(
+            description="Index of the input this output came from, when it came from one.",
+            ge=0,
+            le=9999,
+        ),
+    ] = None
 
 
 class ExecuteResult(BaseModel):
@@ -659,6 +718,62 @@ class PageTextResult(BaseModel):
     width: Annotated[float, Field(gt=0.0, le=200000.0)]
     height: Annotated[float, Field(gt=0.0, le=200000.0)]
     words: Annotated[list[WordBox], Field(max_length=20000)]
+
+
+class MediaInfo(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    kind: Literal["image", "audio", "video", "document"]
+    durationMs: Annotated[int | None, Field(ge=0)] = None
+    width: Annotated[int | None, Field(ge=0, le=1000000)] = None
+    height: Annotated[int | None, Field(ge=0, le=1000000)] = None
+    frames: Annotated[int | None, Field(ge=0)] = None
+    videoCodec: Annotated[str | None, Field(max_length=64)] = None
+    audioCodec: Annotated[str | None, Field(max_length=64)] = None
+    sampleRate: Annotated[int | None, Field(ge=0)] = None
+    channels: Annotated[int | None, Field(ge=0, le=64)] = None
+    bitrateKbps: Annotated[int | None, Field(ge=0)] = None
+    fps: Annotated[float | None, Field(ge=0.0)] = None
+    hasAudio: bool | None = None
+    hasVideo: bool | None = None
+
+
+class InspectResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    v: Annotated[
+        Literal[1],
+        Field(
+            description="The protocol version this schema describes. App and workers ship together, so they must match exactly (spec section 7.5)."
+        ),
+    ] = 1
+    type: Literal["inspectResult"] = "inspectResult"
+    jobId: Annotated[
+        str,
+        Field(
+            description="Opaque job identifier chosen by the core.",
+            pattern="^[A-Za-z0-9_-]{1,64}$",
+        ),
+    ]
+    pages: Annotated[int, Field(ge=0, le=100000)]
+    encryption: Annotated[
+        Literal["none", "permissionsOnly", "openPassword"],
+        Field(
+            description="Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password."
+        ),
+    ]
+    signed: bool | None = None
+    warnings: Annotated[list[WarningItem] | None, Field(max_length=64)] = None
+    media: MediaInfo | None = None
+    findings: Annotated[
+        list[Finding] | None,
+        Field(
+            description="What the file reveals or could do when opened (ADR 0005). Display only.",
+            max_length=64,
+        ),
+    ] = None
 
 
 class Message(

@@ -100,6 +100,13 @@ pub fn inspect(source: &mut impl Source, tail: &[u8], eocd: usize) -> ZipFinding
         }
     }
     if f.format.is_none() {
+        if let Some(m) = entries.iter().find(|e| e.name == b"mimetype") {
+            if let Some(mime) = read_entry(source, m, shift) {
+                classify_mimetype(&mime, &mut f);
+            }
+        }
+    }
+    if f.format.is_none() {
         classify_by_part_names(entries.iter().map(|e| e.name.as_slice()), &mut f);
     }
     if entries.iter().any(|e| e.name.ends_with(b"vbaProject.bin")) {
@@ -330,6 +337,41 @@ fn classify_content_types(xml: &[u8], f: &mut ZipFinding) {
     }
     if text.contains("vnd.ms-office.vbaproject") {
         f.macro_enabled = true;
+    }
+}
+
+/// OpenDocument and EPUB name their type in a `mimetype` entry.
+fn classify_mimetype(mime: &[u8], f: &mut ZipFinding) {
+    const TYPES: &[(&[u8], Format)] = &[
+        (b"application/vnd.oasis.opendocument.text", Format::Odt),
+        (
+            b"application/vnd.oasis.opendocument.text-template",
+            Format::Odt,
+        ),
+        (
+            b"application/vnd.oasis.opendocument.spreadsheet",
+            Format::Ods,
+        ),
+        (
+            b"application/vnd.oasis.opendocument.spreadsheet-template",
+            Format::Ods,
+        ),
+        (
+            b"application/vnd.oasis.opendocument.presentation",
+            Format::Odp,
+        ),
+        (
+            b"application/vnd.oasis.opendocument.presentation-template",
+            Format::Odp,
+        ),
+        (b"application/epub+zip", Format::Epub),
+    ];
+    let mime = mime.trim_ascii();
+    if let Some(&(name, format)) = TYPES.iter().find(|(t, _)| *t == mime) {
+        f.format = Some(format);
+        f.confidence = Some(Confidence::Certain);
+        f.evidence
+            .push(format!("zip:mimetype:{}", String::from_utf8_lossy(name)));
     }
 }
 

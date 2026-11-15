@@ -31,7 +31,7 @@ pub use fsutil::RetryPolicy;
 pub use id::JobId;
 pub use lease::Lease;
 pub use name::sanitize_file_name;
-pub use save::{SaveCheck, SaveDestination, SaveOptions, SaveReport};
+pub use save::{FolderLayout, SaveCheck, SaveDestination, SaveOptions, SaveReport};
 pub use store::{
     InputSource, JobDirs, JobEvent, JobFailure, JobSnapshot, JobState, JobStore, OutputFile,
     Progress, ShutdownReport, Snapshot, StoreConfig, SweepReport, Warning,

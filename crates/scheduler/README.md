@@ -17,7 +17,7 @@ Admission scheduler, worker supervisor and watchdog ([spec sections 7.4, 10.2 an
 
 | Area | Behavior |
 |---|---|
-| Budget | `min(60% of available RAM, user setting)`, re-read before each admission round. Running jobs' reservations are added back to "available" so they aren't counted twice |
+| Budget | `min(max(60% of available RAM, 512 MB), user setting)`, re-read before each admission round. The 512 MB floor and a fallback for implausible OS readings (sysinfo can report 0 available on macOS under compression) keep a bad reading from producing a 0 budget. Running jobs' reservations are added back to "available" so they aren't counted twice |
 | Hard limit | `min(max(1.5 × estimate, 512 MB), budget)`, passed to the launcher (the sandbox enforces it) |
 | Admission | First job in the queue that fits its pool and the budget. A skipped job that has waited 60 s blocks every job behind it |
 | Large jobs | Estimate above the whole budget: runs alone with the whole budget, and gets `W_LARGE_JOB` |

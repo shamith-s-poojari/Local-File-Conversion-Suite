@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import mimetypes
 import os
 import queue
 import re
@@ -216,6 +217,8 @@ class Worker:
             encryption=r.encryption,
             signed=r.signed,
             warnings=r.warnings or None,
+            media=r.media,
+            findings=r.findings[:64] or None,
         )
 
     def _validate(self, ctx: JobContext, request: Validate) -> ValidateResult:
@@ -255,7 +258,12 @@ class Worker:
             raise AdapterError("E_INTERNAL", {"reason": "outputOutsideOut"})
         size, digest = _size_and_sha256(path)
         return ExecuteOutput(
-            path=relative, suggestedName=name, pages=output.pages, sizeBytes=size, sha256=digest
+            path=relative,
+            suggestedName=name,
+            pages=output.pages,
+            sizeBytes=size,
+            sha256=digest,
+            source=_source_of(ctx, output),
         )
 
     def _render(self, ctx: JobContext, request: Render) -> RenderResult:
@@ -314,12 +322,40 @@ def _take_protocol_channel() -> tuple[Any, Any]:
     proto_in = os.fdopen(os.dup(0), "rb")
     sys.stdout.flush()
     os.dup2(2, 1)
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    os.close(devnull)
+    empty = _empty_input()
+    os.dup2(empty, 0)
+    os.close(empty)
     sys.stdout = sys.stderr
-    sys.stdin = open(os.devnull, encoding="utf-8")  # noqa: SIM115 - lives for the process
+    sys.stdin = os.fdopen(os.dup(0), encoding="utf-8")  # lives for the process
     return proto_in, proto_out
+
+
+def _empty_input() -> int:
+    """A descriptor that reads end of file at once: the null device, or a
+    pipe with no writer where the null device can't be opened (a Windows
+    AppContainer is denied ``NUL``)."""
+    try:
+        return os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        read, write = os.pipe()
+        os.close(write)
+        return read
+
+
+def _builtin_mime_types() -> None:
+    """Use Python's own MIME table, never the system's.
+
+    Libraries such as openpyxl call ``mimetypes.init()`` on import, which
+    reads ``/etc/mime.types`` and friends. Those files sit outside the
+    sandbox, so the read fails; and they differ between machines, which
+    would make outputs differ too. On Windows the registry plays the same
+    part, so it's skipped as well.
+    """
+    mimetypes.knownfiles = []
+    for name in ("_mimetypes_read_windows_registry", "_winreg"):
+        if hasattr(mimetypes, name):
+            setattr(mimetypes, name, None)
+    mimetypes.init()
 
 
 def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
@@ -330,6 +366,7 @@ def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
         sys.exit(EXIT_USAGE)
 
     proto_in, proto_out = _take_protocol_channel()
+    _builtin_mime_types()
 
     def read_line() -> bytes:
         # +2 leaves room for "\r\n"; anything longer is rejected by the parser.
@@ -351,3 +388,11 @@ def run_main(adapter_cls: type[Adapter], argv: list[str] | None = None) -> None:
     proto_out.flush()
     # Skip interpreter teardown: daemon threads and engine finalizers can stall it.
     os._exit(code)
+
+
+def _source_of(ctx: JobContext, output: OutputFile) -> int | None:
+    """The input an output came from: as the adapter says, or the only
+    input when there is just one (ADR 0005, keeping folder layout)."""
+    if output.source is not None:
+        return output.source
+    return 0 if len(ctx.inputs) == 1 else None

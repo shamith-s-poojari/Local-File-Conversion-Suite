@@ -1,0 +1,12 @@
+id: media-clean
+kind: operation
+title: Remove hidden details
+workerClass: media
+inputs: { formats: [mp3, m4a, flac, ogg, opus, wav, aac, aiff, mp4, mov, mkv, webm], min: 1, max: 50 }
+outputs: { format: same, cardinality: many }
+fidelity: E
+fidelityNotes: [DETAILS_REMOVED]
+limits: { timeoutBaseS: 600, timeoutSPerMb: 10, noProgressS: 300, diskFactor: 2.5 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

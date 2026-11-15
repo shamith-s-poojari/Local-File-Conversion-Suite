@@ -402,11 +402,56 @@ fn cases() -> Vec<Case> {
             "zip/epub",
             "a.epub",
             zip(&[("mimetype", b"application/epub+zip")], false),
-            Unknown,
+            Epub,
+        )
+        .conf(Certain),
+        case(
+            "zip/odt",
+            "a.odt",
+            zip(
+                &[("mimetype", b"application/vnd.oasis.opendocument.text")],
+                false,
+            ),
+            Odt,
+        ),
+        case(
+            "zip/ods-renamed",
+            "a.zip",
+            zip(
+                &[(
+                    "mimetype",
+                    b"application/vnd.oasis.opendocument.spreadsheet",
+                )],
+                false,
+            ),
+            Ods,
         ),
         case("zip/empty-archive", "a.zip", zip(&[], false), Unknown),
         // Legacy / encrypted Office containers
-        case("cfb/legacy-doc", "a.doc", cfb(b""), Unknown).evidence(&["magic:cfb"]),
+        case("cfb/legacy-doc-by-name", "a.doc", cfb(b""), Doc)
+            .conf(Guess)
+            .evidence(&["magic:cfb"]),
+        case("cfb/legacy-unnamed", "a.bin", cfb(b""), Unknown).evidence(&["magic:cfb"]),
+        case(
+            "cfb/legacy-doc",
+            "a.bin",
+            cfb(&utf16le("WordDocument", false)),
+            Doc,
+        )
+        .conf(Certain),
+        case(
+            "cfb/legacy-xls",
+            "a.bin",
+            cfb(&utf16le("Workbook", false)),
+            Xls,
+        )
+        .conf(Certain),
+        case(
+            "cfb/legacy-ppt",
+            "a.bin",
+            cfb(&utf16le("PowerPoint Document", false)),
+            Ppt,
+        ),
         case(
             "cfb/encrypted-docx",
             "a.docx",
@@ -443,9 +488,16 @@ fn cases() -> Vec<Case> {
         case("jpg/renamed-png", "photo.png", jpg(), Jpg).mismatch(),
         case("webp/basic", "a.webp", webp(), Webp).conf(Certain),
         case(
-            "webp/riff-not-webp",
+            "webp/riff-wave",
             "a.wav",
             b"RIFF\x24\0\0\0WAVEfmt ".to_vec(),
+            Wav,
+        ),
+        case("riff/avi", "a.avi", b"RIFF\x24\0\0\0AVI LIST".to_vec(), Avi),
+        case(
+            "riff/unknown",
+            "a.bin",
+            b"RIFF\x24\0\0\0XXXXfmt ".to_vec(),
             Unknown,
         ),
         case("heic/basic", "a.heic", heic(), Heic).conf(Certain),
@@ -460,13 +512,43 @@ fn cases() -> Vec<Case> {
             "heic/avif-not-heic",
             "a.avif",
             ftyp(b"mif1", &[b"avif", b"mif1"]),
-            Unknown,
+            Avif,
+        ),
+        case("heic/mp4-not-heic", "a.mp4", ftyp(b"isom", &[b"mp41"]), Mp4),
+        case("bmff/m4a-brand", "a.m4a", ftyp(b"M4A ", &[b"isom"]), M4a),
+        case(
+            "bmff/mp4-named-m4a",
+            "a.m4a",
+            ftyp(b"isom", &[b"mp41"]),
+            M4a,
+        ),
+        case("bmff/quicktime", "a.mov", ftyp(b"qt  ", &[b"qt  "]), Mov),
+        case("image/gif", "a.gif", b"GIF89a\x01\0\x01\0".to_vec(), Gif).conf(Certain),
+        case("image/tiff-le", "a.tif", b"II*\0\x08\0\0\0".to_vec(), Tiff),
+        case("image/tiff-be", "a.tiff", b"MM\0*\0\0\0\x08".to_vec(), Tiff),
+        case("audio/flac", "a.flac", b"fLaC\0\0\0\x22".to_vec(), Flac),
+        case(
+            "audio/aiff",
+            "a.aiff",
+            b"FORM\0\0\0\x20AIFFCOMM".to_vec(),
+            Aiff,
+        ),
+        case("text/rtf", "a.rtf", b"{\\rtf1\\ansi Hello}".to_vec(), Rtf).conf(Certain),
+        case("text/json", "a.json", b"{\"a\": 1}".to_vec(), Json).conf(Certain),
+        case("text/json-unnamed", "data", b"[1, 2, 3]".to_vec(), Json),
+        case("text/yaml", "a.yaml", b"a: 1\nb: [2, 3]\n".to_vec(), Yaml),
+        case("text/csv", "a.csv", b"name\nAda\n".to_vec(), Csv),
+        case(
+            "text/csv-unnamed",
+            "data",
+            b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n".to_vec(),
+            Csv,
         ),
         case(
-            "heic/mp4-not-heic",
-            "a.mp4",
-            ftyp(b"isom", &[b"mp41"]),
-            Unknown,
+            "text/markdown-link-not-json",
+            "notes",
+            b"[link](x) and more".to_vec(),
+            Txt,
         ),
         case("heic/renamed-jpg", "IMG_0001.jpg", heic(), Heic).mismatch(),
         // Text
@@ -641,9 +723,14 @@ fn every_planned_format_is_covered() {
 // --------------------------------------------------------- descriptor rules
 
 #[test]
-fn only_unambiguous_pdf_is_actionable() {
+fn only_unambiguous_known_formats_are_actionable() {
     assert!(sniff_bytes("a.pdf", &pdf()).unwrap().actionable);
-    assert!(!sniff_bytes("a.docx", &docx()).unwrap().actionable);
+    assert!(sniff_bytes("a.docx", &docx()).unwrap().actionable);
+    assert!(
+        !sniff_bytes("a.bin", b"\x00\x01\x02 binary junk \x03")
+            .unwrap()
+            .actionable
+    );
     let mut polyglot = pdf();
     polyglot.extend(docx());
     assert!(!sniff_bytes("a.pdf", &polyglot).unwrap().actionable);

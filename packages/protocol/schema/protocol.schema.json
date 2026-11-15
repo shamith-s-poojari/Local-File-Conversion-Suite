@@ -183,7 +183,32 @@
         "NO_TEXT_LAYER",
         "REDACTED_TEXT_REMAINS_ELSEWHERE",
         "GLYPH_UNSUPPORTED",
-        "W_LARGE_JOB"
+        "W_LARGE_JOB",
+        "TRANSPARENCY_FLATTENED",
+        "ANIMATION_FLATTENED",
+        "IMAGE_DOWNSCALED",
+        "COLORS_REDUCED",
+        "METADATA_DROPPED",
+        "AUDIO_RESAMPLED",
+        "AUDIO_DOWNMIXED",
+        "STREAMS_DROPPED",
+        "LAYOUT_APPROXIMATED",
+        "FORMULAS_DROPPED",
+        "SHEETS_SPLIT",
+        "ONLY_FIRST_SHEET",
+        "IMAGES_DROPPED",
+        "EMBEDDED_FONTS_MISSING",
+        "NESTED_DATA_FLATTENED",
+        "COMMENTS_DROPPED",
+        "REENCODED",
+        "KEPT_ORIGINAL",
+        "TARGET_NOT_REACHED",
+        "COLUMNS_MISMATCHED",
+        "ACTIVE_CONTENT_REMOVED",
+        "MACROS_REMOVED",
+        "EXTERNAL_LINKS_REMOVED",
+        "DETAILS_REMOVED",
+        "TRACKED_CHANGES_KEPT"
       ]
     },
     "WarningCodeString": {
@@ -208,6 +233,7 @@
         "E_SANDBOX_UNAVAILABLE",
         "E_INSTALL_CORRUPT",
         "E_REDACTION_VERIFICATION_FAILED",
+        "E_NO_TEXT",
         "E_INTERNAL"
       ]
     },
@@ -695,6 +721,49 @@
           "items": {
             "$ref": "#/definitions/WarningItem"
           }
+        },
+        "media": {
+          "$ref": "#/definitions/MediaInfo"
+        },
+        "findings": {
+          "description": "What the file reveals or could do when opened (ADR 0005). Display only.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
+        }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "location",
+            "device",
+            "author",
+            "software",
+            "dates",
+            "comments",
+            "trackedChanges",
+            "hiddenContent",
+            "activeContent",
+            "macros",
+            "externalLinks",
+            "embeddedFiles",
+            "tags"
+          ]
+        },
+        "detail": {
+          "description": "A short value to show, such as a camera model. Never document text.",
+          "type": "string",
+          "maxLength": 200
         }
       }
     },
@@ -849,6 +918,12 @@
               },
               "sha256": {
                 "$ref": "#/definitions/Sha256"
+              },
+              "source": {
+                "description": "Index of the input this output came from, when it came from one.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9999
               }
             }
           }
@@ -974,6 +1049,74 @@
               }
             }
           }
+        }
+      }
+    },
+    "MediaInfo": {
+      "description": "Facts about an image, audio or video input (ADR 0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "document"
+          ]
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "frames": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "videoCodec": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "audioCodec": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sampleRate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "bitrateKbps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "hasAudio": {
+          "type": "boolean"
+        },
+        "hasVideo": {
+          "type": "boolean"
         }
       }
     }

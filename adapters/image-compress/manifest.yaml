@@ -1,0 +1,12 @@
+id: image-compress
+kind: operation
+title: Compress images
+workerClass: image
+inputs: { formats: [jpg, png, webp, avif], min: 1, max: 500 }
+outputs: { format: same, cardinality: many }
+fidelity: L
+fidelityNotes: [IMAGE_DOWNSCALED, COLORS_REDUCED, METADATA_DROPPED, ANIMATION_FLATTENED, KEPT_ORIGINAL, TARGET_NOT_REACHED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 4, noProgressS: 120, diskFactor: 4.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow]

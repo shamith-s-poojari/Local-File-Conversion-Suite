@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Convert office documents",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": {
+      "title": "Convert to",
+      "enum": ["pdf", "docx", "doc", "odt", "rtf", "txt", "html", "md", "epub", "pptx", "ppt", "odp", "xlsx", "xls", "ods", "csv", "png", "jpg", "webp"]
+    },
+    "dpi": {
+      "title": "Resolution",
+      "type": "integer",
+      "enum": [72, 150, 300],
+      "default": 150,
+      "x-labels": { "72": "Screen (72 dpi)", "150": "Standard (150 dpi)", "300": "Print (300 dpi)" },
+      "x-when": { "to": ["png", "jpg", "webp"] }
+    },
+    "quality": {
+      "title": "Quality",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 100,
+      "default": 85,
+      "x-ui": "slider",
+      "x-when": { "to": ["jpg", "webp"] }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

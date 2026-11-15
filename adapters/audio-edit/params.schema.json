@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Adjust volume, fade or speed",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "normalize": {
+      "title": "Even out the loudness",
+      "description": "Makes quiet and loud files play at a similar, comfortable level (−16 LUFS).",
+      "type": "boolean",
+      "default": false
+    },
+    "volume": {
+      "title": "Volume",
+      "type": "integer",
+      "enum": [-12, -6, -3, 0, 3, 6, 12],
+      "default": 0,
+      "x-labels": { "-12": "Much quieter (−12 dB)", "-6": "Quieter (−6 dB)", "-3": "A little quieter (−3 dB)", "0": "Unchanged", "3": "A little louder (+3 dB)", "6": "Louder (+6 dB)", "12": "Much louder (+12 dB)" }
+    },
+    "fadeIn": {
+      "title": "Fade in",
+      "type": "number",
+      "enum": [0, 1, 2, 3, 5, 10],
+      "default": 0,
+      "x-labels": { "0": "None", "1": "1 second", "2": "2 seconds", "3": "3 seconds", "5": "5 seconds", "10": "10 seconds" }
+    },
+    "fadeOut": {
+      "title": "Fade out",
+      "type": "number",
+      "enum": [0, 1, 2, 3, 5, 10],
+      "default": 0,
+      "x-labels": { "0": "None", "1": "1 second", "2": "2 seconds", "3": "3 seconds", "5": "5 seconds", "10": "10 seconds" }
+    },
+    "speed": {
+      "title": "Speed",
+      "description": "The pitch stays the same.",
+      "type": "number",
+      "enum": [0.5, 0.75, 1, 1.25, 1.5, 2],
+      "default": 1,
+      "x-labels": { "0.5": "Half speed", "0.75": "0.75×", "1": "Normal", "1.25": "1.25×", "1.5": "1.5×", "2": "Double speed" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

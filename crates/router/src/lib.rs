@@ -13,6 +13,8 @@ pub mod matrix;
 mod model;
 pub mod planner;
 
-pub use manifest::{build_registry, Catalog, Manifest, Problem, Registry};
+pub use manifest::{
+    build_registry, AdapterEntry, Catalog, Manifest, OutputFormat, Problem, Registry,
+};
 pub use model::{Format, Level, Platform, Tier};
 pub use planner::{targets, Availability, Plan, Planner, Targets};

@@ -1,0 +1,12 @@
+id: contact-sheet
+kind: operation
+title: Contact sheet
+workerClass: image
+inputs: { formats: [jpg, png, webp, gif, bmp, tiff, avif, heic, pdf], min: 1, max: 500 }
+outputs: { format: chosen, cardinality: many }
+fidelity: L
+fidelityNotes: []
+limits: { timeoutBaseS: 120, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pillow, pillow-heif, pypdfium2, pikepdf, reportlab]

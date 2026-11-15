@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Convert images",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "to"
+  ],
+  "properties": {
+    "to": {
+      "title": "Convert to",
+      "enum": [
+        "png",
+        "jpg",
+        "webp",
+        "gif",
+        "bmp",
+        "tiff",
+        "avif",
+        "ico",
+        "pdf"
+      ]
+    },
+    "quality": {
+      "title": "Quality",
+      "description": "Higher keeps more detail and makes a larger file.",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 100,
+      "default": 85,
+      "x-ui": "slider",
+      "x-when": {
+        "to": [
+          "jpg",
+          "webp",
+          "avif"
+        ]
+      }
+    },
+    "maxSide": {
+      "title": "Size",
+      "description": "Shrinks images whose longer side is bigger than this. Smaller images are never enlarged.",
+      "type": "integer",
+      "enum": [
+        0,
+        3840,
+        2560,
+        1920,
+        1280,
+        1024,
+        800,
+        512
+      ],
+      "default": 0,
+      "x-labels": {
+        "0": "Original size",
+        "3840": "Up to 3840 px (4K)",
+        "2560": "Up to 2560 px",
+        "1920": "Up to 1920 px (Full HD)",
+        "1280": "Up to 1280 px",
+        "1024": "Up to 1024 px",
+        "800": "Up to 800 px",
+        "512": "Up to 512 px"
+      }
+    },
+    "background": {
+      "title": "Fill transparent areas with",
+      "type": "string",
+      "pattern": "^#[0-9A-Fa-f]{6}$",
+      "default": "#FFFFFF",
+      "x-ui": "color",
+      "x-when": {
+        "to": [
+          "jpg",
+          "bmp"
+        ]
+      }
+    },
+    "stripMetadata": {
+      "title": "Remove camera details and location",
+      "description": "Drops EXIF data such as GPS position, camera model and the date taken.",
+      "type": "boolean",
+      "default": false,
+      "x-when": {
+        "to": [
+          "jpg",
+          "png",
+          "webp",
+          "tiff",
+          "avif"
+        ]
+      }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "$comment": "Original names without extensions, set by the core, used to name outputs."
+    }
+  }
+}

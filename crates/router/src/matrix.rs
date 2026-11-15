@@ -1,7 +1,12 @@
-//! The compatibility matrix (blueprint section 3.2): which conversions the
-//! product offers, and at what tier. It's product policy, not derived from
-//! manifests: the planner only offers a target the matrix lists, and CI
-//! checks that the manifests deliver every listed cell at its tier.
+//! The compatibility matrix (blueprint section 3.2): which conversions
+//! between the blueprint's 12 formats the product offers, and at what tier.
+//! It's product policy, not derived from manifests: the planner only offers
+//! a target the matrix lists, and CI checks that the manifests deliver every
+//! listed cell at its tier.
+//!
+//! Formats added by ADR 0003 (legacy and OpenDocument office files, data
+//! formats, more images, audio and video) aren't in the matrix: a pair that
+//! involves one is offered when an adapter declares a direct edge for it.
 
 use crate::model::{Format, Tier};
 
@@ -24,6 +29,22 @@ SVG        H    -    -    -    -    -    -    H    L    H    .    -
 HEIC       H    -    -    -    -    -    -    H    L    L    -    .
 ";
 
+/// The matrix's column order.
+pub const BLUEPRINT: [Format; 12] = [
+    Format::Pdf,
+    Format::Docx,
+    Format::Pptx,
+    Format::Xlsx,
+    Format::Md,
+    Format::Html,
+    Format::Txt,
+    Format::Png,
+    Format::Jpg,
+    Format::Webp,
+    Format::Svg,
+    Format::Heic,
+];
+
 /// An offered conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
@@ -40,7 +61,7 @@ pub fn offered(from: Format, to: Format) -> Option<Cell> {
         .lines()
         .map(str::split_whitespace)
         .find_map(|mut cols| (cols.next()? == from.as_str().to_uppercase()).then_some(cols))?;
-    let index = Format::ALL.iter().position(|&f| f == to)?;
+    let index = BLUEPRINT.iter().position(|&f| f == to)?;
     parse_cell(row.into_iter().nth(index)?)
 }
 
@@ -70,8 +91,8 @@ fn parse_cell(s: &str) -> Option<Cell> {
 /// Every offered cell.
 pub fn all_offered() -> Vec<(Format, Format, Cell)> {
     let mut out = Vec::new();
-    for from in Format::ALL {
-        for to in Format::ALL {
+    for from in BLUEPRINT {
+        for to in BLUEPRINT {
             if let Some(cell) = offered(from, to) {
                 out.push((from, to, cell));
             }
@@ -124,7 +145,7 @@ mod tests {
 
     #[test]
     fn nothing_converts_to_heic() {
-        for from in Format::ALL {
+        for from in BLUEPRINT {
             assert_eq!(offered(from, Format::Heic), None);
         }
     }

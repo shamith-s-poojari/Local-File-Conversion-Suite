@@ -25,7 +25,6 @@ pub struct PreviewRegistry {
 
 impl PreviewRegistry {
     /// Register a job's preview directory and return its token.
-    #[allow(dead_code)] // Used once the scheduler (T12) renders previews.
     pub fn register(&self, dir: PathBuf) -> String {
         let mut buf = [0u8; TOKEN_HEX_LEN / 2];
         getrandom::fill(&mut buf).expect("the OS random number generator is unavailable");
@@ -38,7 +37,6 @@ impl PreviewRegistry {
     }
 
     /// Forget a token. Called when its job is discarded or fails.
-    #[allow(dead_code)] // Used once the scheduler (T12) renders previews.
     pub fn revoke(&self, token: &str) {
         self.dirs
             .lock()

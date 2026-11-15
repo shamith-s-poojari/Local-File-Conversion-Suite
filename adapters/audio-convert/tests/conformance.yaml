@@ -1,0 +1,19 @@
+cases:
+  - name: mp3-to-wav
+    inputs: [audio-mp3]
+    params: { to: wav }
+    expect: { outputs: 1 }
+  - name: batch-to-flac
+    inputs: [audio-wav, audio-ogg, audio-m4a]
+    params: { to: flac }
+    expect: { outputs: 3 }
+  - name: flac-to-opus-mono
+    inputs: [audio-flac]
+    params: { to: opus, channels: 1, bitrate: 96 }
+negative:
+  params: { to: mp3 }
+  inputs: [audio-wav]
+  bad: [corrupt-wav, truncated-wav]
+cancel:
+  inputs: [audio-long-wav]
+  params: { to: mp3, bitrate: 320 }

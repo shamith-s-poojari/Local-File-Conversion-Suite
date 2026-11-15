@@ -1,0 +1,12 @@
+id: video-join
+kind: operation
+title: Join videos
+workerClass: media
+inputs: { formats: [mp4, mov, mkv, webm, avi], min: 2, max: 50 }
+outputs: { format: chosen, cardinality: one }
+fidelity: L
+fidelityNotes: [REENCODED, STREAMS_DROPPED]
+limits: { timeoutBaseS: 600, timeoutSPerMb: 30, noProgressS: 300, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [ffmpeg]

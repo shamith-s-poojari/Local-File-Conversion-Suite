@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Join videos",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "order": {
+      "title": "Play order",
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "maxItems": 50,
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in play order; the core passes inputs in this order."
+    },
+    "to": {
+      "title": "Save as",
+      "description": "Clips that match are joined without re-encoding, which is fast and loses nothing.",
+      "enum": ["mp4", "mov", "mkv", "webm"],
+      "default": "mp4",
+      "x-labels": { "mp4": "MP4", "mov": "MOV", "mkv": "MKV", "webm": "WebM" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

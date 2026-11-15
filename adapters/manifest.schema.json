@@ -21,7 +21,7 @@
     },
     "workerClass": {
       "description": "Scheduler pool (blueprint section 5.1).",
-      "enum": ["pdf", "image", "render", "office", "ocr"]
+      "enum": ["pdf", "image", "render", "office", "ocr", "media"]
     },
     "inputs": {
       "type": "object",
@@ -38,7 +38,10 @@
       "additionalProperties": false,
       "required": ["format", "cardinality"],
       "properties": {
-        "format": { "$ref": "#/definitions/format" },
+        "format": {
+          "description": "A format, \"same\" (each input's own format) or \"chosen\" (the param \"to\"). ADR 0004.",
+          "anyOf": [{ "$ref": "#/definitions/format" }, { "enum": ["same", "chosen"] }]
+        },
         "cardinality": { "enum": ["one", "many"] }
       }
     },
@@ -80,7 +83,14 @@
         "timeoutBaseS": { "type": "integer", "minimum": 1, "maximum": 86400 },
         "timeoutSPerMb": { "type": "number", "minimum": 0, "maximum": 3600 },
         "noProgressS": { "type": "integer", "minimum": 1, "maximum": 86400 },
-        "diskFactor": { "type": "number", "minimum": 0, "maximum": 100 }
+        "diskFactor": { "type": "number", "minimum": 0, "maximum": 100 },
+        "processes": {
+          "description": "Processes the worker runs at once, itself included, not counting engines (spec 9.2). Windows enforces it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 1
+        }
       }
     },
     "params": {
@@ -118,7 +128,7 @@
     }
   ],
   "definitions": {
-    "format": { "enum": ["pdf", "docx", "pptx", "xlsx", "md", "html", "txt", "png", "jpg", "webp", "svg", "heic"] },
+    "format": { "enum": ["pdf", "docx", "doc", "odt", "rtf", "pptx", "ppt", "odp", "xlsx", "xls", "ods", "csv", "md", "html", "txt", "epub", "json", "yaml", "png", "jpg", "webp", "svg", "heic", "gif", "bmp", "tiff", "avif", "ico", "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aiff", "mp4", "mov", "mkv", "webm", "avi"] },
     "formatList": {
       "type": "array",
       "minItems": 1,

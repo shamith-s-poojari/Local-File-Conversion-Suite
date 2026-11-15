@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-conversion-skipping"
+description = "Enables the create_conversion_skipping command without any pre-configured scope."
+commands.allow = ["create_conversion_skipping"]
+
+[[permission]]
+identifier = "deny-create-conversion-skipping"
+description = "Denies the create_conversion_skipping command without any pre-configured scope."
+commands.deny = ["create_conversion_skipping"]

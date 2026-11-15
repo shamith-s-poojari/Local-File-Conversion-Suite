@@ -1,4 +1,5 @@
-//! Formats with no magic number: SVG, HTML, Markdown and plain text.
+//! Formats with no magic number: SVG, HTML, RTF, JSON, CSV, YAML, Markdown
+//! and plain text.
 //! Only the head window is examined, and markup is never parsed.
 
 use crate::{Confidence, Format};
@@ -88,6 +89,15 @@ pub fn classify(head: &[u8], claimed: Option<Format>) -> Option<TextFinding> {
         });
     }
 
+    if let Some((format, confidence, ev)) = sniff_data(&text, claimed) {
+        evidence.push(ev);
+        return Some(TextFinding {
+            format,
+            confidence,
+            evidence,
+        });
+    }
+
     let score = markdown_score(&text);
     let (format, confidence, ev) = match claimed {
         Some(Format::Md) => (
@@ -116,6 +126,80 @@ pub fn classify(head: &[u8], claimed: Option<Format>) -> Option<TextFinding> {
         format,
         confidence,
         evidence,
+    })
+}
+
+/// RTF, JSON, CSV and YAML. The extension decides between the text formats
+/// that overlap (JSON is valid YAML; any line is valid CSV).
+fn sniff_data(text: &str, claimed: Option<Format>) -> Option<(Format, Confidence, String)> {
+    let t = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if t.starts_with("{\\rtf") {
+        return Some((Format::Rtf, Confidence::Certain, "text:rtf".into()));
+    }
+    let json = looks_like_json(t);
+    match claimed {
+        Some(Format::Json) if json => {
+            return Some((Format::Json, Confidence::Certain, "text:json".into()))
+        }
+        Some(Format::Yaml) => {
+            return Some((
+                Format::Yaml,
+                Confidence::Likely,
+                "text:extension:yaml".into(),
+            ))
+        }
+        Some(Format::Csv) => {
+            return Some((Format::Csv, Confidence::Likely, "text:extension:csv".into()))
+        }
+        Some(Format::Md | Format::Txt | Format::Html) => return None,
+        _ => {}
+    }
+    if json {
+        return Some((Format::Json, Confidence::Likely, "text:json".into()));
+    }
+    if t.starts_with("%YAML") {
+        return Some((
+            Format::Yaml,
+            Confidence::Certain,
+            "text:yaml-directive".into(),
+        ));
+    }
+    if claimed.is_none() && delimited_columns(t) {
+        return Some((Format::Csv, Confidence::Guess, "text:delimited".into()));
+    }
+    None
+}
+
+/// An object or array opening, followed by something JSON allows there.
+fn looks_like_json(t: &str) -> bool {
+    let mut chars = t.chars();
+    let next = |c: &mut std::str::Chars<'_>| c.find(|ch: &char| !ch.is_whitespace());
+    match chars.next() {
+        Some('{') => matches!(next(&mut chars), Some('"' | '}')),
+        Some('[') => matches!(
+            next(&mut chars),
+            Some('{' | '[' | '"' | ']' | '-' | '0'..='9' | 't' | 'f' | 'n')
+        ),
+        _ => false,
+    }
+}
+
+/// At least three lines with the same number (one or more) of commas, or of
+/// semicolons, or of tabs.
+fn delimited_columns(t: &str) -> bool {
+    let lines: Vec<&str> = t
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(50)
+        .collect();
+    if lines.len() < 3 {
+        return false;
+    }
+    // The window may cut the last line short.
+    let full = &lines[..lines.len() - 1];
+    [',', ';', '\t'].iter().any(|&d| {
+        let first = full[0].matches(d).count();
+        first > 0 && full.iter().all(|l| l.matches(d).count() == first)
     })
 }
 

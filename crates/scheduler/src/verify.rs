@@ -17,23 +17,22 @@ use crate::worker::failure;
 /// - Each path must be a regular file inside `out/`, with no links or
 ///   reparse points, and the claimed size: otherwise `E_PROTOCOL`.
 /// - The SHA-256 must match the file: otherwise `E_PROTOCOL`.
-/// - The file must sniff as the declared format: otherwise
+/// - The file must sniff as the format its part declares: otherwise
 ///   `E_OUTPUT_INVALID`.
 ///
 /// On failure the caller fails the job, which deletes `out/`.
 pub fn verify_outputs(
     store: &JobStore,
     job: &JobId,
-    result: &Value,
-    format: Format,
+    claimed: &[(Value, Format)],
 ) -> Result<(), JobFailure> {
-    let claimed = result["outputs"].as_array().cloned().unwrap_or_default();
     if claimed.is_empty() {
         return Err(failure("E_PROTOCOL"));
     }
     let mut files = Vec::with_capacity(claimed.len());
     let mut hashes = Vec::with_capacity(claimed.len());
-    for o in &claimed {
+    let mut formats = Vec::with_capacity(claimed.len());
+    for (o, format) in claimed {
         // The schema guarantees `out/...`; check anyway rather than panic.
         let Some(rel) = o["path"].as_str().and_then(|p| p.strip_prefix("out/")) else {
             return Err(failure("E_PROTOCOL"));
@@ -43,15 +42,17 @@ pub fn verify_outputs(
             suggested_name: o["suggestedName"].as_str().unwrap_or_default().to_owned(),
             extension: format.as_str().to_owned(),
             size_bytes: o["sizeBytes"].as_u64().unwrap_or(u64::MAX),
+            source: o["source"].as_u64().and_then(|i| usize::try_from(i).ok()),
         });
         hashes.push(o["sha256"].as_str().unwrap_or_default().to_owned());
+        formats.push(*format);
     }
     store
         .record_outputs(job, files.clone())
         .map_err(|_| failure("E_PROTOCOL"))?;
 
     let out = store.job_dirs(job).map_err(|_| failure("E_INTERNAL"))?.out;
-    for (file, hash) in files.iter().zip(&hashes) {
+    for ((file, hash), format) in files.iter().zip(&hashes).zip(formats) {
         let path = out.join(&file.path);
         let actual = sha256_hex(&path).map_err(|_| failure("E_PROTOCOL"))?;
         if !actual.eq_ignore_ascii_case(hash) {

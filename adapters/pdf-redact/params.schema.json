@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Redact PDF",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "boxes": {
+      "title": "Areas",
+      "type": "array",
+      "maxItems": 10000,
+      "x-ui": "redactionCanvas",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "page",
+          "x0",
+          "y0",
+          "x1",
+          "y1"
+        ],
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50000
+          },
+          "x0": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y0": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "x1": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y1": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "$comment": "Normalized 0 to 1 in displayed page orientation, origin top-left, as drawn in the UI."
+      }
+    },
+    "terms": {
+      "title": "Search terms",
+      "description": "Literal text, whole document, case-insensitive. Line breaks, hyphenation and spacing are ignored when matching.",
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 200
+      }
+    },
+    "fill": {
+      "title": "Fill",
+      "enum": [
+        "black",
+        "white"
+      ],
+      "default": "black"
+    },
+    "rasterizeFallback": {
+      "title": "Turn affected pages into images if verification fails",
+      "type": "boolean",
+      "default": false,
+      "$comment": "Set only after the user accepts the fallback offer. Text on those pages is lost."
+    }
+  },
+  "$comment": "Removes the content under each box and every match of each term, then strips metadata, attachments, annotations and form fields. A separate process verifies the result; if verification fails, no file is produced."
+}

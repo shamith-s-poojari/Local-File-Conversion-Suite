@@ -1,0 +1,16 @@
+id: markup-convert
+kind: conversion
+title: Convert Markdown, text, HTML and EPUB
+workerClass: render
+edges:
+  - { from: [md, txt], to: html, tier: H }
+  - { from: [epub], to: html, tier: R }
+  - { from: [txt], to: md, tier: H }
+  - { from: [html, epub], to: md, tier: R }
+  - { from: [md, txt, html, epub], to: pdf, tier: H }
+  - { from: [md, html, epub], to: txt, tier: L }
+fidelityNotes: [IMAGES_DROPPED]
+limits: { timeoutBaseS: 120, timeoutSPerMb: 20, noProgressS: 120, diskFactor: 8.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [markdown-it-py, pymupdf, pikepdf]

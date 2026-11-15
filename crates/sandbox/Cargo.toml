@@ -1,0 +1,38 @@
+[package]
+name = "converter-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-job OS sandbox for workers, its runner and the self-test probe (spec section 9)"
+
+[dependencies]
+converter-scheduler = { path = "../scheduler" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+converter-jobstore = { path = "../jobstore" }
+converter-sniffer = { path = "../sniffer" }
+tempfile = "3"
+
+[[bin]]
+name = "converter-sandbox-run"
+path = "src/bin/converter-sandbox-run.rs"

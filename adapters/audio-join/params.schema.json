@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Join audio files",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "order": {
+      "title": "Play order",
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "maxItems": 100,
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in play order; the core passes inputs in this order."
+    },
+    "to": {
+      "title": "Save as",
+      "enum": ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aac", "aiff"],
+      "default": "mp3",
+      "x-labels": {
+        "mp3": "MP3", "m4a": "M4A (AAC)", "wav": "WAV", "flac": "FLAC",
+        "ogg": "Ogg Vorbis", "opus": "Opus", "aac": "AAC", "aiff": "AIFF"
+      }
+    },
+    "bitrate": {
+      "title": "Quality",
+      "type": "integer",
+      "enum": [96, 128, 192, 256, 320],
+      "default": 192,
+      "x-labels": { "96": "96 kbps (speech)", "128": "128 kbps", "192": "192 kbps (very good)", "256": "256 kbps", "320": "320 kbps (highest)" },
+      "x-when": { "to": ["mp3", "m4a", "ogg", "opus", "aac"] }
+    },
+    "gap": {
+      "title": "Silence between files",
+      "type": "number",
+      "enum": [0, 0.5, 1, 2, 3],
+      "default": 0,
+      "x-labels": { "0": "None", "0.5": "Half a second", "1": "1 second", "2": "2 seconds", "3": "3 seconds" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

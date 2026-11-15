@@ -1,0 +1,14 @@
+cases:
+  - name: center
+    inputs: [text-3]
+    params: { text: CONFIDENTIAL }
+    expect: { pages: [3] }
+  - name: tile-under-some-pages
+    inputs: [rotated-90]
+    params: { text: DRAFT, position: tile, layer: under, pages: "2" }
+    expect: { pages: [2] }
+negative:
+  params: { text: X }
+cancel:
+  inputs: [big]
+  params: { text: CANCEL ME }

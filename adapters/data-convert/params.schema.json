@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Convert CSV, JSON, YAML and Excel",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": { "title": "Convert to", "enum": ["json", "yaml", "csv", "xlsx", "md", "html"] },
+    "firstRowIsHeader": {
+      "title": "First row holds column names",
+      "description": "Each row after it becomes a record with those names.",
+      "type": "boolean",
+      "default": true,
+      "x-when": { "to": ["json", "yaml", "md", "html"] }
+    },
+    "csvDelimiter": {
+      "title": "Separator",
+      "type": "string",
+      "enum": ["comma", "semicolon", "tab"],
+      "default": "comma",
+      "x-labels": { "comma": "Comma", "semicolon": "Semicolon (Excel in many European languages)", "tab": "Tab" },
+      "x-when": { "to": ["csv"] }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

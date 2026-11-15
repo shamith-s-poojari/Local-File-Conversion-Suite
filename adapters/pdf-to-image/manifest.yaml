@@ -1,0 +1,17 @@
+id: pdf-to-image
+kind: conversion
+title: PDF pages to images
+workerClass: render
+edges:
+  - { from: [pdf], to: bmp, tier: H }
+  - { from: [pdf], to: gif, tier: L }
+  - { from: [pdf], to: jpg, tier: L }
+  - { from: [pdf], to: png, tier: H }
+  - { from: [pdf], to: svg, tier: H }
+  - { from: [pdf], to: tiff, tier: H }
+  - { from: [pdf], to: webp, tier: L }
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 4, noProgressS: 120, diskFactor: 20.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pypdfium2, pymupdf, pikepdf, pillow]

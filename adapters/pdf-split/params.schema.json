@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Split PDF",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode"],
+  "properties": {
+    "mode": {
+      "title": "Split",
+      "enum": ["ranges", "everyN", "eachPage", "maxSize"],
+      "default": "ranges"
+    },
+    "ranges": {
+      "title": "Page ranges",
+      "description": "One output per comma-separated range, e.g. 1-3, 5, 8-",
+      "type": "string",
+      "maxLength": 10000,
+      "x-ui": "pageRanges"
+    },
+    "n": { "title": "Pages per file", "type": "integer", "minimum": 1, "maximum": 50000 },
+    "maxSizeMb": { "title": "Maximum file size (MB)", "type": "integer", "minimum": 1, "maximum": 10000 }
+  },
+  "allOf": [
+    { "if": { "properties": { "mode": { "const": "ranges" } } }, "then": { "required": ["ranges"] } },
+    { "if": { "properties": { "mode": { "const": "everyN" } } }, "then": { "required": ["n"] } },
+    { "if": { "properties": { "mode": { "const": "maxSize" } } }, "then": { "required": ["maxSizeMb"] } }
+  ]
+}

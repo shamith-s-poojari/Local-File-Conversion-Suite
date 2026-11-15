@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Contact sheet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["to"],
+  "properties": {
+    "to": {
+      "title": "Save as",
+      "enum": ["png", "jpg", "pdf"],
+      "default": "png",
+      "x-labels": { "png": "PNG pictures", "jpg": "JPG pictures (smaller)", "pdf": "One PDF, a page for each sheet" }
+    },
+    "order": {
+      "title": "Order",
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "maxItems": 500,
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in thumbnail order; the core passes inputs in this order."
+    },
+    "columns": {
+      "title": "Thumbnails across",
+      "type": "integer",
+      "minimum": 3,
+      "maximum": 8,
+      "default": 4,
+      "x-ui": "slider"
+    },
+    "captions": {
+      "title": "Show names under thumbnails",
+      "type": "boolean",
+      "default": true
+    },
+    "sheet": {
+      "title": "Sheet size",
+      "enum": ["a4", "letter", "screen"],
+      "default": "a4",
+      "x-labels": { "a4": "A4 page", "letter": "US Letter page", "screen": "Screen (1920 px wide)" }
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

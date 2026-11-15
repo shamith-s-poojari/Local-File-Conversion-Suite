@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Remove hidden details",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "removeComments": {
+      "title": "Remove comments",
+      "description": "Drops notes and comments from PDFs and Office files.",
+      "type": "boolean",
+      "default": true
+    },
+    "removeHiddenLayers": {
+      "title": "Remove hidden layers",
+      "description": "Drops PDF layers that are switched off, along with what is drawn on them.",
+      "type": "boolean",
+      "default": false
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}

@@ -103,6 +103,7 @@ export type ErrorCode =
   | "E_SANDBOX_UNAVAILABLE"
   | "E_INSTALL_CORRUPT"
   | "E_REDACTION_VERIFICATION_FAILED"
+  | "E_NO_TEXT"
   | "E_INTERNAL";
 /**
  * Authoritative encryption state from inspect: none, restrictions only (opens without a password), or an open password.
@@ -141,7 +142,32 @@ export type WarningCode =
   | "NO_TEXT_LAYER"
   | "REDACTED_TEXT_REMAINS_ELSEWHERE"
   | "GLYPH_UNSUPPORTED"
-  | "W_LARGE_JOB";
+  | "W_LARGE_JOB"
+  | "TRANSPARENCY_FLATTENED"
+  | "ANIMATION_FLATTENED"
+  | "IMAGE_DOWNSCALED"
+  | "COLORS_REDUCED"
+  | "METADATA_DROPPED"
+  | "AUDIO_RESAMPLED"
+  | "AUDIO_DOWNMIXED"
+  | "STREAMS_DROPPED"
+  | "LAYOUT_APPROXIMATED"
+  | "FORMULAS_DROPPED"
+  | "SHEETS_SPLIT"
+  | "ONLY_FIRST_SHEET"
+  | "IMAGES_DROPPED"
+  | "EMBEDDED_FONTS_MISSING"
+  | "NESTED_DATA_FLATTENED"
+  | "COMMENTS_DROPPED"
+  | "REENCODED"
+  | "KEPT_ORIGINAL"
+  | "TARGET_NOT_REACHED"
+  | "COLUMNS_MISMATCHED"
+  | "ACTIVE_CONTENT_REMOVED"
+  | "MACROS_REMOVED"
+  | "EXTERNAL_LINKS_REMOVED"
+  | "DETAILS_REMOVED"
+  | "TRACKED_CHANGES_KEPT";
 
 /**
  * One line of the worker protocol.
@@ -373,6 +399,13 @@ export interface InspectResult {
    * @maxItems 64
    */
   warnings?: WarningItem[];
+  media?: MediaInfo;
+  /**
+   * What the file reveals or could do when opened (ADR 0005). Display only.
+   *
+   * @maxItems 64
+   */
+  findings?: Finding[];
 }
 /**
  * This interface was referenced by `Message`'s JSON-Schema
@@ -381,6 +414,51 @@ export interface InspectResult {
 export interface WarningItem {
   code: WarningCodeString;
   detail?: Detail;
+}
+/**
+ * Facts about an image, audio or video input (ADR 0003).
+ *
+ * This interface was referenced by `Message`'s JSON-Schema
+ * via the `definition` "MediaInfo".
+ */
+export interface MediaInfo {
+  kind: "image" | "audio" | "video" | "document";
+  durationMs?: number;
+  width?: number;
+  height?: number;
+  frames?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  sampleRate?: number;
+  channels?: number;
+  bitrateKbps?: number;
+  fps?: number;
+  hasAudio?: boolean;
+  hasVideo?: boolean;
+}
+/**
+ * This interface was referenced by `Message`'s JSON-Schema
+ * via the `definition` "Finding".
+ */
+export interface Finding {
+  kind:
+    | "location"
+    | "device"
+    | "author"
+    | "software"
+    | "dates"
+    | "comments"
+    | "trackedChanges"
+    | "hiddenContent"
+    | "activeContent"
+    | "macros"
+    | "externalLinks"
+    | "embeddedFiles"
+    | "tags";
+  /**
+   * A short value to show, such as a camera model. Never document text.
+   */
+  detail?: string;
 }
 /**
  * Validation outcome. Non-empty errors means the job must not run.
@@ -446,6 +524,10 @@ export interface ExecuteOutput {
   pages?: number;
   sizeBytes: Count;
   sha256: Sha256;
+  /**
+   * Index of the input this output came from, when it came from one.
+   */
+  source?: number;
 }
 /**
  * This interface was referenced by `Message`'s JSON-Schema

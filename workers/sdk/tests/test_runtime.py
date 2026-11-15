@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
+import os
 import queue
 import threading
 import time
@@ -280,3 +282,53 @@ def test_unsupported_method(job_dir: Path) -> None:
 )
 def test_safe_display_name(raw: str, safe: str) -> None:
     assert safe_display_name(raw) == safe
+
+
+def test_workers_never_read_the_system_mime_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sandbox makes these files unreadable; reading one would raise.
+    from converter_sdk import runtime  # noqa: PLC0415
+
+    unreadable = tmp_path / "mime.types"
+    unreadable.write_text("application/x-local  local\n")
+    unreadable.chmod(0)
+    monkeypatch.setattr(mimetypes, "knownfiles", [str(unreadable)])
+    monkeypatch.setattr(mimetypes, "inited", False)
+    monkeypatch.setattr(mimetypes, "_db", None)
+    runtime._builtin_mime_types()
+    assert mimetypes.guess_type("a.local") == (None, None)
+    assert mimetypes.guess_type("a.png")[0] == "image/png"
+
+
+def test_empty_input_without_the_null_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows AppContainer is denied NUL; stdin becomes a pipe at EOF."""
+    from converter_sdk import runtime  # noqa: PLC0415
+
+    real_open = os.open
+
+    def deny_null(path: str, flags: int, *args: int) -> int:
+        if path == os.devnull:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(runtime.os, "open", deny_null)
+    fd = runtime._empty_input()
+    try:
+        assert os.read(fd, 10) == b""
+    finally:
+        os.close(fd)
+
+
+def test_an_only_input_owns_every_output(tmp_path: Path) -> None:
+    from converter_sdk.context import OutputFile
+    from converter_sdk.runtime import _source_of
+
+    class Ctx:
+        def __init__(self, n: int) -> None:
+            self.inputs = [tmp_path / f"{i}.pdf" for i in range(n)]
+
+    out = OutputFile(tmp_path / "a.pdf")
+    assert _source_of(Ctx(1), out) == 0  # type: ignore[arg-type]
+    assert _source_of(Ctx(2), out) is None  # type: ignore[arg-type]
+    assert _source_of(Ctx(2), OutputFile(tmp_path / "a.pdf", source=1)) == 1  # type: ignore[arg-type]

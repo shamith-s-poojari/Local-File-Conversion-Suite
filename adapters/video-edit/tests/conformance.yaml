@@ -1,0 +1,16 @@
+cases:
+  - name: rotate-mixed
+    inputs: [video-mp4, video-webm, video-avi]
+    params: { rotate: 90, fileTitles: [a, b, c] }
+    expect: { outputs: 3 }
+  - name: faster-mov
+    inputs: [video-mov]
+    params: { speed: 2, flip: horizontal }
+    expect: { outputs: 1 }
+negative:
+  params: { rotate: 180 }
+  inputs: [video-mp4]
+  bad: [corrupt-mp4, truncated-mp4]
+cancel:
+  inputs: [video-long-mp4]
+  params: { rotate: 90 }

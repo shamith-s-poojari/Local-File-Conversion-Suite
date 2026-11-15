@@ -1,0 +1,34 @@
+id: office-convert
+kind: conversion
+title: Convert office documents
+workerClass: office
+edges:
+  - { from: [xlsx, xls, ods], to: csv, tier: L }
+  - { from: [docx, odt, rtf], to: doc, tier: H }
+  - { from: [doc, odt, rtf, txt, md], to: docx, tier: H }
+  - { from: [html], to: docx, tier: R }
+  - { from: [docx, doc, odt, rtf, md], to: epub, tier: R }
+  - { from: [txt], to: html, tier: H }
+  - { from: [docx, doc, odt, rtf, xlsx, xls, ods], to: html, tier: R }
+  - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods], to: jpg, tier: L }
+  - { from: [docx, doc, odt, rtf], to: md, tier: R }
+  - { from: [pptx, ppt], to: odp, tier: H }
+  - { from: [pdf], to: odp, tier: R }
+  - { from: [xlsx, xls, csv], to: ods, tier: H }
+  - { from: [docx, doc, rtf, txt, md], to: odt, tier: H }
+  - { from: [html], to: odt, tier: R }
+  - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods, csv, txt, html], to: pdf, tier: H }
+  - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods], to: png, tier: H }
+  - { from: [pptx, odp], to: ppt, tier: H }
+  - { from: [ppt, odp], to: pptx, tier: H }
+  - { from: [pdf], to: pptx, tier: R }
+  - { from: [docx, doc, odt, txt, md], to: rtf, tier: H }
+  - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods, html], to: txt, tier: L }
+  - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods], to: webp, tier: L }
+  - { from: [xlsx, ods, csv], to: xls, tier: H }
+  - { from: [xls, ods, csv], to: xlsx, tier: H }
+fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, FORMULAS_DROPPED, SHEETS_SPLIT, EMBEDDED_FONTS_MISSING]
+limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 300, diskFactor: 10.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [libreoffice, markdown-it-py, pypdfium2, pikepdf, pillow]

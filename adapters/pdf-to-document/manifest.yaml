@@ -1,0 +1,15 @@
+id: pdf-to-document
+kind: conversion
+title: PDF to documents
+workerClass: pdf
+edges:
+  - { from: [pdf], to: docx, tier: R }
+  - { from: [pdf], to: html, tier: R }
+  - { from: [pdf], to: md, tier: R }
+  - { from: [pdf], to: txt, tier: R }
+  - { from: [pdf], to: xlsx, tier: R }
+fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, NO_TEXT_LAYER]
+limits: { timeoutBaseS: 300, timeoutSPerMb: 60, noProgressS: 300, diskFactor: 4.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pymupdf, pdf2docx, openpyxl, pikepdf]

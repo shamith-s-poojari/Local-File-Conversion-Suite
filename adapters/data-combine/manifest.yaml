@@ -1,0 +1,12 @@
+id: data-combine
+kind: operation
+title: Combine spreadsheets
+workerClass: render
+inputs: { formats: [csv, xlsx], min: 2, max: 200 }
+outputs: { format: chosen, cardinality: one }
+fidelity: H
+fidelityNotes: [FORMULAS_DROPPED, COLUMNS_MISMATCHED]
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 3.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [openpyxl]

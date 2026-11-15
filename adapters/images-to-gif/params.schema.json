@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Make an animated GIF",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "order": {
+      "title": "Frame order",
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "maxItems": 300,
+      "x-ui": "fileOrder",
+      "$comment": "File IDs in frame order; the core passes inputs in this order."
+    },
+    "frameMs": {
+      "title": "Show each picture for",
+      "type": "integer",
+      "enum": [100, 200, 500, 1000, 2000],
+      "default": 500,
+      "x-labels": { "100": "0.1 seconds", "200": "0.2 seconds", "500": "Half a second", "1000": "1 second", "2000": "2 seconds" }
+    },
+    "width": {
+      "title": "Width",
+      "description": "Pictures of other shapes are centred on white.",
+      "type": "integer",
+      "enum": [320, 480, 640, 800],
+      "default": 480,
+      "x-labels": { "320": "320 px", "480": "480 px", "640": "640 px", "800": "800 px" }
+    },
+    "loop": {
+      "title": "Play forever",
+      "type": "boolean",
+      "default": true
+    },
+    "fileTitles": {
+      "type": "array",
+      "maxItems": 300,
+      "items": { "type": "string", "maxLength": 255 },
+      "$comment": "Set by the core."
+    }
+  }
+}
