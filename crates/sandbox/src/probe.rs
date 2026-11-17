@@ -47,6 +47,8 @@ fn short_socket_path(id: &str) -> PathBuf {
 /// probe reports as `inconclusive`, which fails.
 const DENIED: &[&str] = &[
     "read_sentinel",
+    // Linux judges it below: see `HOME_SKELETON`.
+    #[cfg(not(target_os = "linux"))]
     "list_home",
     "read_other_job",
     "write_outside",
@@ -67,6 +69,38 @@ const DENIED: &[&str] = &[
 const BLOCKED_OR_SCRUBBED: &[&str] = &["proc_environ"];
 #[cfg(not(target_os = "linux"))]
 const BLOCKED_OR_SCRUBBED: &[&str] = &[];
+/// Linux: when the runtime lives under the home folder (a virtualenv in a
+/// checkout there, uv's Python), bubblewrap creates the folders above each
+/// mount, so home exists inside as a skeleton of those names. Listing it then
+/// works but shows nothing of the real home: none of `homeEntries`.
+#[cfg(target_os = "linux")]
+const HOME_SKELETON: &[&str] = &["list_home"];
+#[cfg(not(target_os = "linux"))]
+const HOME_SKELETON: &[&str] = &[];
+
+/// Up to 16 names in `home` that a sandbox must not show: everything except
+/// the first folder of a path the sandbox mounts (those appear in the
+/// skeleton). Empty if home can't be read.
+fn home_entries(home: &Path, mounted: &[&Path]) -> Vec<String> {
+    let skeleton: std::collections::BTreeSet<_> = mounted
+        .iter()
+        .filter_map(|m| m.strip_prefix(home).ok())
+        .filter_map(|rest| rest.components().next())
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    let mut names: Vec<String> = fs::read_dir(home)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .filter(|n| !skeleton.contains(n))
+                .filter_map(|n| n.into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.truncate(16);
+    names
+}
 /// Must work, or the probe proves nothing.
 const ALLOWED: &[&str] = &["read_job", "write_work"];
 
@@ -135,6 +169,7 @@ pub fn self_test(
     let config = serde_json::json!({
         "sentinel": canonical(&sentinel),
         "home": canonical(home),
+        "homeEntries": home_entries(&canonical(home), &launcher.config().runtime_roots()),
         "otherJobFile": canonical(&other_file),
         "outsideFile": canonical(&other).join("written.txt"),
         "loopbackPort": port,
@@ -192,6 +227,19 @@ pub fn self_test(
             name: (*name).to_owned(),
             expected: "blocked",
             passed: outcome == "blocked" || outcome == "scrubbed",
+            outcome,
+        });
+    }
+    for name in HOME_SKELETON {
+        let outcome = report
+            .get(*name)
+            .and_then(|v| v["outcome"].as_str())
+            .unwrap_or("missing")
+            .to_owned();
+        attempts.push(Attempt {
+            name: (*name).to_owned(),
+            expected: "blocked",
+            passed: outcome == "blocked" || outcome == "skeleton",
             outcome,
         });
     }
@@ -273,4 +321,23 @@ fn failure(output: &std::process::Output) -> String {
 
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_entries_leave_out_the_mount_skeleton() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        for d in ["work", ".local", "Documents"] {
+            fs::create_dir(home.join(d)).unwrap();
+        }
+        fs::write(home.join(".bashrc"), b"").unwrap();
+        let venv = home.join("work/repo/.venv");
+        let uv = home.join(".local/share/uv/python/cpython-3.13.9");
+        let names = home_entries(home, &[venv.as_path(), uv.as_path(), Path::new("/usr")]);
+        assert_eq!(names, [".bashrc", "Documents"]);
+    }
 }

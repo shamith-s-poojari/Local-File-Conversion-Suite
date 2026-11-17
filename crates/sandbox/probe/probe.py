@@ -102,6 +102,19 @@ def proc_environ(expected):
     return {"outcome": "scrubbed" if names <= set(os.environ) else "allowed"}
 
 
+def list_home(cfg, expected):
+    """Refused; or (Linux) listable but only as the skeleton bubblewrap makes
+    above its mounts: none of the real names the core sent is there."""
+    result = attempt(lambda: os.listdir(cfg["home"]), expected)
+    if result["outcome"] != "allowed" or not sys.platform.startswith("linux"):
+        return result
+    real = cfg.get("homeEntries") or []
+    if not real:
+        return {"outcome": "inconclusive", "error": "noHomeEntries"}
+    seen = set(os.listdir(cfg["home"]))
+    return {"outcome": "allowed" if seen & set(real) else "skeleton"}
+
+
 def access(cfg):
     def read(path):
         with open(path, "rb") as f:
@@ -123,7 +136,7 @@ def access(cfg):
         "read_job": attempt(lambda: read("in/probe.txt"), set()),
         "write_work": attempt(lambda: write("work/probe.out"), set()),
         "read_sentinel": attempt(lambda: read(cfg["sentinel"]), fs),
-        "list_home": attempt(lambda: os.listdir(cfg["home"]), fs),
+        "list_home": list_home(cfg, fs),
         "read_other_job": attempt(lambda: read(cfg["otherJobFile"]), fs),
         "write_outside": attempt(lambda: write(cfg["outsideFile"]), fs | codes("EROFS")),
         "connect_external": attempt(lambda: connect("1.1.1.1", 443), NETWORK),
