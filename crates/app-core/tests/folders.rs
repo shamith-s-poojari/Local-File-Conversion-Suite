@@ -5,12 +5,11 @@
 //! the worker runner. Needs the workspace virtualenv; skips without it. The
 //! parts that run a conversion also need a passing sandbox self-test.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use converter_app_core::{App, AppConfig, FileResult, MAX_FILES};
+use converter_app_core::{App, FileResult, MAX_FILES};
 use converter_jobstore::{JobId, JobState};
 use serde_json::json;
 
@@ -23,39 +22,15 @@ const PNG: &[u8] = &[
     0xAE, 0x42, 0x60, 0x82,
 ];
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
-
-fn python() -> PathBuf {
-    if cfg!(windows) {
-        repo().join(".venv/Scripts/python.exe")
-    } else {
-        repo().join(".venv/bin/python")
-    }
-}
+mod common;
+#[path = "common/lifecycle.rs"]
+mod lifecycle;
+#[path = "common/recheck.rs"]
+mod recheck;
+use common::{open_app, python, skip_or_fail};
 
 fn open(data: &Path) -> App {
-    let config = AppConfig {
-        data_root: Some(data.to_path_buf()),
-        resources: repo(),
-        adapters_dir: repo().join("adapters"),
-        python: python(),
-        runner: std::env::current_exe().unwrap(),
-        runner_args: vec!["--sandbox-run".into()],
-        user_memory_limit: None,
-        include_dev_adapters: false,
-    };
-    App::open(
-        &config,
-        Arc::new(|_| {}),
-        Arc::new(|_| "t".into()),
-        Arc::new(|_| {}),
-    )
-    .expect("the app opens")
+    open_app(&python(), data.to_path_buf())
 }
 
 fn write(p: &Path, bytes: &[u8]) {
@@ -77,17 +52,35 @@ fn main() -> ExitCode {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
     if !python().is_file() {
-        println!("folders: skipped (needs `uv sync`)");
+        skip_or_fail("folders", "needs `uv sync`");
         return ExitCode::SUCCESS;
     }
     let tmp = tempfile::tempdir().unwrap();
     let app = open(&tmp.path().join("data"));
+    diagnostics(&app);
     intake(&app, tmp.path());
     truncation(&app, tmp.path());
     paste(&app, tmp.path());
+    office_password(&app, tmp.path());
     conversion(&app, tmp.path());
+    // Worker and shutdown behaviour, with a stand-in adapter (no engines).
+    if common::sandbox_os() {
+        lifecycle::run(&python());
+        // The core's separate re-check of redaction output (ADR 0006).
+        recheck::run(&python());
+    }
     println!("folders: ok");
     ExitCode::SUCCESS
+}
+
+/// `output-check` runs for the core only; it isn't a tool to list.
+fn diagnostics(app: &App) {
+    let adapters = app.get_diagnostics().adapters;
+    assert!(!adapters.is_empty());
+    assert!(
+        !adapters.iter().any(|a| a == "output-check"),
+        "{adapters:?}"
+    );
 }
 
 fn intake(app: &App, tmp: &Path) {
@@ -170,21 +163,19 @@ fn pasted_files(data: &Path) -> usize {
 
 fn paste(app: &App, tmp: &Path) {
     let data = tmp.join("data");
-    let r = app.add_pasted("image", PNG.to_vec()).unwrap();
+    let r = app.add_pasted("image", PNG).unwrap();
     let f = r[0].file.as_ref().expect("accepted");
     assert_eq!(f.display_name, "pasted-image.png");
     assert_eq!(f.format.as_str(), "png");
     assert_eq!(pasted_files(&data), 1);
-    let t = app.add_pasted("table", b"a,b\n1,2\n".to_vec()).unwrap();
+    let t = app.add_pasted("table", b"a,b\n1,2\n").unwrap();
     assert_eq!(t[0].file.as_ref().unwrap().format.as_str(), "csv");
-    let m = app
-        .add_pasted("text", b"# Title\n\nbody\n".to_vec())
-        .unwrap();
+    let m = app.add_pasted("text", b"# Title\n\nbody\n").unwrap();
     assert_eq!(m[0].display_name, "pasted-text.md");
     assert_eq!(pasted_files(&data), 3);
 
     assert_eq!(
-        app.add_pasted("image", b"not an image".to_vec())
+        app.add_pasted("image", b"not an image")
             .unwrap_err()
             .reason
             .as_deref(),
@@ -201,12 +192,12 @@ fn paste(app: &App, tmp: &Path) {
     let other = tmp.join("other-data");
     {
         let first = open(&other);
-        first.add_pasted("text", b"left behind".to_vec()).unwrap();
+        first.add_pasted("text", b"left behind").unwrap();
         assert_eq!(pasted_files(&other), 1);
     }
     let again = open(&other);
     assert_eq!(pasted_files(&other), 0);
-    again.add_pasted("text", b"x".to_vec()).unwrap();
+    again.add_pasted("text", b"x").unwrap();
     again.shutdown();
     assert_eq!(pasted_files(&other), 0, "exit clears the folder");
 
@@ -239,14 +230,9 @@ fn wait_terminal(app: &App, job: &JobId) -> converter_jobstore::JobSnapshot {
 }
 
 fn conversion(app: &App, tmp: &Path) {
-    let home = PathBuf::from(
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .unwrap(),
-    );
-    let report = app.self_test(&home);
-    if !report.passed || !cfg!(any(target_os = "macos", windows)) {
-        println!("folders: conversion part skipped (no sandbox here)");
+    let report = app.self_test(&common::home());
+    if !report.passed || !common::sandbox_os() {
+        skip_or_fail("folders conversion part", "no sandbox here");
         return;
     }
     // A real picture, which the 1x1 constant above is not.
@@ -292,7 +278,13 @@ fn conversion(app: &App, tmp: &Path) {
         done.warnings
     );
     assert!(app.can_keep_layout(&jpg_job));
+    // The staged inputs' file IDs, for naming files in a partial result.
+    assert_eq!(app.job_input_files(&jpg_job).unwrap(), ids[..1].to_vec());
     app.discard_job(&jpg_job).unwrap();
+    assert_eq!(
+        app.job_input_files(&jpg_job).unwrap_err().reason.as_deref(),
+        Some("unknownJob")
+    );
 
     let (job, skipped) = app
         .create_conversion_counted(&ids, "webp", json!({"skipSame": true}))
@@ -308,8 +300,8 @@ fn conversion(app: &App, tmp: &Path) {
     std::fs::create_dir(&dest).unwrap();
     let dir = app.folder_destination(&job, dest.clone(), true);
     app.check_save(&job, &dir).unwrap();
-    let n = app.save_outputs(&job, &dir, false).unwrap();
-    assert_eq!(n, 3);
+    let report = app.save_outputs(&job, &dir, false).unwrap();
+    assert_eq!(report.saved.len(), 3);
     assert!(dest.join("album/one.webp").is_file());
     assert!(dest.join("album/sub/two.webp").is_file());
     assert!(dest.join("album/sub/deeper/three.webp").is_file());
@@ -327,4 +319,28 @@ fn conversion(app: &App, tmp: &Path) {
     assert!(flat.join("one.webp").is_file());
     assert!(!flat.join("album").exists());
     app.shutdown();
+}
+
+/// A password-protected Office file can't be opened by anything here, so it
+/// is shown as such and never offered a password prompt or a worker.
+fn office_password(app: &App, tmp: &Path) {
+    let mut bytes = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1".to_vec();
+    bytes.extend([0u8; 512]);
+    bytes.extend("EncryptionInfo".encode_utf16().flat_map(u16::to_le_bytes));
+    let path = tmp.join("x.docx");
+    write(&path, &bytes);
+    let added = app.add_paths(vec![path]).unwrap();
+    let file = added[0].file.as_ref().expect("the file is listed");
+    assert!(!file.actionable);
+    let id = file.file_id.clone();
+    let workers = app.live_file_workers();
+    for err in [
+        app.inspect_file(&id).unwrap_err(),
+        app.submit_password(&id, "secret".into()).unwrap_err(),
+    ] {
+        assert_eq!(err.code, "E_PASSWORD_REQUIRED");
+        assert_eq!(err.reason.as_deref(), Some("officePassword"));
+    }
+    assert_eq!(app.live_file_workers(), workers, "no worker was started");
+    app.remove_file(&id).unwrap();
 }

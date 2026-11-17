@@ -19,13 +19,16 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use crate::{CommandError, CommandResult};
+use crate::{CommandError, CommandResult, Reason};
 
 pub(crate) struct FileEntry {
     pub path: PathBuf,
     pub descriptor: FileDescriptor,
     pub password: Option<Zeroizing<String>>,
+    /// `None` while no worker runs, and while one is out being used.
     pub worker: Option<FileWorker>,
+    /// A call has the worker out of `worker` right now.
+    pub busy: bool,
     /// For closing the least recently used worker first.
     pub last_used: std::time::Instant,
     /// A pasted item in the data root's `pasted/` folder: deleted when the
@@ -40,6 +43,7 @@ impl FileEntry {
             descriptor,
             password: None,
             worker: None,
+            busy: false,
             last_used: std::time::Instant::now(),
             temp: false,
         }
@@ -51,6 +55,47 @@ impl FileEntry {
             ..Secrets::default()
         })
     }
+}
+
+/// What the core keeps for one job's output previews. The tokens belong to
+/// the job, not the worker: the preview folders outlive a worker that was
+/// dropped after a protocol error or closed before a save that then failed.
+#[derive(Default)]
+pub(crate) struct OutputSlot {
+    /// `None` while no worker runs, and while one is out being used.
+    pub worker: Option<FileWorker>,
+    pub busy: bool,
+    /// Preview token per output tag and DPI, see [`FileWorker::tokens`].
+    pub tokens: BTreeMap<(String, u32), String>,
+}
+
+/// A password-protected Office file: an OOXML file (docx, xlsx, pptx) that is
+/// really a Compound File holding an `EncryptionInfo` stream. Nothing here can
+/// open it (LibreOffice and the SDK take no Office password), so asking for a
+/// password could never work. Decided from what the sniffer read (the CFB
+/// magic and the stream name) and the claimed format; no worker is needed.
+pub(crate) fn is_office_password(d: &FileDescriptor) -> bool {
+    matches!(
+        d.format,
+        converter_sniffer::Format::Docx
+            | converter_sniffer::Format::Xlsx
+            | converter_sniffer::Format::Pptx
+    ) && d.evidence.iter().any(|e| e == "cfb:encrypted-ooxml")
+}
+
+/// Errors after which a worker can't be trusted with another request.
+///
+/// `E_PROTOCOL`, `E_TIMEOUT` and `E_INSTALL_CORRUPT` are the audit's list.
+/// `E_INTERNAL` and `E_RESOURCE_DISK` are added because the scheduler's
+/// `Worker::request` answers a worker that died or was killed mid-request
+/// with them (and has no way to ask whether one is still alive); a worker's
+/// own error message such as `E_PASSWORD_WRONG` leaves it running. Dropping
+/// a healthy worker after an internal error only costs a restart.
+pub(crate) fn worker_is_broken(code: &str) -> bool {
+    matches!(
+        code,
+        "E_PROTOCOL" | "E_TIMEOUT" | "E_INSTALL_CORRUPT" | "E_INTERNAL" | "E_RESOURCE_DISK"
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,8 +156,10 @@ pub(crate) struct FileWorker {
     /// The staged input, e.g. `in/0.png`.
     pub input: String,
     worker: Worker,
-    size_bytes: u64,
-    /// Preview token per input and DPI; each maps to its own folder of
+    /// Size of the file the next request reads; sets the watchdog. A job's
+    /// worker serves every output in turn, so this is set per call.
+    pub size_bytes: u64,
+    /// Preview token per tag and DPI; each maps to its own folder of
     /// `<page>.png`, so a job's outputs never overwrite each other's previews.
     pub tokens: BTreeMap<(String, u32), String>,
     dir: PathBuf,
@@ -143,7 +190,7 @@ impl FileWorker {
                 ..Timing::default()
             },
         )
-        .map_err(|f| CommandError::new(&f.code, "workerStart"))?;
+        .map_err(|f| CommandError::with(&f.code, Reason::WorkerStart))?;
         Ok(FileWorker {
             job,
             input,
@@ -170,7 +217,7 @@ impl FileWorker {
                 &CancelToken::new(),
                 &mut |_| {},
             )
-            .map_err(|f| CommandError::new(&f.code, "worker"))
+            .map_err(|f| CommandError::with(&f.code, Reason::Worker))
     }
 
     pub fn inspect(&mut self, secrets: Option<&Secrets>) -> CommandResult<InspectInfo> {
@@ -216,35 +263,36 @@ impl FileWorker {
         register: &dyn Fn(PathBuf) -> String,
     ) -> CommandResult<Preview> {
         let input = self.input.clone();
-        self.render_with(&input, secrets, page, dpi, register)
+        self.render_with(&input, "in", secrets, page, dpi, register)
     }
 
+    /// Renders page `page` of the job output `input`. `tag` names its preview
+    /// folder and must be unique per output: the output's index, never
+    /// something made from its file name (two names can map to one folder).
     pub fn render(
         &mut self,
         input: &str,
+        tag: &str,
         page: u32,
         dpi: u32,
         register: &dyn Fn(PathBuf) -> String,
     ) -> CommandResult<Preview> {
-        self.render_with(input, None, page, dpi, register)
+        self.render_with(input, tag, None, page, dpi, register)
     }
 
     fn render_with(
         &mut self,
         input: &str,
+        tag: &str,
         secrets: Option<&Secrets>,
         page: u32,
         dpi: u32,
         register: &dyn Fn(PathBuf) -> String,
     ) -> CommandResult<Preview> {
-        let tag: String = input
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
         let sub = format!("preview_{tag}_{dpi}");
         let folder = self.dir.join("out").join(&sub);
         std::fs::create_dir_all(&folder)
-            .map_err(|_| CommandError::new("E_RESOURCE_DISK", "previewFolder"))?;
+            .map_err(|_| CommandError::with("E_RESOURCE_DISK", Reason::PreviewFolder))?;
         let r = self.request(
             RequestKind::Render,
             json!({ "input": input, "page": page, "dpi": dpi, "out": format!("out/{sub}/{page}.png") }),
@@ -252,7 +300,7 @@ impl FileWorker {
         )?;
         let token = self
             .tokens
-            .entry((input.to_owned(), dpi))
+            .entry((tag.to_owned(), dpi))
             .or_insert_with(|| register(folder))
             .clone();
         Ok(Preview {
@@ -265,15 +313,11 @@ impl FileWorker {
     /// Renders `input`'s first page or frame to a PNG in the job's own
     /// folder and returns its path (for the clipboard; never registered as
     /// a preview).
-    pub fn render_file(&mut self, input: &str, dpi: u32) -> CommandResult<PathBuf> {
-        let tag: String = input
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
+    pub fn render_file(&mut self, input: &str, tag: &str, dpi: u32) -> CommandResult<PathBuf> {
         let sub = format!("clip_{tag}");
         let folder = self.dir.join("out").join(&sub);
         std::fs::create_dir_all(&folder)
-            .map_err(|_| CommandError::new("E_RESOURCE_DISK", "previewFolder"))?;
+            .map_err(|_| CommandError::with("E_RESOURCE_DISK", Reason::PreviewFolder))?;
         self.request(
             RequestKind::Render,
             json!({ "input": input, "page": 1, "dpi": dpi, "out": format!("out/{sub}/1.png") }),
@@ -302,5 +346,48 @@ impl FileWorker {
 
     pub fn shutdown(self) {
         self.worker.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfb(name: &str, with_encryption_info: bool) -> FileDescriptor {
+        let mut bytes = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1".to_vec();
+        bytes.extend([0u8; 512]);
+        if with_encryption_info {
+            bytes.extend("EncryptionInfo".encode_utf16().flat_map(u16::to_le_bytes));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        converter_sniffer::sniff_path(&path).unwrap()
+    }
+
+    #[test]
+    fn a_protected_office_file_is_recognised_from_its_head_and_extension() {
+        for name in ["x.docx", "x.xlsx", "x.pptx"] {
+            assert!(is_office_password(&cfb(name, true)), "{name}");
+        }
+        // No encrypted stream, or no OOXML extension claiming it: not this case.
+        assert!(!is_office_password(&cfb("x.docx", false)));
+        assert!(!is_office_password(&cfb("x.bin", true)));
+    }
+
+    #[test]
+    fn dead_workers_are_dropped_and_answers_are_kept() {
+        for code in [
+            "E_PROTOCOL",
+            "E_TIMEOUT",
+            "E_INSTALL_CORRUPT",
+            "E_INTERNAL",
+            "E_RESOURCE_DISK",
+        ] {
+            assert!(worker_is_broken(code), "{code}");
+        }
+        for code in ["E_PASSWORD_WRONG", "E_INPUT_CORRUPT", "E_PASSWORD_REQUIRED"] {
+            assert!(!worker_is_broken(code), "{code}");
+        }
     }
 }

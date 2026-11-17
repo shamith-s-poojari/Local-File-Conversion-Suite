@@ -1,0 +1,17 @@
+# Runs for the core only (ADR 0006): after a tool whose manifest declares
+# `recheck` has finished, the core starts this in a separate job over copies
+# of the tool's outputs. `kind: check` keeps it out of every target and tool
+# list; it can't be started from the UI or the CLI.
+id: output-check
+kind: check
+title: Output check
+workerClass: pdf
+inputs: { formats: [pdf, docx, xlsx, pptx, svg, html], min: 1, max: 500 }
+outputs: { format: json, cardinality: one }
+fidelity: E
+fidelityNotes: []
+# Two processes: the worker and the verifier it starts.
+limits: { timeoutBaseS: 120, timeoutSPerMb: 3, noProgressS: 180, diskFactor: 2.0, processes: 2 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: [pymupdf, pypdfium2, pikepdf, lxml]

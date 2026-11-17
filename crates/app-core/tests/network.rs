@@ -28,27 +28,30 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use converter_app_core::{App, AppConfig};
+use converter_app_core::App;
 use converter_jobstore::{JobId, JobState};
 use serde_json::{json, Value};
 
 const SAMPLE_EVERY: Duration = Duration::from_millis(100);
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
+mod common;
+use common::{repo, skip_or_fail};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--sandbox-run") {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
-    let python = repo().join(".venv/bin/python");
-    if !python.is_file() || !cfg!(target_os = "macos") {
-        println!("network: skipped (needs `uv sync`, and macOS until Linux CI proves bwrap)");
+    let python = common::python();
+    if !python.is_file() {
+        skip_or_fail("network", "needs `uv sync`");
+        return ExitCode::SUCCESS;
+    }
+    // The socket sampler reads `lsof` output and the process tree of the
+    // worker; both are written for macOS and Linux. Windows has no equivalent
+    // here, so it stays skipped, in CI too.
+    if cfg!(windows) {
+        println!("network: skipped (the socket sampler has no Windows implementation)");
         return ExitCode::SUCCESS;
     }
     run(&python);
@@ -223,7 +226,15 @@ fn inet_sockets(pids: &[(u32, String)]) -> Vec<String> {
         .map(|(p, _)| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let Ok(out) = Command::new("/usr/sbin/lsof")
+    let Some(lsof) = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+    else {
+        // Without lsof the sampler would see nothing and every run would pass;
+        // the positive control (a socket it must see) turns this into a failure.
+        return Vec::new();
+    };
+    let Ok(out) = Command::new(lsof)
         .args(["-nP", "-i", "-a", "-p", &list, "-F", "pcn"])
         .stderr(Stdio::null())
         .output()
@@ -331,22 +342,13 @@ fn run(python: &Path) {
     sampler.clear();
 
     let app = App::open(
-        &AppConfig {
-            data_root: Some(tmp.path().join("data")),
-            resources: repo(),
-            adapters_dir: repo().join("adapters"),
-            python: python.to_path_buf(),
-            runner: std::env::current_exe().unwrap(),
-            runner_args: vec!["--sandbox-run".into()],
-            user_memory_limit: None,
-            include_dev_adapters: false,
-        },
+        &common::test_config(python, tmp.path().join("data")),
         Arc::new(|_| {}),
         Arc::new(|_| "00000000000000000000000000000000".to_owned()),
         Arc::new(|_| {}),
     )
     .expect("app opens");
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let home = common::home();
     assert!(app.self_test(&home).passed, "sandbox self-test");
 
     let added = app.add_paths(files).unwrap();

@@ -326,3 +326,31 @@ fn targets_serialize_for_the_ui() {
     assert_eq!(pdf_target["unavailable"]["engine"], "libreoffice");
     assert_eq!(pdf_target["bestEffort"], false);
 }
+
+/// ADR 0006: `output-check` runs for the core only. It accepts PDFs and
+/// Office files, so a missing `Kind` filter would offer it for every one.
+#[test]
+fn the_check_adapter_is_never_a_target() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let catalog = Catalog::load(&root.join("../..")).unwrap();
+    let real = build_registry(&root.join("../../adapters"), &catalog, false).unwrap();
+    assert!(real.get("output-check").is_some(), "the adapter ships");
+    for formats in [vec![Pdf], vec![Pdf, Pdf], vec![Docx], vec![Svg, Html]] {
+        let t = targets(&real, &all(Platform::current()), &formats);
+        assert!(
+            t.operations.iter().all(|o| o.adapter != "output-check"),
+            "{formats:?}"
+        );
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("output-check"), "{formats:?}");
+    }
+    // Nor does any conversion route go through it.
+    let planner = Planner::new(&real, &all(Platform::current()));
+    for from in [Pdf, Docx, Xlsx, Pptx, Svg, Html] {
+        for to in [Pdf, Json, Txt, Png] {
+            for plan in planner.plans(from, to) {
+                assert!(plan.hops.iter().all(|h| h.adapter != "output-check"));
+            }
+        }
+    }
+}
