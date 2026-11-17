@@ -37,10 +37,21 @@ const PYTHON_ENGINES: &[(&str, &str)] = &[
 /// Where binaries are looked for, after `PATH`. Apps started from the
 /// Finder or a desktop launcher get a minimal `PATH`, so the usual install
 /// folders are listed explicitly.
+///
+/// Homebrew's `ffmpeg` 9 is built without libvorbis (no Ogg); `ffmpeg-full`
+/// has it but isn't linked into `bin`, so its own folder comes first.
 #[cfg(not(windows))]
-fn bin_dirs(_name: &str) -> Vec<PathBuf> {
-    ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-        .iter()
+fn bin_dirs(name: &str) -> Vec<PathBuf> {
+    let full: &[&str] = if name.starts_with("ff") {
+        &[
+            "/opt/homebrew/opt/ffmpeg-full/bin",
+            "/usr/local/opt/ffmpeg-full/bin",
+        ]
+    } else {
+        &[]
+    };
+    full.iter()
+        .chain(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
         .map(PathBuf::from)
         .collect()
 }
@@ -561,6 +572,25 @@ mod tests {
             vec![PathBuf::from("/opt/homebrew/Cellar/ffmpeg/7/bin/ffmpeg")]
         );
         assert_eq!(g.env[0].0, "LFCS_BIN_FFMPEG");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn homebrew_ffmpeg_full_is_found_before_the_slim_ffmpeg() {
+        let dirs = bin_dirs("ffmpeg");
+        let full = dirs
+            .iter()
+            .position(|d| d == Path::new("/opt/homebrew/opt/ffmpeg-full/bin"))
+            .unwrap();
+        let slim = dirs
+            .iter()
+            .position(|d| d == Path::new("/opt/homebrew/bin"))
+            .unwrap();
+        assert!(full < slim);
+        assert!(bin_dirs("ffprobe").contains(&PathBuf::from("/opt/homebrew/opt/ffmpeg-full/bin")));
+        assert!(!bin_dirs("soffice")
+            .iter()
+            .any(|d| d.to_string_lossy().contains("ffmpeg")));
     }
 
     #[test]

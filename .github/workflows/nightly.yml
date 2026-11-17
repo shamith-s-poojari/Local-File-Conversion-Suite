@@ -57,7 +57,11 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg
+        # Homebrew's ffmpeg 9 has no libvorbis (Ogg); ffmpeg-full does, and
+        # is keg-only, so its bin goes on PATH.
+        run: |
+          brew install ffmpeg-full
+          echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
       - run: uv sync --locked
       - name: Capture and attribute traffic
         run: sudo -E env "PATH=$PATH" tools/network-test/capture.sh

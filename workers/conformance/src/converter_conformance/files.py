@@ -185,29 +185,10 @@ def _ffmpeg_make(path: Path, *args: str) -> Path:
     return path
 
 
-VORBIS = "<vorbis>"
-"""Stands for the Vorbis encoder arguments in the tables below."""
-
-
-def _expand(args: list[str]) -> list[str]:
-    return [a for arg in args for a in (_vorbis() if arg == VORBIS else [arg])]
-
-
-def _vorbis() -> list[str]:
-    """libvorbis, or FFmpeg's own encoder where the build lacks it (Homebrew's
-    FFmpeg 9)."""
-    found = subprocess.run(  # noqa: S603 - fixed arguments, test fixture
-        [str(ffmpeg()), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False
-    ).stdout
-    if " libvorbis " in found:
-        return ["-c:a", "libvorbis"]
-    return ["-c:a", "vorbis", "-strict", "experimental", "-ac", "2"]
-
-
 AUDIO_ARGS = {
     "mp3": ["-c:a", "libmp3lame", "-b:a", "128k"],
     "flac": ["-c:a", "flac"],
-    "ogg": [VORBIS, "-q:a", "4"],
+    "ogg": ["-c:a", "libvorbis", "-q:a", "4"],
     "opus": ["-c:a", "libopus", "-b:a", "96k"],
     "m4a": ["-c:a", "aac", "-b:a", "128k", "-f", "ipod"],
     "aac": ["-c:a", "aac", "-b:a", "128k", "-f", "adts"],
@@ -221,7 +202,7 @@ def audio_file(path: Path, fmt: str, seconds: float = 3.0) -> Path:
         return wav_tone(path, seconds)
     src = wav_tone(path.with_suffix(".src.wav"), seconds)
     try:
-        return _ffmpeg_make(path, "-i", str(src), *_expand(AUDIO_ARGS[fmt]))
+        return _ffmpeg_make(path, "-i", str(src), *AUDIO_ARGS[fmt])
     finally:
         src.unlink(missing_ok=True)
 
@@ -229,7 +210,7 @@ def audio_file(path: Path, fmt: str, seconds: float = 3.0) -> Path:
 VIDEO_ARGS = {
     "mp4": ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"],
     "mov": ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mov"],
-    "mkv": ["-c:v", "libx264", "-pix_fmt", "yuv420p", VORBIS],
+    "mkv": ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "libvorbis"],
     "webm": ["-c:v", "libvpx-vp9", "-b:v", "200k", "-deadline", "realtime", "-c:a", "libopus"],
     "avi": ["-c:v", "mpeg4", "-q:v", "5", "-c:a", "libmp3lame"],
 }
@@ -241,7 +222,7 @@ def video_file(path: Path, fmt: str, seconds: float = 2.0, size: str = "320x240"
         "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration={seconds}",
         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
         "-shortest",
-        *_expand(VIDEO_ARGS[fmt]),
+        *VIDEO_ARGS[fmt],
     )  # fmt: skip
 
 

@@ -187,6 +187,7 @@ mod tests {
     #[test]
     fn profile_quotes_paths_and_scopes_the_job() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -219,6 +220,7 @@ mod tests {
     #[test]
     fn engine_grants_add_only_their_paths() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -250,6 +252,7 @@ mod tests {
     #[test]
     fn socket_grants_listen_but_never_connect() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],

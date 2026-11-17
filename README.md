@@ -84,7 +84,7 @@ Without it the core doesn't search the working directory for a runtime, so a hos
 
 `pnpm check` runs everything that needs no outside program: the generated-code check, type checks, frontend tests, `cargo fmt`, `clippy`, the Rust tests, the adapter registry check, `ruff` and `pytest`. Some tests start programs that aren't part of the repository, and skip when they aren't there. Install them to run the whole suite (CI does, and with `CI=true` those tests fail instead of skipping):
 
-- **FFmpeg**: audio and video tests. `brew install ffmpeg`, `sudo apt-get install ffmpeg` or `choco install ffmpeg`.
+- **FFmpeg**: audio and video tests. `brew install ffmpeg-full` (Homebrew's plain `ffmpeg` can't write Ogg), `sudo apt-get install ffmpeg` or `choco install ffmpeg`.
 - **LibreOffice**: Office conversion tests. `brew install --cask libreoffice` or `sudo apt-get install libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress`. Run its tests one at a time, not alongside other test runs: `uv run pytest adapters/office-convert`, then the end-to-end test alone, with `cargo test -p converter-app-core --test end_to_end`.
 - **bubblewrap** (Linux only): the sandbox. `sudo apt-get install bubblewrap`. On Ubuntu 24.04 and later, AppArmor blocks unprivileged user namespaces; as a test machine only, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The sandbox, command-line, end-to-end and network tests need it. Without it the app turns processing off.
 - **strace and tcpdump** (Linux, only for `tools/network-test/capture.sh`).

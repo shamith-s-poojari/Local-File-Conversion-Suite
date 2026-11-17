@@ -118,6 +118,24 @@ fn args(
     for p in inner.grant.map(|g| g.read.as_slice()).unwrap_or_default() {
         argv.extend(["--ro-bind".into(), p.clone().into(), p.clone().into()]);
     }
+    // Only the resolved folders are mounted, so a link on the way to the
+    // interpreter that lies outside them would be missing (uv's Python
+    // folders link `cpython-3.13-…` to `cpython-3.13.x-…`). Recreate it.
+    let bound: Vec<&Path> = SYSTEM_READ
+        .iter()
+        .map(Path::new)
+        .chain(inner.config.runtime_read.iter().map(PathBuf::as_path))
+        .chain(std::iter::once(inner.config.adapters_dir.as_path()))
+        .collect();
+    for (link, target) in &inner.config.python_links {
+        if !bound.iter().any(|b| link.starts_with(b)) {
+            argv.extend([
+                "--symlink".into(),
+                target.clone().into(),
+                link.clone().into(),
+            ]);
+        }
+    }
     // After every bind of /usr (the runtime may be a system Python rooted
     // there): a later bind of the parent would hide the mask.
     for shell in masked {
@@ -156,7 +174,20 @@ mod tests {
     use crate::SandboxConfig;
 
     fn argv(version: Option<(u32, u32)>, masked: &[PathBuf]) -> Vec<String> {
+        argv_with(version, masked, Vec::new())
+    }
+
+    fn args_with_links(links: Vec<(PathBuf, PathBuf)>) -> Vec<String> {
+        argv_with(Some((0, 9)), &[], links)
+    }
+
+    fn argv_with(
+        version: Option<(u32, u32)>,
+        masked: &[PathBuf],
+        python_links: Vec<(PathBuf, PathBuf)>,
+    ) -> Vec<String> {
         let config = SandboxConfig {
+            python_links,
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -205,6 +236,25 @@ mod tests {
             let user = a.iter().position(|x| x == "--unshare-user").unwrap();
             assert!(user < dashes, "{v:?}");
         }
+    }
+
+    #[test]
+    fn links_to_the_interpreter_outside_the_mounts_are_recreated() {
+        let link = PathBuf::from("/home/u/.local/share/uv/python/cpython-3.13-linux");
+        let target = PathBuf::from("/home/u/.local/share/uv/python/cpython-3.13.9-linux");
+        let inside = PathBuf::from("/usr/bin/python3");
+        let a = args_with_links(vec![
+            (inside.clone(), PathBuf::from("/usr/bin/python3.12")),
+            (link.clone(), target.clone()),
+        ]);
+        let i = a
+            .iter()
+            .position(|x| x == "--symlink")
+            .expect("a --symlink");
+        assert_eq!(a[i + 1], target.to_string_lossy());
+        assert_eq!(a[i + 2], link.to_string_lossy());
+        // A link inside a mounted folder is already there.
+        assert_eq!(a.iter().filter(|x| *x == "--symlink").count(), 1);
     }
 
     #[test]

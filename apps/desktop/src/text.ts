@@ -286,7 +286,7 @@ export const ENGINE_NAMES = { ffmpeg: "FFmpeg", libreoffice: "LibreOffice" } as 
 export function installCommand(engine: "ffmpeg" | "libreoffice", platform: string | undefined): string | undefined {
   const command: Record<string, Record<string, string>> = {
     ffmpeg: {
-      macos: "brew install ffmpeg",
+      macos: "brew install ffmpeg-full",
       windows: "winget install Gyan.FFmpeg",
       linux: "sudo apt install ffmpeg",
     },

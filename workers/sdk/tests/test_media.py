@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from converter_sdk import media
+from converter_sdk.errors import AdapterError
 
 
 @pytest.fixture
-def ffmpeg_with(monkeypatch: pytest.MonkeyPatch):
+def ffmpeg_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     def use(encoders: set[str]) -> None:
-        monkeypatch.setenv("LFCS_BIN_FFMPEG", "/opt/ffmpeg/bin/ffmpeg")
+        # Absolute on every OS: "/opt/..." has no drive on Windows.
+        monkeypatch.setenv("LFCS_BIN_FFMPEG", str(tmp_path / "ffmpeg"))
         monkeypatch.setattr(media, "_encoders", lambda _exe: frozenset(encoders))
 
     return use
@@ -21,11 +25,15 @@ def test_libvorbis_is_used_when_the_build_has_it(ffmpeg_with) -> None:
     assert media.audio_encode_args("ogg", 128)[:2] == ["-c:a", "libvorbis"]
 
 
-def test_a_build_without_libvorbis_uses_ffmpegs_own_encoder(ffmpeg_with) -> None:
-    # Homebrew's FFmpeg 9 has no libvorbis.
+def test_a_build_without_libvorbis_cant_write_ogg(ffmpeg_with) -> None:
+    # Homebrew's FFmpeg 9 has no libvorbis; its own Vorbis encoder crashes.
     ffmpeg_with({"vorbis", "aac", "libopus"})
-    assert media.audio_codec("ogg") == media.VORBIS_BUILTIN
-    assert media.audio_encode_args("ogg", 128)[: len(media.VORBIS_BUILTIN)] == media.VORBIS_BUILTIN
+    with pytest.raises(AdapterError) as e:
+        media.audio_codec("ogg")
+    assert e.value.code == "E_INSTALL_CORRUPT"
+    with pytest.raises(AdapterError):
+        media.audio_encode_args("ogg", 128)
+    assert media.audio_codec("mp3") == ["-c:a", "libmp3lame"]
 
 
 def test_an_unanswered_question_keeps_libvorbis(ffmpeg_with) -> None:

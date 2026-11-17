@@ -62,10 +62,6 @@ MUXER = {
 OPUS_RATES = {48000, 24000, 16000, 12000, 8000}
 
 
-VORBIS_BUILTIN = ["-c:a", "vorbis", "-strict", "experimental", "-ac", "2"]
-"""FFmpeg's own Vorbis encoder: experimental and stereo only, but always built."""
-
-
 @cache
 def _encoders(exe: str) -> frozenset[str]:
     """Encoder names this FFmpeg build has; empty if it couldn't be asked."""
@@ -90,14 +86,18 @@ def _encoders(exe: str) -> frozenset[str]:
 
 
 def audio_codec(to: str) -> list[str]:
-    """The encoder arguments for an audio format. Ogg uses libvorbis, or
-    FFmpeg's own encoder where the build has no libvorbis (Homebrew's FFmpeg
-    9 is built without it)."""
+    """The encoder arguments for an audio format.
+
+    Ogg needs libvorbis, which some FFmpeg builds leave out (Homebrew's
+    ``ffmpeg`` 9; ``ffmpeg-full`` has it). FFmpeg's own Vorbis encoder is no
+    substitute: it crashes re-encoding decoded Vorbis. So a build without
+    libvorbis is reported as a missing part of the engine.
+    """
     if to == "ogg" and available("ffmpeg"):
         found = _encoders(str(binary("ffmpeg")))
         # Asking failed: keep the usual encoder and let FFmpeg report it.
         if found and "libvorbis" not in found:
-            return list(VORBIS_BUILTIN)
+            raise AdapterError("E_INSTALL_CORRUPT", {"missing": "libvorbis"}, retryable=False)
     return list(AUDIO_CODEC[to])
 
 

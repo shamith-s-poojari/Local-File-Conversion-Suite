@@ -47,6 +47,11 @@ pub const DEFAULT_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 pub struct SandboxConfig {
     /// The interpreter to run, e.g. `.venv/bin/python`.
     pub python: PathBuf,
+    /// Symlinks met on the way from `python` to the real interpreter, as
+    /// (link, target). Bubblewrap mounts only resolved folders, so it
+    /// recreates these; uv's `.venv/bin/python` points through a
+    /// `cpython-3.13-…` link to `cpython-3.13.x-…`.
+    pub python_links: Vec<(PathBuf, PathBuf)>,
     /// Directories the worker may read: interpreter, libraries, site-packages,
     /// and every `sys.path` entry (editable installs live outside site-packages).
     pub runtime_read: Vec<PathBuf>,
@@ -137,6 +142,13 @@ impl SandboxConfig {
         runner: &Path,
         timeout: Duration,
     ) -> Result<Self, String> {
+        // The folder resolved, the file name kept: a virtualenv is found from
+        // the path the interpreter is started by, and `crates/x/../..` names
+        // folders a sandbox doesn't have.
+        let python = &match (python.parent(), python.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => canonical(dir)?.join(name),
+            _ => python.to_path_buf(),
+        };
         let mut cmd = Command::new(python);
         cmd.args([
             "-I",
@@ -173,6 +185,7 @@ impl SandboxConfig {
                 .is_some_and(|v| v.join("pyvenv.cfg").is_file());
         Ok(SandboxConfig {
             python: python.to_path_buf(),
+            python_links: symlink_chain(python),
             runtime_read,
             exec_roots: vec![exec_root],
             adapters_dir: canonical(adapters_dir)?,
@@ -397,6 +410,52 @@ pub fn owned_by_current_user(meta: &std::fs::Metadata) -> bool {
         let _ = meta;
         true
     }
+}
+
+/// The symlinks met while resolving `path`, in order, as (link, target)
+/// with absolute targets. Gives up quietly on a loop or an unreadable link:
+/// the sandbox then reports the start failure as before.
+fn symlink_chain(path: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut links = Vec::new();
+    let mut pending: Vec<std::ffi::OsString> = path
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    let mut at = PathBuf::new();
+    while let Some(part) = pending.pop() {
+        if part == ".." {
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let Ok(target) = std::fs::read_link(&next) else {
+                    return links;
+                };
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    at.join(target)
+                };
+                links.push((next, target.clone()));
+                if links.len() > 40 {
+                    return Vec::new();
+                }
+                // Resolve the target from the root again.
+                pending.extend(
+                    target
+                        .components()
+                        .rev()
+                        .map(|c| c.as_os_str().to_os_string()),
+                );
+                at = PathBuf::new();
+            }
+            _ => at = next,
+        }
+    }
+    links
 }
 
 fn canonical(p: &Path) -> Result<PathBuf, String> {
@@ -708,6 +767,7 @@ mod tests {
     #[test]
     fn adapter_ids_cannot_escape() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/x".into(),
             runtime_read: vec![],
             exec_roots: vec![],
