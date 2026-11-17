@@ -22,9 +22,10 @@ from typing import Any
 from .context import JobContext
 from .convert import source_format
 from .errors import AdapterError
+from .limits import MB
 from .markup import read_text
+from .office import reject_encrypted_ooxml
 
-MB = 1024 * 1024
 MAX_TEXT_BYTES = 64 * MB
 MAX_XLSX_UNPACKED = 512 * MB
 """A workbook's XML, unpacked: past this it's a ZIP bomb or too big to hold."""
@@ -134,6 +135,7 @@ def source_size(path: Path) -> int:
     if size == 0:
         raise AdapterError("E_INPUT_CORRUPT", {"reason": "empty"})
     if source_format(path) == "xlsx":
+        reject_encrypted_ooxml(path, "xlsx")
         unpacked = xlsx_unpacked_size(path)
         if unpacked > MAX_XLSX_UNPACKED:
             raise AdapterError("E_LIMIT_EXCEEDED", {"limit": "bytes", "max": MAX_XLSX_UNPACKED})

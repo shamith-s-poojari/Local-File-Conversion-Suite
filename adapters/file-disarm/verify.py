@@ -20,7 +20,19 @@ import sys
 from pathlib import Path, PurePosixPath
 
 OOXML = {"docx", "xlsx", "pptx", "docm", "xlsm", "pptm"}
-SUSPECT_PARTS = ("vbaproject", "vbadata", "/activex/", "/embeddings/", "xl/externallinks/")
+SUSPECT_PARTS = (
+    "vbaproject",
+    "vbadata",
+    "/activex/",
+    "/embeddings/",
+    "xl/externallinks/",
+    "/xl/connections.xml",
+    "/xl/querytables/",
+    "/customxml/",
+    "/customui/",
+)
+IMPORT_RELATIONSHIP = b"/afchunk"
+"""A relationship type (lower-cased) that makes Word open another document with this one."""
 
 
 def report(findings: list[dict[str, str | None]]) -> None:
@@ -36,8 +48,13 @@ def raw_part_findings(path: Path) -> list[dict[str, str | None]]:
 
     with zipfile.ZipFile(path) as z:
         names = ["/" + n.replace("\\", "/").lower() for n in z.namelist()]
+        imports = any(
+            n.lower().endswith(".rels") and IMPORT_RELATIONSHIP in z.read(n).lower()
+            for n in z.namelist()
+            if z.getinfo(n).file_size <= 8 * 1024 * 1024
+        )
     hits = [s for s in SUSPECT_PARTS if any(s in n for n in names)]
-    return [{"kind": "activeContent", "detail": "Part names left"}] if hits else []
+    return [{"kind": "activeContent", "detail": "Part names left"}] if hits or imports else []
 
 
 def main() -> None:

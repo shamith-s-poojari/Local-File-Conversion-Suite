@@ -24,11 +24,6 @@ This file and ``verify.py`` are each self-contained: workers run with
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-import threading
-import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,19 +31,19 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import AdapterError, JobContext, OutputFile, PageWords, run_main
-from converter_sdk.engines import helper_env
+from converter_sdk.adapter import issue
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     is_tagged,
-    param_issue,
     remove_hidden_layers,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue, WordBox
+from converter_sdk.verify import run_verifier as run_sdk_verifier
 from pikepdf import Name
 
-MB = 1024 * 1024
 VERIFY = Path(__file__).resolve().with_name("verify.py")
 VERIFY_TIMEOUT_S = 600
 RASTER_DPI = 200
@@ -399,6 +394,8 @@ def rasterize(doc: Any, pages: set[int]) -> Any:
     for number in range(len(doc)):
         page = doc[number]
         if number in pages:
+            # A page a viewer can show may still be too big to burn into a picture.
+            check_pixels(*rendered_size(page.rect.width, page.rect.height, RASTER_DPI / 72))
             pix = page.get_pixmap(matrix=scale, annots=False, alpha=False)
             new = out.new_page(width=page.rect.width, height=page.rect.height)
             new.insert_image(new.rect, pixmap=pix)
@@ -411,45 +408,10 @@ def rasterize(doc: Any, pages: set[int]) -> Any:
 
 
 def run_verifier(ctx: JobContext, output: Path, spec: dict[str, Any]) -> dict[str, Any]:
-    """Run ``verify.py`` in a fresh process. It sees only the output file
-    (job-relative) and what to check, on stdin."""
-    env = helper_env()
-    request = json.dumps({**spec, "output": output.relative_to(ctx.job_dir.resolve()).as_posix()})
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv: our interpreter and our verifier
-        [sys.executable, "-I", str(VERIFY)],
-        cwd=ctx.job_dir,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        # Read and dropped, not DEVNULL: a Windows AppContainer is denied
-        # the null device. It can hold document text, so it's never kept.
-        stderr=subprocess.PIPE,
-    )
-    if proc.stdin is None or proc.stdout is None or proc.stderr is None:  # pragma: no cover
-        raise AdapterError("E_INTERNAL", {"reason": "verifierPipes"})
-    err = proc.stderr
-
-    def drop_stderr() -> None:
-        while err.read(65536):
-            pass
-
-    threading.Thread(target=drop_stderr, daemon=True).start()
-    proc.stdin.write(request.encode("utf-8"))
-    proc.stdin.close()
-    deadline = time.monotonic() + VERIFY_TIMEOUT_S
-    while proc.poll() is None:
-        if ctx.cancelled or time.monotonic() > deadline:
-            proc.kill()
-            proc.wait(5)
-            ctx.check_cancelled()
-            raise AdapterError("E_TIMEOUT", {"stage": "verify"})
-        time.sleep(0.05)
-    raw = proc.stdout.read()
-    try:
-        report = json.loads(raw)
-        if not isinstance(report.get("checks"), list):
-            raise ValueError("no checks")
-    except (ValueError, AttributeError):
+    """Run ``verify.py`` in a fresh process (``converter_sdk.verify``). It sees
+    only the output file (job-relative) and what to check, on stdin."""
+    report = run_sdk_verifier(ctx, VERIFY, output, spec, timeout_s=VERIFY_TIMEOUT_S)
+    if report is None or not isinstance(report.get("checks"), list):
         # A verifier that can't report is a failed verification, never a pass.
         return {"checks": [{"id": "V0", "passed": False, "reason": "verifierFailed"}]}
     return report
@@ -473,28 +435,28 @@ class PdfRedactAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         total = inputs[0].pages
         boxes = params.get("boxes") or []
         terms = params.get("terms") or []
         if not boxes and not terms:
-            return [param_issue("boxes", "nothingToRedact")]
+            return [issue("boxes", "nothingToRedact")]
         for n, b in enumerate(boxes):
             try:
                 page = int(b["page"])
                 xs = (float(b["x0"]), float(b["x1"]))
                 ys = (float(b["y0"]), float(b["y1"]))
             except (KeyError, TypeError, ValueError):
-                return [param_issue("boxes", "invalid", index=n)]
+                return [issue("boxes", "invalid", index=n)]
             if not 1 <= page <= total:
-                return [param_issue("boxes", "pageOutOfBounds", index=n, pages=total)]
+                return [issue("boxes", "pageOutOfBounds", index=n, pages=total)]
             if not all(0 <= v <= 1 for v in (*xs, *ys)) or xs[0] == xs[1] or ys[0] == ys[1]:
-                return [param_issue("boxes", "empty", index=n)]
+                return [issue("boxes", "empty", index=n)]
         for n, t in enumerate(terms):
             if not isinstance(t, str) or len(normalize(t)) < 2:
-                return [param_issue("terms", "tooShort", index=n)]
+                return [issue("terms", "tooShort", index=n)]
         if params.get("fill", "black") not in FILLS:
-            return [param_issue("fill", "invalid")]
+            return [issue("fill", "invalid")]
         return []
 
     def page_text(self, ctx: JobContext, input: Path, page: int) -> PageWords:

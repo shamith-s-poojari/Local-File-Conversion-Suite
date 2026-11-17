@@ -15,7 +15,9 @@ from converter_sdk import AdapterError
 
 ADAPTER = Path(__file__).resolve().parents[1]
 CLS = load_adapter_class(ADAPTER)
-pytestmark = pytest.mark.skipif(files.soffice() is None, reason="LibreOffice isn't installed")
+pytestmark = pytest.mark.skipif(
+    files.skip_soffice(), reason="LibreOffice isn't installed (or not Linux CI)"
+)
 
 SOURCES = sorted({s for s, _ in CLS.EDGES})
 CALC = {"xlsx", "xls", "ods", "csv"}
@@ -212,3 +214,13 @@ def test_empty_file_is_refused_before_starting(tmp_path: Path) -> None:
     with pytest.raises(AdapterError) as e:
         convert(tmp_path, src, "pdf")
     assert e.value.code == "E_INPUT_CORRUPT"
+
+
+def test_libreoffice_is_found_on_linux_ci() -> None:
+    """CI installs LibreOffice on Linux; there, not finding it must fail, not skip."""
+    import os  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    if not (os.environ.get("CI") and sys.platform.startswith("linux")):
+        pytest.skip("only checked on Linux CI")
+    assert files.soffice() is not None

@@ -10,7 +10,8 @@ import math
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .images import MAX_PIXELS, WHITE, flatten, has_alpha
+from .images import WHITE, flatten, has_alpha
+from .limits import MAX_PIXELS, check_pixels
 
 Cell = tuple[Image.Image, "str | None"]
 """A thumbnail source and its caption (``None`` for no caption)."""
@@ -140,6 +141,9 @@ def contact_sheet(
         if w * h <= MAX_PIXELS or px <= MIN_CELL_PX:
             break
         px = max(MIN_CELL_PX, int(px * math.sqrt(MAX_PIXELS / (w * h)) * 0.98))
+    # Shrinking stops at the smallest legible cell; a sheet still over the
+    # limit (very many cells) fails here, before anything is allocated.
+    check_pixels(w, h)
     sheet = Image.new("RGB", (w, h), background)
     draw = ImageDraw.Draw(sheet)
     small = font(m.text)

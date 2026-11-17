@@ -16,7 +16,9 @@ imported inside the functions that need them.
 from __future__ import annotations
 
 import contextlib
+import io
 import re
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,10 @@ MAX_SCAN_BYTES = 512 * 1024 * 1024
 """Most bytes searched in one Office file, however many parts it has."""
 MAX_ENTRIES = 20_000
 CHUNK = 1 << 20
+MAX_MEDIA_BYTES = 64 * 1024 * 1024
+"""Largest picture inside an Office file or PDF that is read for metadata. The
+cleaning tool refuses a larger one rather than leave it unchecked."""
+MAX_PACKAGE_BYTES = 8 * 1024 * 1024 * 1024
 
 IMAGE_FORMATS = {"jpg", "jpeg", "png", "webp", "gif", "tiff", "tif", "avif", "heic", "bmp"}
 MEDIA_FORMATS = {"mp3", "m4a", "flac", "ogg", "opus", "wav", "aac", "aiff",
@@ -42,8 +48,10 @@ OOXML_FORMATS = {"docx", "xlsx", "pptx"}
 MARKUP_FORMATS = {"svg", "html", "htm"}
 PRIVACY_KINDS = {"location", "device", "author", "software", "dates", "comments",
                  "trackedChanges", "hiddenContent", "tags"}  # fmt: skip
-IDENTIFYING_KINDS = {"location", "device", "author", "dates"}
-"""Kinds the cleaning tools must leave empty."""
+IDENTIFYING_KINDS = {"location", "device", "author", "dates", "externalLinks"}
+"""Kinds the cleaning tools must leave empty. ``externalLinks`` is only ever
+reported for Office files, where a link to a template or file outside the
+document carries the path (and so the user name) of whoever made it."""
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 
@@ -94,7 +102,8 @@ def findings(ctx: JobContext, path: Path, *, include_active: bool = True) -> lis
         finally:
             pdf.close()
     elif fmt in OOXML_FORMATS:
-        out += ooxml_findings(path)
+        # With ``include_active`` the active-content reader reports outside links.
+        out += ooxml_findings(path, external=not include_active)
     elif fmt in MARKUP_FORMATS:
         out += markup_findings(path, fmt)
     elif fmt in MEDIA_FORMATS:
@@ -207,23 +216,63 @@ def _exif_findings(exif: Any) -> list[Finding]:
     return out
 
 
-def _png_chunk_types(path: Path) -> set[bytes]:
+def _png_chunk_stream(fh: Any) -> set[bytes]:
     found: set[bytes] = set()
     try:
-        with path.open("rb") as fh:
-            if fh.read(8) != b"\x89PNG\r\n\x1a\n":
-                return found
-            while head := fh.read(8):
-                if len(head) < 8:
-                    break
-                size, kind = int.from_bytes(head[:4], "big"), head[4:]
-                found.add(kind)
-                if kind == b"IEND":
-                    break
-                fh.seek(size + 4, 1)
+        if fh.read(8) != b"\x89PNG\r\n\x1a\n":
+            return found
+        while head := fh.read(8):
+            if len(head) < 8:
+                break
+            size, kind = int.from_bytes(head[:4], "big"), head[4:]
+            found.add(kind)
+            if kind == b"IEND":
+                break
+            fh.seek(size + 4, 1)
     except OSError:
         pass
     return found
+
+
+def _png_chunk_types(path: Path) -> set[bytes]:
+    try:
+        with path.open("rb") as fh:
+            return _png_chunk_stream(fh)
+    except OSError:
+        return set()
+
+
+def _picture_findings(img: Any, png_chunks: Any) -> list[Finding]:
+    """The findings of one opened picture; ``png_chunks()`` gives its PNG chunk types."""
+    out: list[Finding] = []
+    with contextlib.suppress(Exception):
+        out += _exif_findings(img.getexif())
+    info = dict(img.info)
+    fmt = (img.format or "").upper()
+    if info.get("comment"):
+        out.append(_finding("comments", "Embedded comment"))
+    if info.get("xmp") or info.get("XML:com.adobe.xmp"):
+        out.append(_finding("tags", "XMP metadata"))
+    if info.get("photoshop") or 33723 in getattr(img, "tag_v2", {}):
+        out.append(_finding("tags", "IPTC / Photoshop metadata"))
+    if fmt == "TIFF" and 700 in getattr(img, "tag_v2", {}):
+        out.append(_finding("tags", "XMP metadata"))
+    if fmt == "PNG":
+        try:
+            texts = getattr(img, "text", {}) or {}
+        except (OSError, SyntaxError, ValueError, EOFError):
+            texts = {}  # a damaged file: the tool that reads it reports that
+        for key in sorted(texts):
+            low = str(key).lower()
+            if low in _PNG_TEXT_KEYS:
+                out.append(_finding(_PNG_TEXT_KEYS[low], str(texts[key])))
+            elif low == "comment":
+                out.append(_finding("comments", "Embedded comment"))
+            elif low not in _NOT_TEXT and not low.startswith("xml:"):
+                out.append(_finding("tags", f"Text note: {key}"))
+        if b"tIME" in png_chunks():
+            out.append(_finding("dates", "Last modified time"))
+    return out
 
 
 def image_findings(path: Path) -> list[Finding]:
@@ -231,38 +280,29 @@ def image_findings(path: Path) -> list[Finding]:
     from .images import open_image  # noqa: PLC0415
 
     img = open_image(path)
-    out: list[Finding] = []
     try:
-        with contextlib.suppress(Exception):
-            out += _exif_findings(img.getexif())
-        info = dict(img.info)
-        fmt = (img.format or "").upper()
-        if info.get("comment"):
-            out.append(_finding("comments", "Embedded comment"))
-        if info.get("xmp") or info.get("XML:com.adobe.xmp"):
-            out.append(_finding("tags", "XMP metadata"))
-        if info.get("photoshop") or 33723 in getattr(img, "tag_v2", {}):
-            out.append(_finding("tags", "IPTC / Photoshop metadata"))
-        if fmt == "TIFF" and 700 in getattr(img, "tag_v2", {}):
-            out.append(_finding("tags", "XMP metadata"))
-        if fmt == "PNG":
-            try:
-                texts = getattr(img, "text", {}) or {}
-            except (OSError, SyntaxError, ValueError, EOFError):
-                texts = {}  # a damaged file: the tool that reads it reports that
-            for key in sorted(texts):
-                low = str(key).lower()
-                if low in _PNG_TEXT_KEYS:
-                    out.append(_finding(_PNG_TEXT_KEYS[low], str(texts[key])))
-                elif low == "comment":
-                    out.append(_finding("comments", "Embedded comment"))
-                elif low not in _NOT_TEXT and not low.startswith("xml:"):
-                    out.append(_finding("tags", f"Text note: {key}"))
-            if b"tIME" in _png_chunk_types(path):
-                out.append(_finding("dates", "Last modified time"))
+        return _picture_findings(img, lambda: _png_chunk_types(path))
     finally:
         img.close()
-    return out
+
+
+def image_bytes_findings(data: bytes) -> list[Finding]:
+    """The same for a picture held in memory (one inside an Office file or a
+    PDF). A picture Pillow can't read has nothing it can show, so no findings."""
+    from PIL import Image  # noqa: PLC0415
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            img = Image.open(io.BytesIO(data))
+    except Exception:  # noqa: BLE001 - any unreadable picture
+        return []
+    try:
+        return _picture_findings(img, lambda: _png_chunk_stream(io.BytesIO(data)))
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        img.close()
 
 
 # -------------------------------------------------------------------- PDF
@@ -277,6 +317,53 @@ def _pdf_date(value: str) -> str:
     parts = [p for p in m.groups() if p]
     head = "-".join(parts[:3])
     return head + (" " + ":".join(parts[3:]) if len(parts) > 3 else "")
+
+
+def dct_image_bytes(obj: Any) -> bytes | None:
+    """The JPEG held by a PDF image stream (``/DCTDecode``, alone or after
+    ``/FlateDecode``), or None for any other kind of stream or one over the limit."""
+    import zlib  # noqa: PLC0415
+
+    import pikepdf  # noqa: PLC0415
+
+    try:
+        if obj.get("/Subtype") != "/Image":
+            return None
+        filters = obj.get("/Filter")
+        if filters is None:
+            return None
+        names = [str(f) for f in filters] if isinstance(filters, pikepdf.Array) else [str(filters)]
+        if names not in (["/DCTDecode"], ["/FlateDecode", "/DCTDecode"]):
+            return None
+        if int(obj.get("/Length", 0)) > MAX_MEDIA_BYTES:
+            return None
+        raw = obj.read_raw_bytes()
+        if names[0] == "/FlateDecode":
+            inflater = zlib.decompressobj()
+            raw = inflater.decompress(raw, MAX_MEDIA_BYTES + 1)
+        return raw if len(raw) <= MAX_MEDIA_BYTES and raw[:2] == b"\xff\xd8" else None
+    except Exception:  # noqa: BLE001 - a damaged stream has no picture to show
+        return None
+
+
+def _pdf_picture_findings(pdf: Any) -> list[Finding]:
+    """Metadata inside the JPEG pictures of a PDF: a viewer never shows it, but
+    the stream is the original file."""
+    import pikepdf  # noqa: PLC0415
+
+    out: list[Finding] = []
+    budget = MAX_SCAN_BYTES
+    for obj in pdf.objects:
+        if not isinstance(obj, pikepdf.Stream):
+            continue
+        data = dct_image_bytes(obj)
+        if data is None:
+            continue
+        budget -= len(data)
+        if budget < 0:
+            break
+        out += image_bytes_findings(data)
+    return out
 
 
 def pdf_findings(pdf: Any) -> list[Finding]:
@@ -304,6 +391,7 @@ def pdf_findings(pdf: Any) -> list[Finding]:
                 out.append(_finding("tags", key.lstrip("/")))
     if "/Metadata" in pdf.Root:
         out.append(_finding("tags", "XMP metadata"))
+    out += _pdf_picture_findings(pdf)
     notes = 0
     for index, page in enumerate(pdf.pages):
         if index >= 5000:
@@ -427,23 +515,116 @@ def _plural(n: int, one: str, many: str | None = None) -> str:
     return f"{n} {one}" if n == 1 else f"{n} {many or one + 's'}"
 
 
-def ooxml_findings(path: Path) -> list[Finding]:
-    """Properties, comments, tracked changes and hidden parts of a docx,
-    xlsx or pptx. Reads the ZIP without unpacking it."""
+MEDIA_PART = re.compile(r"(?:word|xl|ppt)/media/[^/]+\.(?:jpe?g|png|webp|tiff?)", re.I)
+_DATE_EXTRAS = {0x5455, 0x000A, 0x5855}
+"""ZIP extra-field ids that carry a modification time (extended timestamp, NTFS, old Unix)."""
+FIXED_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+TRACKED_PLACEHOLDER = "Author"
+"""What the cleaning tool writes as the author of a tracked change (Word's own choice)."""
+_ATTRS = rb"""(?:\s+[^\s=<>/"']+\s*=\s*(?:"[^"<]*"|'[^'<]*'))*"""
+TRACKED_TAG = re.compile(
+    rb"<(?:[\w.-]+:)?(?:ins|del|moveFrom|moveTo|moveFromRangeStart|moveToRangeStart|cellIns"
+    rb"|cellDel|cellMerge|rPrChange|pPrChange|sectPrChange|tblPrChange|trPrChange|tcPrChange"
+    rb"|tblGridChange|numberingChange)" + _ATTRS + rb"\s*/?>"
+)
+"""A tracked-change element with all its attributes. Attribute values can't hold
+``<``, so a tag that never closes costs one scan to the next ``<``."""
+TRACKED_ATTR = re.compile(
+    rb"""(\s+)((?:[\w.-]+:)?)(author|date|dateUtc)(\s*=\s*)("[^"<]*"|'[^'<]*')"""
+)
+TRACKED_CARRY = 16 * 1024
+
+
+def ooxml_findings(path: Path, *, external: bool = True) -> list[Finding]:
+    """Properties, comments, tracked changes, hidden parts, pictures, package
+    dates and outside links of a docx, xlsx or pptx. Reads the ZIP without
+    unpacking it. ``external`` is False when the caller gets outside links
+    from ``converter_sdk.active``."""
+    from .markup import check_zip  # noqa: PLC0415
+
     fmt = source_format(path)
     out: list[Finding] = []
     try:
         with zipfile.ZipFile(path) as z:
-            names = z.namelist()
+            infos = check_zip(z, member_max=MAX_PACKAGE_BYTES, total_max=MAX_PACKAGE_BYTES)
+            names = [i.filename for i in infos]
             if len(names) > MAX_ENTRIES:
                 raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "entries"})
             budget = [MAX_SCAN_BYTES]
             out += _ooxml_properties(z, names)
             out += _ooxml_comments(z, names, fmt, budget)
             out += _ooxml_changes(z, names, fmt, budget)
+            out += _ooxml_pictures(z, infos, budget)
+            out += _ooxml_package(infos)
+            if external:
+                out += _ooxml_outside_links(z, names)
     except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError, RuntimeError):
         raise AdapterError("E_INPUT_CORRUPT") from None
     return out
+
+
+def _ooxml_pictures(
+    z: zipfile.ZipFile, infos: list[zipfile.ZipInfo], budget: list[int]
+) -> list[Finding]:
+    """What the pictures in ``word|xl|ppt/media`` carry: they are the original
+    files, EXIF and all."""
+    out: list[Finding] = []
+    for info in infos:
+        if not MEDIA_PART.fullmatch(info.filename) or info.file_size > MAX_MEDIA_BYTES:
+            continue
+        budget[0] -= info.file_size
+        if budget[0] < 0:
+            break
+        with z.open(info) as fh:
+            out += image_bytes_findings(fh.read(MAX_MEDIA_BYTES + 1))
+    return out
+
+
+def _has_time_extra(extra: bytes) -> bool:
+    pos = 0
+    while pos + 4 <= len(extra):
+        ident = int.from_bytes(extra[pos : pos + 2], "little")
+        if ident in _DATE_EXTRAS:
+            return True
+        pos += 4 + int.from_bytes(extra[pos + 2 : pos + 4], "little")
+    return False
+
+
+def _ooxml_package(infos: list[zipfile.ZipInfo]) -> list[Finding]:
+    """When the parts were last saved, which the ZIP records for each of them."""
+    for info in infos:
+        if info.is_dir():
+            continue
+        if info.date_time != FIXED_ZIP_DATE or _has_time_extra(info.extra):
+            return [_finding("dates", "Save times of the parts")]
+    return []
+
+
+def _ooxml_outside_links(z: zipfile.ZipFile, names: list[str]) -> list[Finding]:
+    """Relationships that point outside the file other than plain web links: a
+    template, a linked picture or file. Their targets are paths and addresses
+    of the author. Links to other workbooks are the exception: the formulas
+    need them, so the cleaning tool keeps them and so doesn't look for them."""
+    from .active import is_web_url  # noqa: PLC0415
+
+    total = 0
+    for name in names:
+        if not name.endswith(".rels") or name.lower().startswith("xl/externallinks/"):
+            continue
+        data = read_part(z, name)
+        if data is None:
+            continue
+        for rel in parse_xml(data):
+            if _local(rel.tag) != "Relationship":
+                continue
+            if (rel.get("TargetMode") or "").lower() != "external":
+                continue
+            hyperlink = (rel.get("Type") or "").lower().endswith("/hyperlink")
+            if not (hyperlink and is_web_url(rel.get("Target") or "")):
+                total += 1
+    if not total:
+        return []
+    return [_finding("externalLinks", f"{_plural(total, 'link')} to places outside the file")]
 
 
 def _ooxml_properties(z: zipfile.ZipFile, names: list[str]) -> list[Finding]:
@@ -493,6 +674,32 @@ def _ooxml_comments(
     return [_finding("comments", _plural(total, "comment"))] if total else []
 
 
+def _tracked_identity(z: zipfile.ZipFile, name: str, budget: list[int]) -> tuple[set[str], bool]:
+    """Who made the tracked changes in one part, and whether they carry dates.
+    Read in chunks; what the cleaning tool writes in their place doesn't count."""
+    authors: set[str] = set()
+    dated = False
+    carry = b""
+    with z.open(name) as fh:
+        while chunk := fh.read(CHUNK):
+            budget[0] -= len(chunk)
+            if budget[0] < 0:
+                break
+            data = carry + chunk
+            last = 0
+            for tag in TRACKED_TAG.finditer(data):
+                last = tag.end()
+                for attr in TRACKED_ATTR.finditer(tag.group(0)):
+                    value = attr.group(5)[1:-1].decode("utf-8", "replace")
+                    if attr.group(3) == b"author":
+                        if value.strip() and value != TRACKED_PLACEHOLDER:
+                            authors.add(clean_detail(value))
+                    else:
+                        dated = True
+            carry = data[max(last, len(data) - TRACKED_CARRY) :]
+    return authors, dated
+
+
 def _ooxml_changes(
     z: zipfile.ZipFile, names: list[str], fmt: str, budget: list[int]
 ) -> list[Finding]:
@@ -504,6 +711,14 @@ def _ooxml_changes(
             out.append(_finding("trackedChanges", "Insertions or deletions"))
         if any(_has(z, n, _VANISH, budget) for n in parts):
             out.append(_finding("hiddenContent", "Hidden text"))
+        authors, dated = set(), False
+        for n in parts:
+            more, has_date = _tracked_identity(z, n, budget)
+            authors |= more
+            dated |= has_date
+        out += [_finding("author", f"Tracked changes by {a}") for a in sorted(authors)[:8]]
+        if dated:
+            out.append(_finding("dates", "Tracked change dates"))
     elif fmt == "xlsx":
         if data := read_part(z, "xl/workbook.xml"):
             states = [
@@ -615,13 +830,18 @@ def media_findings(info: dict[str, Any]) -> list[Finding]:
         if (stream.get("disposition") or {}).get("attached_pic"):
             out.append(_finding("tags", "Cover picture"))
             break
+    # Telemetry (GPS tracks, sensor readings) travels in data streams, not tags.
+    if any(s.get("codec_type") == "data" for s in info.get("streams") or []):
+        out.append(_finding("hiddenContent", "Data tracks"))
     return _tidy(out)
 
 
 __all__ = [
     "IDENTIFYING_KINDS",
     "clean_detail",
+    "dct_image_bytes",
     "findings",
+    "image_bytes_findings",
     "image_findings",
     "markup_findings",
     "media_findings",

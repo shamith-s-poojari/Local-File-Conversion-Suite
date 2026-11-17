@@ -1,0 +1,49 @@
+# cargo-deny configuration. Run in CI (the `cargo-deny` job); locally:
+#   cargo install cargo-deny --locked --version 0.21.0
+#   cargo deny check
+#
+# The project is AGPL-3.0-only. Every dependency's license must allow being
+# combined with it, so only permissive licenses, MPL-2.0 (file-level
+# copyleft) and the project's own license are allowed. GPL and LGPL crates
+# need a decision first; do not add them here to make the check pass.
+
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "AGPL-3.0-only", # the workspace's own crates
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Add an advisory ID here only with a written reason and a date to revisit.
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates have no version to wildcard on.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

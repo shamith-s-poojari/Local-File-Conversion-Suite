@@ -36,6 +36,8 @@ pub fn pool_for(adapter_id: &str, worker_class: &str) -> String {
     }
 }
 
+mod recheck;
+
 /// Everything needed to run one staged job.
 #[derive(Debug, Clone)]
 pub struct JobSpec {
@@ -64,6 +66,30 @@ pub struct JobPart {
     /// differ: a tool that keeps each file's format runs one part per
     /// format (ADR 0004).
     pub output_format: Format,
+    /// Set when this part's output must be re-checked by the core before the
+    /// job may succeed (ADR 0006).
+    pub recheck: Option<Recheck>,
+}
+
+/// A re-check of a part's outputs in a separate check job (ADR 0006).
+///
+/// The worker that made the output can't approve it: once its worker has
+/// exited, the runner copies the output into a folder of its own, starts a
+/// new worker there, and only a passing report from that one lets the job
+/// succeed. The check job is never recorded in the store, so it can't show
+/// up in a snapshot or an event.
+#[derive(Debug, Clone)]
+pub struct Recheck {
+    /// The check adapter (`output-check`).
+    pub adapter_id: String,
+    pub timeout_base_s: u32,
+    pub timeout_s_per_mb: f64,
+    pub no_progress_s: u32,
+    /// What to check, from the core: never anything the tool's worker said.
+    pub params: Value,
+    /// What the tool's job fails with if the check fails, can't run or
+    /// can't report.
+    pub failure_code: String,
 }
 
 impl JobSpec {
@@ -91,6 +117,7 @@ impl JobSpec {
                 params,
                 secrets,
                 output_format,
+                recheck: None,
             }],
         }
     }
@@ -173,7 +200,18 @@ impl Runner {
         let me = self.clone();
         thread::spawn(move || {
             let job = spec.job.clone();
-            match me.drive(&spec, &token) {
+            // A panic must end the job: this thread is the only thing that
+            // moves it to a final state, so unwinding past it would leave the
+            // job running forever. Unwinding also drops the worker (killing
+            // its tree) and the admission slot.
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.drive(&spec, &token)))
+                    .unwrap_or_else(|_| {
+                        // No payload in the log: it could carry document text.
+                        log::error!("a job driver panicked");
+                        Err(failure("E_INTERNAL"))
+                    });
+            match outcome {
                 Ok(()) => {}
                 Err(f) if f.code == "E_CANCELLED" => {
                     let _ = me.store.transition(&job, JobState::Cancelled);
@@ -288,6 +326,11 @@ impl Runner {
         }
 
         let mut claimed: Vec<(Value, Format)> = Vec::new();
+        // The part each claimed output came from, to pick its re-check.
+        let mut owners: Vec<usize> = Vec::new();
+        // The first part that failed and was skipped (ADR 0004: parts are
+        // independent, so one bad format needn't cost the others).
+        let mut first_failure: Option<JobFailure> = None;
         let mut next = 0;
         let mut retry = false;
         let mut warned_large = false;
@@ -303,6 +346,9 @@ impl Runner {
             while next < spec.parts.len() {
                 let part = &spec.parts[next];
                 let (inputs, watchdog) = &plans[next];
+                // What earlier parts left in out/, to tell a failed part's
+                // half-written files from their outputs.
+                let kept = list_names(&dirs.out);
                 let mut worker = Worker::spawn(
                     &*self.launcher,
                     &launch(part, Some(admission.hard_limit)),
@@ -325,6 +371,7 @@ impl Runner {
                             &result,
                             (spec.parts.len() > 1).then_some(next),
                         )?;
+                        owners.extend(std::iter::repeat_n(next, taken.len()));
                         claimed.extend(
                             taken
                                 .into_iter()
@@ -336,7 +383,27 @@ impl Runner {
                     Err(f) if f.code == "E_RESOURCE_MEMORY" && !retry => {
                         drop(worker);
                         retry = true;
+                        // Re-queueing wipes out/ (store, spec 10.2), so every
+                        // part runs again and nothing from the first try may
+                        // stay listed, outputs or failures alike.
+                        next = 0;
+                        claimed.clear();
+                        owners.clear();
+                        first_failure = None;
+                        let _ = self.store.remove_warnings(job, "PART_FAILED");
                         break;
+                    }
+                    Err(f) if spec.parts.len() > 1 && part_failure_is_isolated(&f.code) => {
+                        drop(worker);
+                        discard_part_files(&dirs.out, &dirs.work, &kept)?;
+                        // Codes and input numbers only: nothing from the
+                        // documents.
+                        events.warning(
+                            "PART_FAILED",
+                            Some(&json!({ "code": f.code, "inputs": part.inputs })),
+                        );
+                        first_failure.get_or_insert(f);
+                        next += 1;
                     }
                     Err(f) => return Err(f),
                 }
@@ -348,9 +415,35 @@ impl Runner {
         // Checked once every worker has exited, so none can change a file
         // after its check.
         check(token)?;
+        if claimed.is_empty() {
+            if let Some(f) = first_failure {
+                return Err(f);
+            }
+        }
         self.set_state(job, JobState::Verifying)?;
         verify_outputs(&self.store, job, &claimed)?;
-        self.set_state(job, JobState::Succeeded)?;
+        // After the claimed outputs are recorded and their worker is gone,
+        // and before the job may succeed (ADR 0006). A failure here fails
+        // the job, which deletes `out/`.
+        for (n, part) in spec.parts.iter().enumerate() {
+            let Some(rc) = &part.recheck else { continue };
+            let files: Vec<(std::path::PathBuf, &str)> = claimed
+                .iter()
+                .zip(&owners)
+                .filter(|(_, &owner)| owner == n)
+                .filter_map(|((o, format), _)| {
+                    let rel = o["path"].as_str()?.strip_prefix("out/")?;
+                    Some((dirs.out.join(rel), format.as_str()))
+                })
+                .collect();
+            self.recheck(&dirs.root, &spec.pool, estimate, rc, &files, token)?;
+        }
+        let end = if first_failure.is_some() {
+            JobState::Partial
+        } else {
+            JobState::Succeeded
+        };
+        self.set_state(job, end)?;
         Ok(())
     }
 
@@ -426,6 +519,64 @@ impl Drop for SlotGuard<'_> {
         lock(&self.runner.shared).scheduler.finish(self.job);
         self.runner.wake.notify_all();
     }
+}
+
+/// Whether a part that failed with `code` leaves the next parts worth
+/// running. Not when the job was stopped (`E_CANCELLED`), when the machine
+/// can't run workers (`E_SANDBOX_UNAVAILABLE`, `E_INSTALL_CORRUPT`), when the
+/// failure is the core's own or an unexplained crash (`E_INTERNAL`), when the
+/// worker broke the protocol (`E_PROTOCOL`: don't trust what it wrote), or
+/// when memory or disk ran out, which the next part would meet too.
+/// Everything else is about that part's own files: corrupt or locked input,
+/// an unsupported feature, a timeout, an invalid output.
+fn part_failure_is_isolated(code: &str) -> bool {
+    !matches!(
+        code,
+        "E_CANCELLED"
+            | "E_SANDBOX_UNAVAILABLE"
+            | "E_INSTALL_CORRUPT"
+            | "E_INTERNAL"
+            | "E_PROTOCOL"
+            | "E_RESOURCE_MEMORY"
+            | "E_RESOURCE_DISK"
+    )
+}
+
+fn list_names(dir: &Path) -> HashSet<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect()
+}
+
+/// Deletes what a failed part left: everything in `work/`, and whatever is in
+/// `out/` besides `kept`. A file left in `out/` could be taken for the next
+/// part's output, since every worker numbers its outputs from 0, so failing
+/// to delete one fails the job.
+fn discard_part_files(
+    out: &Path,
+    work: &Path,
+    kept: &HashSet<std::ffi::OsString>,
+) -> Result<(), JobFailure> {
+    let remove = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(_) => Ok(()),
+    };
+    for entry in std::fs::read_dir(out)
+        .map_err(|_| failure("E_INTERNAL"))?
+        .flatten()
+    {
+        if !kept.contains(&entry.file_name()) {
+            remove(&entry.path()).map_err(|_| failure("E_INTERNAL"))?;
+        }
+    }
+    for entry in std::fs::read_dir(work).into_iter().flatten().flatten() {
+        let _ = remove(&entry.path());
+    }
+    Ok(())
 }
 
 fn check(token: &CancelToken) -> Result<(), JobFailure> {

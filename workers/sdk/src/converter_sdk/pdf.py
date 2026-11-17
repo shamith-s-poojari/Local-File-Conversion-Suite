@@ -29,9 +29,11 @@ from .adapter import (
     RenderedPage,
     ResourceEstimate,
     ValidationReport,
+    issue,
 )
 from .context import JobContext
 from .errors import AdapterError
+from .limits import MB, check_pixels, fit_scale, rendered_size
 from .protocol import ValidationIssue, WarningItem
 
 MAX_PAGES = 5000
@@ -39,8 +41,6 @@ MAX_PAGES = 5000
 
 MAX_FIELD_WALK = 10_000
 """Bound on form fields visited while looking for signatures."""
-
-MB = 1024 * 1024
 
 # --------------------------------------------------------------- inspection
 
@@ -116,16 +116,12 @@ def field_names(pdf: pikepdf.Pdf) -> set[str]:
 
 
 def has_active_content(pdf: pikepdf.Pdf) -> bool:
-    """JavaScript, an automatic action, or attachments (warning ACTIVE_CONTENT_FOUND)."""
-    root = pdf.Root
-    names = root.get(Name.Names)
-    if isinstance(names, pikepdf.Dictionary) and (
-        Name.JavaScript in names or Name.EmbeddedFiles in names
-    ):
-        return True
-    if Name.OpenAction in root or Name.AA in root:
-        return True
-    return False
+    """Whether the file has anything ``active.pdf_active_findings`` reports
+    (warning ACTIVE_CONTENT_FOUND). The warning and the "what's in this file"
+    list use one detector, so they can't disagree."""
+    from . import active  # noqa: PLC0415 - active imports markup; keep this module's import light
+
+    return bool(active.pdf_active_findings(pdf))
 
 
 def encryption_state(ctx: JobContext, path: Path) -> str:
@@ -137,6 +133,14 @@ def encryption_state(ctx: JobContext, path: Path) -> str:
         return "openPassword"
     except pikepdf.PdfError:
         raise AdapterError("E_INPUT_CORRUPT") from None
+
+
+def warn_if_encrypted(ctx: JobContext, path: Path) -> None:
+    """For tools whose output isn't a PDF (pictures, documents) and so never
+    goes through ``save_pdf``: warn ``ENCRYPTION_REMOVED`` when the input had
+    a password or permission limits that the output doesn't carry."""
+    if encryption_state(ctx, path) != "none":
+        ctx.warn_encryption_removed()
 
 
 # -------------------------------------------------------------- page ranges
@@ -187,10 +191,8 @@ def pages_in(ranges: list[tuple[int, int]]) -> list[int]:
     return sorted({p for first, last in ranges for p in range(first, last + 1)})
 
 
-def param_issue(param: str, reason: str, **detail: Any) -> ValidationIssue:
-    """An invalid parameter. The catalog has no parameter error code yet, so
-    this uses ``E_INTERNAL`` with ``param`` set; the core and UI key on ``param``."""
-    return ValidationIssue(code="E_INTERNAL", param=param, detail={"reason": reason, **detail})
+param_issue = issue
+"""Old name of ``converter_sdk.adapter.issue``, kept for adapters not yet moved."""
 
 
 # ---------------------------------------------------------------- bookmarks
@@ -348,6 +350,10 @@ def save_pdf(
             raise AdapterError("E_INPUT_CORRUPT", {"reason": "damaged"})
         detail = {"reason": "unreadable"} if problems is None else {"problems": len(problems)}
         raise AdapterError("E_OUTPUT_INVALID", detail)
+    if encryption is None and ctx.opened_encrypted_pdf:
+        # The output has no password or permission limits although an input
+        # had them, whichever tool wrote the file.
+        ctx.warn_encryption_removed()
     return pages
 
 
@@ -835,7 +841,11 @@ class PdfAdapter(Adapter):
         try:
             if not 1 <= page <= len(doc):
                 raise AdapterError("E_INTERNAL", {"reason": "pageOutOfRange"}, retryable=False)
-            image = doc[page - 1].render(scale=dpi / 72).to_pil()
+            pdf_page = doc[page - 1]
+            width, height = pdf_page.get_size()
+            scale = fit_scale(width, height, dpi / 72)
+            check_pixels(*rendered_size(width, height, scale))
+            image = pdf_page.render(scale=scale).to_pil()
             out.parent.mkdir(parents=True, exist_ok=True)
             image.save(out, format="PNG")
             return RenderedPage(width_px=image.width, height_px=image.height)

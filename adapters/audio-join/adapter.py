@@ -17,7 +17,7 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
-from converter_sdk.convert import issue
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     MUXER,
     audio_encode_args,
@@ -26,9 +26,9 @@ from converter_sdk.media import (
     ffmpeg,
     has_extra_streams,
     probe,
+    validate_media,
 )
 
-MB = 1024 * 1024
 MAX_RATE = 48000
 
 
@@ -50,19 +50,7 @@ class AudioJoinAdapter(Adapter):
     fidelity: ClassVar[Literal["E", "H", "R", "L"]] = "L"
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
-        durations, rates, channels = [], [], []
-        for p in ctx.inputs:
-            ctx.check_cancelled()
-            info = probe(ctx, p)
-            streams = audio_streams(info)
-            if not streams:
-                return ValidationReport(errors=[issue("inputs", "noAudio")])
-            durations.append(duration_s(info))
-            rates.append(int(streams[0].get("sample_rate") or 0))
-            channels.append(int(streams[0].get("channels") or 0))
-        return ValidationReport(
-            metadata={"durations": durations, "rates": rates, "channels": channels}
-        )
+        return validate_media(ctx, "audio")
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]

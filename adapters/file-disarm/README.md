@@ -5,7 +5,7 @@
 | Format | Removed |
 | --- | --- |
 | PDF | JavaScript (document, page, form and link actions), automatic actions on open, actions that launch programs, submit or import form data, open other files, play media or hide fields, attachments, embedded media, XFA. Forms are flattened when they had actions. |
-| docx, xlsx, pptx | VBA macros, ActiveX controls, embedded objects and files, relationships that load from outside the file (templates, pictures, linked objects, workbook links), links to local files and programs, DDE and linking fields, hyperlink actions that run a program. |
+| docx, xlsx, pptx | VBA macros, ActiveX controls, embedded objects and files, relationships that load from outside the file (templates, pictures, linked objects, workbook links), links to local files and programs, DDE and linking fields, hyperlink actions that run a program, data connections (`xl/connections.xml`, query tables), `customXml` parts, custom ribbon (`customUI`) parts, and documents imported with `altChunk`. |
 | svg, html | Scripts, event handlers, `javascript:` and non-image `data:` URLs, frames, objects, `foreignObject`, redirects, `<base>`, and anything loaded from outside the file (pictures, styles, fonts). |
 
 Plain web links (and `#fragment` and `data:image/` references) stay. The `removeLinks` parameter removes the web links too.
@@ -19,6 +19,7 @@ After writing, `verify.py` opens every output in a fresh `python -I` process and
 - Excel 4.0 macro sheets can't be removed safely, so a workbook that has them fails verification.
 - Removing an external workbook link from an xlsx leaves its formulas showing their last values; removing an embedded chart workbook from a pptx leaves the chart's picture but it can't be edited.
 - A signed PDF loses its signature (warning `SIGNATURE_INVALIDATED`). A PDF with an open password needs the password; the output has none.
-- XML with a DOCTYPE is refused as `E_INPUT_CORRUPT`.
+- XML with a DOCTYPE is refused as `E_INPUT_CORRUPT`; the one exception is the standard SVG 1.0/1.1 DOCTYPE without an internal subset, accepted in an SVG.
+- CSS over 64 KB in an SVG or HTML file counts as hostile: it is removed, and reported as "Oversized styles".
 
 Engines: pikepdf, lxml.

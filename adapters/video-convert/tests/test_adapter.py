@@ -12,7 +12,7 @@ from PIL import Image
 
 ADAPTER = Path(__file__).resolve().parents[1]
 CLS = load_adapter_class(ADAPTER)
-pytestmark = pytest.mark.skipif(files.ffmpeg() is None, reason="FFmpeg isn't installed")
+pytestmark = pytest.mark.skipif(files.skip_ffmpeg(), reason="FFmpeg isn't installed")
 
 
 @pytest.fixture(scope="module")

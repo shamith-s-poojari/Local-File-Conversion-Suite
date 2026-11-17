@@ -36,7 +36,15 @@ fn probe_job_id() -> String {
     )
 }
 
-/// Must be refused.
+/// A socket path of about 30 bytes, whatever TMPDIR is. `/tmp` exists on
+/// every Unix we run on; the probe's own ID makes it unique.
+#[cfg(unix)]
+fn short_socket_path(id: &str) -> PathBuf {
+    PathBuf::from("/tmp").join(format!("lfcs-{}.s", id.trim_start_matches("j_probe_")))
+}
+
+/// Must be refused, and with the error a sandbox gives: anything else the
+/// probe reports as `inconclusive`, which fails.
 const DENIED: &[&str] = &[
     "read_sentinel",
     "list_home",
@@ -46,7 +54,19 @@ const DENIED: &[&str] = &[
     "connect_loopback",
     "dns",
     "spawn_shell",
+    // A hard link would make an outside file part of the job.
+    "hardlink_out",
+    // Creating a symlink needs a privilege on Windows.
+    #[cfg(unix)]
+    "symlink_out",
+    #[cfg(unix)]
+    "unix_socket",
 ];
+/// Blocked, or (Linux) readable but holding only the scrubbed variables.
+#[cfg(target_os = "linux")]
+const BLOCKED_OR_SCRUBBED: &[&str] = &["proc_environ"];
+#[cfg(not(target_os = "linux"))]
+const BLOCKED_OR_SCRUBBED: &[&str] = &[];
 /// Must work, or the probe proves nothing.
 const ALLOWED: &[&str] = &["read_job", "write_work"];
 
@@ -101,6 +121,14 @@ pub fn self_test(
     fs::write(&other_file, b"another job's data").map_err(|e| e.to_string())?;
     let sentinel = root.join("sentinel.txt");
     fs::write(&sentinel, b"outside every job").map_err(|e| e.to_string())?;
+    // A Unix-socket listener outside the job. Its path goes in a short,
+    // fixed place: `sun_path` holds ~104 bytes and the scratch folder, under a
+    // long TMPDIR, can exceed that. If it still can't be made the check
+    // reports as failed rather than passing for want of a target.
+    #[cfg(unix)]
+    let socket_path = short_socket_path(&id);
+    #[cfg(unix)]
+    let socket_listener = std::os::unix::net::UnixListener::bind(&socket_path);
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
@@ -111,6 +139,15 @@ pub fn self_test(
         "outsideFile": canonical(&other).join("written.txt"),
         "loopbackPort": port,
     });
+    #[cfg(unix)]
+    let config = {
+        let mut c = config;
+        c["socket"] = canonical(&socket_path)
+            .into_os_string()
+            .to_string_lossy()
+            .into();
+        c
+    };
     let access = run(
         launcher,
         &id,
@@ -119,6 +156,13 @@ pub fn self_test(
         vec!["access".into(), config.to_string().into()],
     )?;
     drop(listener);
+    #[cfg(unix)]
+    let socket_ok = socket_listener.is_ok();
+    #[cfg(unix)]
+    {
+        drop(socket_listener);
+        let _ = fs::remove_file(&socket_path);
+    }
     let report: BTreeMap<String, Value> = serde_json::from_slice(&access.stdout)
         .map_err(|_| format!("the probe produced no report ({})", failure(&access)))?;
 
@@ -136,6 +180,26 @@ pub fn self_test(
                 passed: outcome == expected,
                 outcome,
             });
+        }
+    }
+    for name in BLOCKED_OR_SCRUBBED {
+        let outcome = report
+            .get(*name)
+            .and_then(|v| v["outcome"].as_str())
+            .unwrap_or("missing")
+            .to_owned();
+        attempts.push(Attempt {
+            name: (*name).to_owned(),
+            expected: "blocked",
+            passed: outcome == "blocked" || outcome == "scrubbed",
+            outcome,
+        });
+    }
+    #[cfg(unix)]
+    if !socket_ok {
+        if let Some(a) = attempts.iter_mut().find(|a| a.name == "unix_socket") {
+            a.outcome = "no listener to connect to".into();
+            a.passed = false;
         }
     }
     // The probe must not have written outside, whatever it reported.

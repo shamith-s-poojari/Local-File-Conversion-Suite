@@ -13,10 +13,9 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from .adapter import Adapter, ValidationReport
+from .adapter import Adapter, ValidationReport, issue
 from .context import JobContext, OutputFile
 from .errors import AdapterError
-from .protocol import ValidationIssue
 
 Tier = Literal["E", "H", "R", "L"]
 _RANK = {"E": 0, "H": 1, "R": 2, "L": 3}
@@ -25,10 +24,6 @@ _RANK = {"E": 0, "H": 1, "R": 2, "L": 3}
 def source_format(path: Path) -> str:
     """The sniffed format of a staged input, from its staged extension."""
     return path.suffix.lstrip(".").lower()
-
-
-def issue(param: str, reason: str) -> ValidationIssue:
-    return ValidationIssue(code="E_INTERNAL", param=param, detail={"reason": reason})
 
 
 def worst(tiers: list[Tier]) -> Tier:

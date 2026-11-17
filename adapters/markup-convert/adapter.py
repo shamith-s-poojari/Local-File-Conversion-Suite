@@ -26,7 +26,9 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
+from converter_sdk.active import disarm_markup
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
+from converter_sdk.limits import MB
 from converter_sdk.markup import (
     PAGE_CSS,
     check_zip,
@@ -41,7 +43,6 @@ from converter_sdk.markup import (
     text_to_markdown,
 )
 
-MB = 1024 * 1024
 EDGES: dict[tuple[str, str], Tier] = {
     ("md", "html"): "H", ("md", "pdf"): "H", ("md", "txt"): "L",
     ("txt", "html"): "H", ("txt", "md"): "H", ("txt", "pdf"): "H",
@@ -122,7 +123,15 @@ class MarkupConvertAdapter(ConversionAdapter):
             if dropped:
                 self._warn(ctx, "IMAGES_DROPPED")
             if to == "html":
-                out.write_text(html_document(body, title), "utf-8", newline="\n")
+                # A book is untrusted markup that may carry handlers, javascript:
+                # links or remote loads that sanitising the body let through; the
+                # page is only handed over after the shared disarm has been over it.
+                raw = ctx.temp_path(".html")
+                raw.write_text(html_document(body, title), "utf-8", newline="\n")
+                try:
+                    disarm_markup(raw, out, "html")
+                finally:
+                    raw.unlink(missing_ok=True)
             elif to == "md":
                 md, _ = html_to_markdown(f"<html><body>{body}</body></html>")
                 out.write_text(md, "utf-8", newline="\n")

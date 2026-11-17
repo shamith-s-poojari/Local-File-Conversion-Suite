@@ -7,7 +7,7 @@ use std::time::Duration;
 use converter_jobstore::{
     DataRoot, InputSource, JobError, JobEvent, JobFailure, JobId, JobState, JobStore, Lease,
     OutputFile, Progress, RetryPolicy, SaveDestination, SaveOptions, StoreConfig, SyncOs,
-    SyncProvider, SyncRoots, Warning,
+    SyncProvider, SyncRoots, Warning, MAX_WARNINGS_PER_JOB, WARNINGS_TRUNCATED,
 };
 use tempfile::TempDir;
 
@@ -177,6 +177,24 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
 }
 
 #[test]
+fn job_snapshot_returns_one_job_or_unknown() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "merged.pdf", b"%PDF out")]);
+    let (other, _) = f.store.create_job().unwrap();
+    let one = f.store.job_snapshot(&id).unwrap();
+    assert_eq!(one.job_id, id);
+    assert_eq!(one.state, JobState::Verifying);
+    assert_eq!(f.store.job_snapshot(&other).unwrap().job_id, other);
+    f.store.transition(&id, JobState::Succeeded).unwrap();
+    f.store.discard(&id).unwrap();
+    assert!(f.store.job_snapshot(&other).is_ok());
+    assert!(matches!(
+        f.store.job_snapshot(&id),
+        Err(converter_jobstore::JobError::UnknownJob(_))
+    ));
+}
+
+#[test]
 fn invalid_transitions_are_refused() {
     let f = fixture();
     let (id, _) = f.store.create_job().unwrap();
@@ -338,6 +356,163 @@ fn record_outputs_distrusts_the_worker() {
         assert_eq!(err.code(), Some("E_PROTOCOL"));
     }
     f.store.record_outputs(&id, vec![out("0.pdf", 5)]).unwrap();
+}
+
+#[test]
+fn record_outputs_refuses_device_names_and_non_regular_files() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[]);
+    let dirs = f.store.job_dirs(&id).unwrap();
+    let out = |path: &str| OutputFile {
+        path: path.into(),
+        suggested_name: "x.pdf".into(),
+        extension: "pdf".into(),
+        size_bytes: 1,
+        source: None,
+    };
+    // The names are valid files on Unix, so only the name rule stops them.
+    for name in [
+        "NUL",
+        "con.pdf",
+        "Aux .pdf",
+        "COM1.pdf",
+        "lpt\u{B2}.pdf",
+        "CONOUT$",
+    ] {
+        std::fs::write(dirs.out.join(name), b"1").unwrap();
+        let err = f.store.record_outputs(&id, vec![out(name)]).unwrap_err();
+        assert_eq!(err.code(), Some("E_PROTOCOL"), "{name:?}");
+    }
+    // A directory with a device name hides whatever is inside it.
+    std::fs::create_dir(dirs.out.join("prn")).unwrap();
+    std::fs::write(dirs.out.join("prn").join("a.pdf"), b"1").unwrap();
+    assert!(f.store.record_outputs(&id, vec![out("prn/a.pdf")]).is_err());
+
+    std::fs::create_dir(dirs.out.join("dir.pdf")).unwrap();
+    assert!(f.store.record_outputs(&id, vec![out("dir.pdf")]).is_err());
+    #[cfg(unix)]
+    {
+        let fifo = dirs.out.join("fifo.pdf");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        let err = f
+            .store
+            .record_outputs(&id, vec![out("fifo.pdf")])
+            .unwrap_err();
+        assert_eq!(err.code(), Some("E_PROTOCOL"));
+        // A symlink to a directory is no better than one to a file.
+        std::os::unix::fs::symlink(&dirs.out, dirs.out.join("loop")).unwrap();
+        assert!(f.store.record_outputs(&id, vec![out("loop")]).is_err());
+    }
+    std::fs::write(dirs.out.join("console.pdf"), b"1").unwrap();
+    f.store
+        .record_outputs(&id, vec![out("console.pdf")])
+        .unwrap();
+}
+
+fn warn(code: &str, detail: &str) -> Warning {
+    Warning {
+        code: code.into(),
+        detail: Some(detail.into()),
+    }
+}
+
+#[test]
+fn warnings_are_deduplicated_by_code_keeping_the_first() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    f.store
+        .add_warning(&id, warn("TAGS_DROPPED", "first"))
+        .unwrap();
+    let dup = f
+        .store
+        .add_warning(&id, warn("TAGS_DROPPED", "second"))
+        .unwrap();
+    f.store.add_warning(&id, warn("OTHER", "x")).unwrap();
+    let w = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(w.len(), 2);
+    assert_eq!(w[0].detail.as_deref(), Some("first"));
+    // The dropped duplicate reaches nobody.
+    let json = serde_json::to_string(&dup).unwrap();
+    assert!(!json.contains("second"), "{json}");
+}
+
+#[test]
+fn warnings_are_capped_with_one_truncation_notice() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    // A hundred of the same code, then three hundred distinct ones.
+    for i in 0..100 {
+        f.store
+            .add_warning(&id, warn("SAME", &i.to_string()))
+            .unwrap();
+    }
+    assert_eq!(f.store.job_snapshot(&id).unwrap().warnings.len(), 1);
+    for i in 0..300 {
+        f.store
+            .add_warning(&id, warn(&format!("W_{i}"), "x"))
+            .unwrap();
+    }
+    let w = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(w.len(), MAX_WARNINGS_PER_JOB);
+    assert_eq!(w.iter().filter(|w| w.code == WARNINGS_TRUNCATED).count(), 1);
+    assert_eq!(w.last().unwrap().code, WARNINGS_TRUNCATED);
+    assert_eq!(w[0].detail.as_deref(), Some("0"));
+}
+
+#[test]
+fn each_failed_part_keeps_its_own_part_failed_warning() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    for detail in [
+        r#"{"code":"E_X","inputs":[1]}"#,
+        r#"{"code":"E_X","inputs":[2]}"#,
+    ] {
+        f.store
+            .add_warning(&id, warn("PART_FAILED", detail))
+            .unwrap();
+    }
+    f.store.add_warning(&id, warn("OTHER", "x")).unwrap();
+    f.store.remove_warnings(&id, "PART_FAILED").unwrap();
+    let left = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].code, "OTHER");
+    f.store
+        .add_warning(&id, warn("PART_FAILED", r#"{"code":"E_X","inputs":[2]}"#))
+        .unwrap();
+    // The same part reported twice is still one warning.
+    f.store
+        .add_warning(&id, warn("PART_FAILED", r#"{"code":"E_X","inputs":[2]}"#))
+        .unwrap();
+    assert_eq!(f.store.job_snapshot(&id).unwrap().warnings.len(), 2);
+}
+
+#[test]
+fn a_partial_job_can_be_saved() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "a.pdf", b"%PDF a")]);
+    f.store
+        .record_outputs(
+            &id,
+            vec![OutputFile {
+                path: "0.pdf".into(),
+                suggested_name: "a.pdf".into(),
+                extension: "pdf".into(),
+                size_bytes: 6,
+                source: None,
+            }],
+        )
+        .unwrap();
+    f.store.transition(&id, JobState::Partial).unwrap();
+    let dest = f.tmp.path().join("saved.pdf");
+    f.store
+        .save_outputs(
+            &id,
+            &SaveDestination::File(dest.clone()),
+            SaveOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF a");
 }
 
 #[test]

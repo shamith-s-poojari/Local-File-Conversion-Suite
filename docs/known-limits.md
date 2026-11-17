@@ -6,13 +6,24 @@ What the app can't do, or does only partly. Each tool's README has the details; 
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Sandbox | Works (Seatbelt) | Written (bubblewrap), not yet run on Linux | Written (AppContainer and Job Object), compile-checked only |
+| Sandbox | Works (Seatbelt) | Written (bubblewrap); CI runs its tests, which have never passed yet | Written (AppContainer and Job Object); CI runs its tests, not yet confirmed on a real machine |
+| What CI runs | Lint is on Linux. Rust and Python tests, with FFmpeg | Rust and Python tests, with bubblewrap, FFmpeg and LibreOffice | Rust and Python tests, with FFmpeg; no LibreOffice |
 | FFmpeg, LibreOffice | Found in Homebrew and `/Applications` | Found in the usual package paths | Found in WinGet, Scoop, Chocolatey and `Program Files` |
 | Installer | Not built yet | Not built yet | Not built yet |
 
-Packaging, signing and notarization (T21) are not done, so the app only runs from a development checkout. FFmpeg and LibreOffice aren't bundled: conversions that need them show as unavailable, with the install command, until they're installed.
+Packaging, signing and notarization (T21) are not done, so the app only runs from a development checkout, in development mode: set `LFCS_DEV=1` (the core no longer searches the working directory for a runtime). See the [release plan](release-plan.md). FFmpeg and LibreOffice aren't bundled: conversions that need them show as unavailable, with the install command, until they're installed.
 
 If the sandbox self-test fails on a system, processing stays off there. The app never runs a conversion unsandboxed.
+
+### What CI proves
+
+CI (`.github/workflows/ci.yml`) runs on all three systems, with `CI=true`, under which the sandbox, command-line, end-to-end and network tests and the FFmpeg tests must fail instead of skipping. LibreOffice is installed on Linux only, so the Office tests are checked there and skipped on macOS and Windows. FFmpeg and LibreOffice versions are whatever the runner's package manager installs; they are not pinned.
+
+- **macOS:** the sandbox, end-to-end and network tests have passed.
+- **Windows:** the same tests run, and whether they pass on a Windows runner has not been confirmed. The Windows sandbox is the least tested.
+- **Linux:** bubblewrap is installed and Ubuntu's user-namespace restriction is lifted, so the same tests run. **They have never passed on Linux.** A green run is the first evidence, not a guarantee for other distributions, where bubblewrap or user namespaces may be blocked; the app then turns processing off.
+
+CI doesn't test installers, signing, updates or real-world machines, and it doesn't measure WebView traffic.
 
 ## Files
 
@@ -101,3 +112,6 @@ The catalog has no code for an invalid parameter or a precondition, such as "the
 - WebView network traffic isn't measured yet (spike S4).
 - Sync-folder detection is best effort.
 - The packet-capture network test (`tools/network-test/capture.sh`) hasn't run yet; the canary test has, on macOS.
+- Linux has no system-call (seccomp) filter; adding one needs a new dependency and is deferred.
+- Windows AppContainer permission entries on the app's folders aren't removed on uninstall, because there is no installer yet.
+- See the [threat model](threat-model.md) for what the sandbox does and doesn't cover.

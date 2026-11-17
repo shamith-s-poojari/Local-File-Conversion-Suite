@@ -1,6 +1,8 @@
 """Acceptance tests for file-disarm: fixtures with known active content go in,
 the outputs must open and must have nothing active left."""
 
+# ruff: noqa: E501 - long XML literals
+
 from __future__ import annotations
 
 import json
@@ -390,3 +392,69 @@ def test_job_fails_when_the_verifier_is_broken(
     with pytest.raises(AdapterError) as e:
         cls().execute_conversion(ctx, {})
     assert e.value.detail["reason"] == "verifierFailed"
+
+
+# ------------------------------------------------------- audit 2026-11-15
+
+
+def package(path: Path, parts: dict[str, str]) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, text in parts.items():
+            z.writestr(name, text)
+    return path
+
+
+def rels_of(*items: tuple[str, str, str]) -> str:
+    body = "".join(
+        f'<Relationship Id="{i}" Type="{REL}/{t}" Target="{target}"/>' for i, t, target in items
+    )
+    return f'<Relationships xmlns="{PKG}">{body}</Relationships>'
+
+
+def alt_chunk_docx(path: Path) -> Path:
+    return package(
+        path,
+        {
+            "[Content_Types].xml": f'<Types xmlns="{CT}"><Override PartName="/word/document.xml" ContentType="{MAIN_DOCX}"/></Types>',
+            "word/document.xml": f'<w:document xmlns:w="{W}" xmlns:r="{REL}"><w:body><w:p/><w:altChunk r:id="rId7"/></w:body></w:document>',
+            "word/_rels/document.xml.rels": rels_of(("rId7", "aFChunk", "/word/chunk.html")),
+            "word/chunk.html": "<html><script>x()</script></html>",
+        },
+    )
+
+
+def test_alt_chunk_document_is_disarmed_end_to_end(tmp_path: Path) -> None:
+    src = alt_chunk_docx(tmp_path / "in.docx")
+    assert active_findings(src, "docx")
+    r = run(tmp_path, [src])
+    assert not r.errors
+    with zipfile.ZipFile(r.outputs[0]) as z:
+        assert "word/chunk.html" not in z.namelist()
+    assert active_findings(r.outputs[0], "docx") == []
+
+
+def test_verifier_flags_parts_the_removers_should_have_taken(tmp_path: Path) -> None:
+    job = tmp_path / "job"
+    (job / "out").mkdir(parents=True)
+    planted = {
+        "connections": {"xl/connections.xml": "<connections/>"},
+        "customXml": {"customXml/item1.xml": "<a/>"},
+        "customUI": {"customUI/customUI14.xml": "<customUI/>"},
+        "queryTables": {"xl/queryTables/queryTable1.xml": "<queryTable/>"},
+    }
+    for name, parts in planted.items():
+        package(job / "out" / f"{name}.xlsx", {"[Content_Types].xml": "<Types/>", **parts})
+        assert verify(job, f"out/{name}.xlsx")["findings"], name
+    # An imported document is found from the relationship, whatever the part is called.
+    alt_chunk_docx(job / "out" / "alt.docx")
+    assert verify(job, "out/alt.docx")["findings"]
+    package(job / "out" / "plain.docx", {"[Content_Types].xml": "<Types/>", "word/a.xml": "<a/>"})
+    assert verify(job, "out/plain.docx") == {"findings": []}
+
+
+def test_the_shared_verifier_runner_is_used() -> None:
+    cls = load_adapter_class(ADAPTER)
+    module = sys.modules[cls.__module__]
+    from converter_sdk import verify as shared
+
+    assert module.run_verifier is shared.run_verifier

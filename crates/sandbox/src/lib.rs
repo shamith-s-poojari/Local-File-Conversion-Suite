@@ -23,11 +23,12 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use converter_scheduler::{LaunchSpec, Launcher};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(unix, test)))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -127,11 +128,20 @@ impl SandboxConfig {
     /// Asks `python` where its runtime lives. Runs our own interpreter,
     /// unsandboxed, with no input: this is configuration, not a job.
     pub fn discover(python: &Path, adapters_dir: &Path, runner: &Path) -> Result<Self, String> {
-        let out = Command::new(python)
-            .args([
-                "-I",
-                "-c",
-                "import os, sys, sysconfig\n\
+        Self::discover_within(python, adapters_dir, runner, DISCOVER_TIMEOUT)
+    }
+
+    fn discover_within(
+        python: &Path,
+        adapters_dir: &Path,
+        runner: &Path,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let mut cmd = Command::new(python);
+        cmd.args([
+            "-I",
+            "-c",
+            "import os, sys, sysconfig\n\
                  paths = {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix,\n\
                           os.path.dirname(os.path.realpath(sys.executable)),\n\
                           sysconfig.get_paths()['purelib'], sysconfig.get_paths()['platlib']}\n\
@@ -139,15 +149,11 @@ impl SandboxConfig {
                  print(os.path.realpath(sys.executable))\n\
                  print(os.path.realpath(sys.base_prefix))\n\
                  for p in sorted(paths): print(os.path.realpath(p))",
-            ])
-            .env_clear()
-            .envs(base_env())
-            .output()
-            .map_err(|e| format!("can't run the worker interpreter: {e}"))?;
-        if !out.status.success() {
-            return Err("the worker interpreter failed to describe itself".into());
-        }
-        let text = String::from_utf8(out.stdout).map_err(|_| "non-UTF-8 runtime path")?;
+        ])
+        .env_clear()
+        .envs(base_env());
+        let stdout = run_bounded(cmd, timeout)?;
+        let text = String::from_utf8(stdout).map_err(|_| "non-UTF-8 runtime path")?;
         let mut lines = text.lines().map(PathBuf::from);
         let executable = lines.next().ok_or("no executable path")?;
         let base = lines.next().ok_or("no base prefix")?;
@@ -156,7 +162,7 @@ impl SandboxConfig {
         if let Some(venv) = python.parent().and_then(Path::parent) {
             runtime_read.push(canonical(venv)?);
         }
-        let exec_root = installation_root(&executable, &base);
+        let exec_root = installation_root(&executable, &base)?;
         runtime_read.push(exec_root.clone());
         runtime_read.sort();
         runtime_read.dedup();
@@ -221,21 +227,176 @@ impl SandboxConfig {
     }
 }
 
-/// The interpreter's installation root: for a framework build the whole
-/// versioned install (the `python3.13` launcher re-executes `Python.app`
-/// inside it), otherwise the base prefix.
-fn installation_root(executable: &Path, base: &Path) -> PathBuf {
-    // e.g. /opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/…
-    let mut root = base.to_path_buf();
-    for ancestor in executable.ancestors() {
-        if ancestor.file_name().is_some_and(|n| n == "Frameworks") {
-            if let Some(parent) = ancestor.parent() {
-                root = parent.to_path_buf();
+/// How long the interpreter gets to describe itself. Startup and the
+/// self-test wait on it; a hung interpreter must fail them, not freeze the app.
+const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Runs `cmd` with no input and returns its stdout, or an error if it fails
+/// or outlives `timeout` (then it is killed). Stdout is drained on a thread
+/// so a large answer can't fill the pipe and look like a hang.
+fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("can't run the worker interpreter: {e}"))?;
+    let mut pipe = child.stdout.take().ok_or("no output pipe")?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the worker interpreter did not answer in time".into());
             }
-            break;
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("can't run the worker interpreter: {e}")),
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err("the worker interpreter failed to describe itself".into());
+    }
+    Ok(out)
+}
+
+/// The interpreter's installation root: for a Homebrew framework build the
+/// whole keg (the `python3.13` launcher re-executes `Python.app` inside
+/// it), for any other framework build its `Python.framework/Versions/X`,
+/// otherwise the base prefix. Never a folder that is, or contains, the home
+/// folder or `/`: a python.org install lives under `/Library/Frameworks`, and
+/// granting `/Library` would hand the worker every installed framework,
+/// font and preference file.
+fn installation_root(executable: &Path, base: &Path) -> Result<PathBuf, String> {
+    installation_root_in(executable, base, home_dir().as_deref())
+}
+
+fn installation_root_in(
+    executable: &Path,
+    base: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    // e.g. /opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/…
+    let keg = executable.ancestors().find(|a| {
+        a.parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "Cellar")
+    });
+    // e.g. /Library/Frameworks/Python.framework/Versions/3.13
+    let framework = executable.ancestors().find(|a| {
+        a.parent().is_some_and(|v| {
+            v.file_name().is_some_and(|n| n == "Versions")
+                && v.parent()
+                    .and_then(Path::extension)
+                    .is_some_and(|e| e == "framework")
+        })
+    });
+    for candidate in [keg, framework, Some(base)].into_iter().flatten() {
+        if !too_broad(candidate, home) {
+            return Ok(candidate.to_path_buf());
         }
     }
-    root
+    Err("the interpreter's install folder is too broad to share with workers".into())
+}
+
+/// The current user's home or profile folder, resolved.
+pub fn home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())?;
+    Some(home.canonicalize().map(|c| plain_path(&c)).unwrap_or(home))
+}
+
+/// Folders at the top of a drive that hold other people's or the system's
+/// files. Matched without regard to case, for Windows.
+const BROAD_TOP_LEVEL: &[&str] = &[
+    "applications",
+    "bin",
+    "dev",
+    "etc",
+    "home",
+    "lib",
+    "library",
+    "opt",
+    "private",
+    "proc",
+    "programdata",
+    "program files",
+    "program files (x86)",
+    "root",
+    "sbin",
+    "system",
+    "tmp",
+    "users",
+    "var",
+    "volumes",
+    "windows",
+];
+
+/// Whether `outer` is `inner` or one of its parents (case-insensitive on
+/// Windows, where `Path::starts_with` is not).
+fn encloses(outer: &Path, inner: &Path) -> bool {
+    if !cfg!(windows) {
+        return inner.starts_with(outer);
+    }
+    let mut inner = inner.components();
+    outer.components().all(|o| {
+        inner
+            .next()
+            .is_some_and(|i| i.as_os_str().eq_ignore_ascii_case(o.as_os_str()))
+    })
+}
+
+/// Whether granting `path` would expose far more than an install: a relative
+/// path, a drive root or `/`, the home folder or any folder holding it, or a
+/// system folder such as `/Library`, `/Users` or `C:\Windows`. Engine and
+/// interpreter installs are shared with workers read-only; these must never
+/// be, however the binary was found (`~/bin/ffmpeg` is in `PATH` for many
+/// people).
+pub fn too_broad(path: &Path, home: Option<&Path>) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    let names: Vec<_> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if names.is_empty() || home.is_some_and(|h| encloses(path, h)) {
+        return true;
+    }
+    names.len() == 1
+        && BROAD_TOP_LEVEL
+            .iter()
+            .any(|b| names[0].eq_ignore_ascii_case(b))
+}
+
+/// Whether the current user owns the file or folder (`lstat`: a symlink is
+/// judged by itself). Windows has no owner uid to compare here, so the check
+/// holds there; its development checkouts sit in the user's own profile.
+pub fn owned_by_current_user(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        meta.uid() == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
 }
 
 fn canonical(p: &Path) -> Result<PathBuf, String> {
@@ -456,14 +617,92 @@ mod tests {
         let base = Path::new(
             "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13",
         );
+        let home = Path::new("/Users/me");
         assert_eq!(
-            installation_root(exe, base),
+            installation_root_in(exe, base, Some(home)).unwrap(),
             Path::new("/opt/homebrew/Cellar/python@3.13/3.13.4")
         );
         assert_eq!(
-            installation_root(Path::new("/usr/bin/python3.12"), Path::new("/usr")),
+            installation_root_in(
+                Path::new("/usr/bin/python3.12"),
+                Path::new("/usr"),
+                Some(home)
+            )
+            .unwrap(),
             Path::new("/usr")
         );
+    }
+
+    #[test]
+    fn python_org_framework_grants_its_version_not_library() {
+        let home = Path::new("/Users/me");
+        let base = Path::new("/Library/Frameworks/Python.framework/Versions/3.13");
+        let exe = base.join("bin/python3.13");
+        assert_eq!(installation_root_in(&exe, base, Some(home)).unwrap(), base);
+    }
+
+    #[test]
+    fn an_install_that_is_or_holds_home_is_refused() {
+        let home = Path::new("/Users/me");
+        // A prefix that is the home folder, one that contains it, and `/`.
+        for base in ["/Users/me", "/Users", "/"] {
+            let base = Path::new(base);
+            assert!(
+                installation_root_in(&base.join("bin/python3"), base, Some(home)).is_err(),
+                "{base:?}"
+            );
+        }
+        // Inside home is fine (uv-managed interpreters live there).
+        let uv = Path::new("/Users/me/.local/share/uv/python/cpython-3.13");
+        assert_eq!(
+            installation_root_in(&uv.join("bin/python3"), uv, Some(home)).unwrap(),
+            uv
+        );
+    }
+
+    #[test]
+    fn too_broad_names_the_dangerous_roots() {
+        let home = Some(Path::new("/Users/me"));
+        for p in ["/", "/Users", "/Users/me", "/Library", "/home", "rel/dir"] {
+            assert!(too_broad(Path::new(p), home), "{p}");
+        }
+        for p in [
+            "/usr",
+            "/opt/homebrew/Cellar",
+            "/Users/me/bin",
+            "/Applications/LibreOffice.app",
+        ] {
+            assert!(!too_broad(Path::new(p), home), "{p}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_is_the_current_users() {
+        let t = tempfile::tempdir().unwrap();
+        let meta = std::fs::metadata(t.path()).unwrap();
+        assert!(owned_by_current_user(&meta));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_interpreter_fails_discovery_instead_of_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let fake = t.path().join("python");
+        // exec: the sleep is the child, so killing it closes the pipe.
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        let e = SandboxConfig::discover_within(
+            &fake,
+            t.path(),
+            Path::new("/x"),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(e.contains("did not answer in time"), "{e}");
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

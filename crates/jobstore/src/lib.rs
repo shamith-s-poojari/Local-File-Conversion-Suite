@@ -34,6 +34,7 @@ pub use name::sanitize_file_name;
 pub use save::{FolderLayout, SaveCheck, SaveDestination, SaveOptions, SaveReport};
 pub use store::{
     InputSource, JobDirs, JobEvent, JobFailure, JobSnapshot, JobState, JobStore, OutputFile,
-    Progress, ShutdownReport, Snapshot, StoreConfig, SweepReport, Warning,
+    Progress, ShutdownReport, Snapshot, StoreConfig, SweepReport, Warning, MAX_WARNINGS_PER_JOB,
+    WARNINGS_TRUNCATED,
 };
 pub use sync::{SyncEnv, SyncOs, SyncProvider, SyncRoots};

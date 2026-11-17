@@ -22,8 +22,8 @@
 
 ### How it is tested
 
-- **Canary test** (`crates/app-core/tests/network.rs`): every tool runs on documents whose links, actions, scripts, attachments and metadata all point at a listener on the test machine. The test fails if anything connects to it, or if any engine process holds a network connection. Positive controls make sure the test can see a connection when there is one.
-- **Packet capture** (`tools/network-test/capture.sh`, nightly): records every packet during a full run and fails on any packet from the app's processes.
+- **Canary test** (`crates/app-core/tests/network.rs`): every tool runs on documents whose links, actions, scripts, attachments and metadata all point at a listener on the test machine. The test fails if anything connects to it, or if any engine process holds a network connection. Positive controls make sure the test can see a connection when there is one. It has passed on macOS; CI also runs it on Linux and Windows, where it has not passed yet.
+- **Packet capture** (`tools/network-test/capture.sh`, nightly on macOS and Linux): records every packet during a full run and fails on any packet from the app's processes. It has not run yet; the nightly job is its first run.
 
 ### The WebView
 
@@ -41,11 +41,13 @@ Each job's engines run in a sandbox that can:
 
 The app checks this at every start with a self-test (Settings shows the result). If the sandbox doesn't work, **processing is turned off**: the app never runs an engine without it.
 
-| OS | Sandbox | Status |
+| OS | Sandbox | What is proven |
 |---|---|---|
-| macOS | A separate Seatbelt profile per job | Working; self-test passes |
-| Linux | Bubblewrap namespaces | Written, not yet verified on Linux |
-| Windows | AppContainer | Not implemented yet; processing is off on Windows |
+| macOS | A separate Seatbelt profile per job | The sandbox, end-to-end and network tests have passed on macOS, and CI runs them there |
+| Linux | Bubblewrap namespaces | CI now installs bubblewrap and runs the same tests, but **they have never passed on Linux yet**. Until the first green run, treat the Linux sandbox as unverified |
+| Windows | AppContainer and a Job Object | CI runs the sandbox tests on Windows. Windows is not proven to confine anything the way macOS is, and its network and file confinement are not measured. See [threat model](threat-model.md) |
+
+CI runs on GitHub-hosted runners, which are throwaway machines. A pass there is not a security audit. The app's own self-test at every start is what decides, on each computer, whether processing is allowed.
 
 ## What the app stores
 
@@ -69,12 +71,14 @@ When you add a file, its sandboxed worker lists what the file gives away (locati
 
 **Remove hidden details** (`file-clean`, `media-clean`) removes:
 
-- photos: EXIF (including GPS and the camera's serial number), XMP, IPTC, comments and PNG text, without changing a pixel; a rotated JPEG, TIFF and AVIF are re-encoded once;
-- PDF: document properties, XMP, thumbnails and private application data, and by default comments; hidden layers on request;
-- Word, Excel and PowerPoint: author, last editor, dates, company, template, custom properties and the thumbnail, and by default comments;
-- audio and video: every container, stream and chapter tag, and cover art on request, without re-encoding.
+- photos: EXIF (including GPS and the camera's serial number), XMP, IPTC, thumbnails and comments (JPEG); text, EXIF and time chunks (PNG); EXIF and XMP chunks (WebP). Pixels are unchanged. TIFF and AVIF are re-saved, and a sideways JPEG is turned upright first;
+- PDF: document information, XMP, page-piece data, thumbnails, and metadata inside embedded JPEG pictures; by default comments (annotations other than links and form fields); hidden layers on request;
+- Word, Excel and PowerPoint: author, last editor, revision, print, created and edited dates, company, manager, template, custom properties, thumbnail, the program name and every other `app.xml` field except page and word counts; EXIF and XMP in pictures inside the file; the save time of every part inside the file (set to 1980-01-01); links that load something from outside the file (a template, linked pictures or files, non-web links), with what used them; by default comments; the author and date of tracked changes (the author becomes "Author");
+- audio and video: every container, chapter and stream tag except language; data tracks (such as GPS telemetry) always; cover art on request; no re-encoding. Attached fonts keep their file name and type.
 
-It doesn't remove what is in the content itself: a face or a street sign in a photo, text inside a picture, or tracked changes (they are reported; accept or reject them in your editor first). Legacy `.doc`, `.xls` and `.ppt` files aren't accepted. Each result is read again, and the job fails if a location, device, author or date is still there.
+**Kept:** the text of tracked changes (reported; accept or reject them in your editor first), web and mail links, links to other workbooks in Excel files (formulas need them, so their file paths stay), colour profiles, and embedded files and macros (that is "Make safe to open"). Pictures inside Office files over 64 MB make the job fail rather than go out uncleaned.
+
+It doesn't remove what is in the content itself: a face or a street sign in a photo, or text inside a picture. Legacy `.doc`, `.xls` and `.ppt` files aren't accepted. Each result is read again, and the job fails if a location, device, author or date is still there.
 
 **Make safe to open** (`file-disarm`) removes macros, ActiveX, embedded files and objects, scripts and automatic actions, form submissions, and links that load something from outside the file. Plain web links stay unless you ask. An independent check in a fresh process must find nothing active, or no file is produced.
 
@@ -85,5 +89,7 @@ Paste turns a picture, a table or text into a file in the app's data folder; it 
 ## Known gaps
 
 - WebView traffic is not yet measured (spike S4).
-- The Windows sandbox isn't implemented, so processing is off on Windows.
+- The Windows sandbox has not been shown to work on real Windows machines. Windows AppContainer permission entries (ACEs) granted on the app's folders are not removed when the app is uninstalled, because there is no installer yet.
+- The Linux sandbox has no system-call filter (seccomp); that is deferred. See the [threat model](threat-model.md).
+- Running from a checkout needs development mode (`LFCS_DEV=1`); the app never looks for a runtime in the working directory otherwise.
 - Sync-folder detection covers OneDrive, Dropbox, iCloud Drive and Google Drive at their standard locations, and is **best effort**: a sync client installed elsewhere may not be recognised.

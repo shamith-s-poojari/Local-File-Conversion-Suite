@@ -4,8 +4,6 @@ chosen order (ADR 0003)."""
 from __future__ import annotations
 
 import io
-import warnings
-from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from converter_sdk import (
@@ -18,35 +16,12 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import issue, pdf_bytes_to_output, source_format
-from PIL import Image, ImageOps, UnidentifiedImageError
+from converter_sdk.images import open_image
+from converter_sdk.limits import MB
+from PIL import ImageOps
 
-MB = 1024 * 1024
-MAX_PIXELS = 200_000_000
 SIZES = {"a4": (595.28, 841.89), "letter": (612.0, 792.0)}
 MARGINS = {"none": 0.0, "small": 18.0, "large": 54.0}
-
-
-def _open(path: Path) -> Image.Image:
-    if source_format(path) == "heic":
-        try:
-            import pillow_heif  # noqa: PLC0415
-
-            pillow_heif.register_heif_opener()
-        except ImportError:
-            raise AdapterError("E_INSTALL_CORRUPT", {"missing": "pillow-heif"}) from None
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            img = Image.open(path)
-        if img.width * img.height > MAX_PIXELS:
-            raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"})
-        return img
-    except AdapterError:
-        raise
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
-        raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"}) from None
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
-        raise AdapterError("E_INPUT_CORRUPT") from None
 
 
 class ImagesToPdfAdapter(Adapter):
@@ -59,7 +34,7 @@ class ImagesToPdfAdapter(Adapter):
         pixels = []
         for p in ctx.inputs:
             ctx.check_cancelled()
-            img = _open(p)
+            img = open_image(p)
             pixels.append(img.width * img.height)
             img.close()
         return ValidationReport(metadata={"pixels": pixels})
@@ -84,7 +59,7 @@ class ImagesToPdfAdapter(Adapter):
         try:
             for i, path in enumerate(ctx.inputs):
                 ctx.check_cancelled()
-                img = _open(path)
+                img = open_image(path)
                 try:
                     img.seek(0)
                     img.load()

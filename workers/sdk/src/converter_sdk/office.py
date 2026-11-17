@@ -56,6 +56,37 @@ IMPORT_FILTERS = {
 }
 
 
+CFB_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
+"""Start of a Compound File (OLE2) container."""
+
+OOXML_FORMATS = frozenset({"docx", "pptx", "xlsx"})
+"""Formats that are zip packages. The older ``doc``/``ppt``/``xls`` are
+Compound Files legitimately, so they don't count."""
+
+
+def is_encrypted_ooxml(path: Path, fmt: str) -> bool:
+    """Whether a ``docx``/``pptx``/``xlsx`` is really a Compound File.
+
+    Office wraps a password-protected package in one (an ``EncryptedPackage``
+    stream), so the zip a reader expects isn't there. Reading it as
+    "corrupt" would send the user to repair a file that only needs its
+    password."""
+    if fmt not in OOXML_FORMATS:
+        return False
+    try:
+        with path.open("rb") as f:
+            return f.read(len(CFB_MAGIC)) == CFB_MAGIC
+    except OSError:
+        return False
+
+
+def reject_encrypted_ooxml(path: Path, fmt: str) -> None:
+    """Raise ``E_PASSWORD_REQUIRED`` for a password-protected Office file.
+    The SDK can't open these (no password goes to LibreOffice headless)."""
+    if is_encrypted_ooxml(path, fmt):
+        raise AdapterError("E_PASSWORD_REQUIRED", {"reason": "officePassword"}, retryable=False)
+
+
 def soffice_convert(
     ctx: JobContext,
     src: Path,

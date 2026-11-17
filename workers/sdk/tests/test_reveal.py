@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import zipfile
 from pathlib import Path
@@ -16,7 +17,8 @@ from converter_sdk.errors import AdapterError
 from converter_sdk.protocol import Finding
 from PIL import Image
 
-NO_FFMPEG = files.ffmpeg() is None
+NO_FFMPEG = files.ffmpeg() is None and not os.environ.get("CI")
+"""Skip without FFmpeg only off CI; on CI a missing FFmpeg fails (see below)."""
 
 
 def kinds(found: list[Finding]) -> set[str]:
@@ -161,12 +163,8 @@ def test_pdf_findings(tmp_path: Path) -> None:
 
 
 def test_pdf_hidden_layers(tmp_path: Path) -> None:
-    pikepdf = pytest.importorskip("pikepdf")
-    pytest.importorskip("converter_sdk.pdf")
-    from converter_sdk import pdf as sdkpdf
+    import pikepdf
 
-    if not hasattr(sdkpdf, "hidden_ocgs"):
-        pytest.skip("hidden_ocgs is not in converter_sdk.pdf yet")
     pdf = pikepdf.new()
     pdf.add_blank_page()
     ocg = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.OCG, Name=pikepdf.String("L")))
@@ -231,7 +229,11 @@ def docx(path: Path, body: str = "<w:p><w:r><w:t>Hello</w:t></w:r></w:p>") -> Pa
 def test_docx_properties_and_comments(tmp_path: Path) -> None:
     found = reveal.ooxml_findings(docx(tmp_path / "a.docx"))
     assert set(details(found, "author")) == {"Ada", "Bob", "Acme", "Eve"}
-    assert set(details(found, "dates")) == {"2024-05-01T10:00:00Z", "2024-05-02T10:00:00Z"}
+    assert set(details(found, "dates")) == {
+        "2024-05-01T10:00:00Z",
+        "2024-05-02T10:00:00Z",
+        "Save times of the parts",  # the fixture is written today, not on 1980-01-01
+    }
     assert details(found, "software") == ["Word 16.0"]
     assert details(found, "tags") == ["Template", "1 custom property"]
     assert details(found, "comments") == ["1 comment"]
@@ -412,3 +414,235 @@ def test_png_bytes_are_unused_here(tmp_path: Path) -> None:
     p = tmp_path / "q.png"
     p.write_bytes(buf.getvalue())
     assert reveal.findings(ctx_for(tmp_path), p, include_active=False) == []
+
+
+# ------------------------------------------------------- audit 2026-11-15
+
+FIXED = (1980, 1, 1, 0, 0, 0)
+
+
+def office_dated(path: Path, parts: dict[str, bytes | str], date=FIXED) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(zipfile.ZipInfo(name, date), data)
+    return path
+
+
+def jpeg_with_gps(tmp_path: Path) -> bytes:
+    return exif_jpeg(tmp_path / "gps.jpg").read_bytes()
+
+
+def test_pictures_inside_an_office_file_are_read(tmp_path: Path) -> None:
+    photo = jpeg_with_gps(tmp_path)
+    for folder, name in (("word", "a.docx"), ("xl", "a.xlsx"), ("ppt", "a.pptx")):
+        src = office_dated(tmp_path / name, {f"{folder}/media/image1.jpeg": photo})
+        found = reveal.ooxml_findings(src)
+        assert details(found, "location") == ["37.7749, -122.4194"], folder
+        assert "Acme X100" in details(found, "device")
+
+
+def test_a_clean_picture_inside_an_office_file_reveals_nothing(tmp_path: Path) -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(buf, "PNG")
+    src = office_dated(tmp_path / "a.docx", {"word/media/image1.png": buf.getvalue()})
+    assert reveal.ooxml_findings(src) == []
+
+
+def test_zip_entry_dates_are_a_finding_unless_fixed(tmp_path: Path) -> None:
+    fixed = office_dated(tmp_path / "a.docx", {"word/document.xml": "<a/>"})
+    assert "dates" not in kinds(reveal.ooxml_findings(fixed))
+    dated = office_dated(
+        tmp_path / "b.docx", {"word/document.xml": "<a/>"}, date=(2024, 5, 1, 10, 0, 0)
+    )
+    assert details(reveal.ooxml_findings(dated), "dates") == ["Save times of the parts"]
+
+
+def test_zip_timestamp_extra_fields_are_a_finding(tmp_path: Path) -> None:
+    path = tmp_path / "a.docx"
+    with zipfile.ZipFile(path, "w") as z:
+        info = zipfile.ZipInfo("word/document.xml", FIXED)
+        info.extra = b"UT\x05\x00\x01\x00\x00\x00\x00"  # extended timestamp
+        z.writestr(info, "<a/>")
+    assert details(reveal.ooxml_findings(path), "dates") == ["Save times of the parts"]
+
+
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def rels_xml(*items: tuple[str, str, str, bool]) -> str:
+    body = "".join(
+        f'<Relationship Id="{i}" Type="{OFFICE_REL}/{t}" Target="{target}"'
+        + (' TargetMode="External"' if ext else "")
+        + "/>"
+        for i, t, target, ext in items
+    )
+    return f'<Relationships xmlns="{REL_NS}">{body}</Relationships>'
+
+
+def test_outside_links_other_than_web_links_are_a_finding(tmp_path: Path) -> None:
+    web = office_dated(
+        tmp_path / "web.docx",
+        {
+            "word/_rels/document.xml.rels": rels_xml(
+                ("rId1", "hyperlink", "https://example.com/", True),
+                ("rId2", "hyperlink", "mailto:a@example.com", True),
+                ("rId3", "styles", "styles.xml", False),
+            )
+        },
+    )
+    assert "externalLinks" not in kinds(reveal.ooxml_findings(web))
+    leaky = office_dated(
+        tmp_path / "leaky.docx",
+        {
+            "word/_rels/document.xml.rels": rels_xml(
+                ("rId1", "attachedTemplate", "file:///C:/Users/ada/t.dotm", True),
+                ("rId2", "hyperlink", "file:///C:/Users/ada/notes.docx", True),
+                ("rId3", "image", "http://tracker.example/p.png", True),
+            )
+        },
+    )
+    found = reveal.ooxml_findings(leaky)
+    assert details(found, "externalLinks") == ["3 links to places outside the file"]
+    assert "ada" not in json.dumps([f.model_dump() for f in found])
+
+
+def test_links_to_other_workbooks_are_left_to_the_active_content_reader(tmp_path: Path) -> None:
+    src = office_dated(
+        tmp_path / "a.xlsx",
+        {
+            "xl/externalLinks/_rels/externalLink1.xml.rels": rels_xml(
+                ("rId1", "externalLinkPath", "file:///c:/other.xlsx", True)
+            )
+        },
+    )
+    assert "externalLinks" not in kinds(reveal.ooxml_findings(src))
+
+
+def test_findings_does_not_report_outside_links_twice(tmp_path: Path) -> None:
+    src = office_dated(
+        tmp_path / "a.docx",
+        {
+            "[Content_Types].xml": "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>",
+            "word/document.xml": f"<w:document {W}><w:body/></w:document>",
+            "word/_rels/document.xml.rels": rels_xml(
+                ("rId1", "attachedTemplate", "file:///C:/t.dotm", True)
+            ),
+        },
+    )
+    with_active = reveal.findings(ctx_for(tmp_path), src)
+    assert len(details(with_active, "externalLinks")) == 1
+    without = reveal.findings(ctx_for(tmp_path), src, include_active=False)
+    assert details(without, "externalLinks") == ["1 link to places outside the file"]
+
+
+def test_tracked_change_authors_and_dates_are_findings(tmp_path: Path) -> None:
+    body = (
+        '<w:ins w:id="1" w:author="Ada" w:date="2024-05-01T10:00:00Z">'
+        "<w:r><w:t>x</w:t></w:r></w:ins>"
+        '<w:del w:id="2" w:author="Bob"><w:r><w:delText>y</w:delText></w:r></w:del>'
+        '<w:p><w:pPr><w:rPr><w:ins w:id="3" w:author="Cy" w:date=\'2024-05-02T10:00:00Z\'/>'
+        "</w:rPr></w:pPr></w:p>"
+    )
+    found = reveal.ooxml_findings(docx(tmp_path / "t.docx", body))
+    assert set(details(found, "author")) >= {
+        "Tracked changes by Ada",
+        "Tracked changes by Bob",
+        "Tracked changes by Cy",
+    }
+    assert "Tracked change dates" in details(found, "dates")
+    assert "trackedChanges" in kinds(found)
+
+
+def test_tracked_changes_with_the_placeholder_author_reveal_no_one(tmp_path: Path) -> None:
+    body = '<w:ins w:id="1" w:author="Author"><w:r><w:t>x</w:t></w:r></w:ins>'
+    found = reveal.ooxml_findings(docx(tmp_path / "t.docx", body))
+    assert "Tracked changes by" not in " ".join(details(found, "author"))
+    assert "Tracked change dates" not in details(found, "dates")
+    assert "trackedChanges" in kinds(found)
+
+
+def test_tracked_change_scan_is_linear_and_reads_past_chunks(tmp_path: Path) -> None:
+    import time
+
+    # A tag that never closes costs one scan to the next "<", not one to the end.
+    hostile = '<w:ins w:id="1" w:x="' * 200_000
+    parts = {"word/document.xml": f"<w:document {W}><w:body>{hostile}</w:body></w:document>"}
+    started = time.monotonic()
+    reveal.ooxml_findings(office_dated(tmp_path / "h.docx", parts))
+    assert time.monotonic() - started < 2.0
+    # An author far into a part bigger than one read chunk is still found.
+    filler = "<w:p><w:r><w:t>words</w:t></w:r></w:p>" * 120_000
+    late = '<w:ins w:id="1" w:author="Late Author"><w:r><w:t>x</w:t></w:r></w:ins>'
+    big = {"word/document.xml": f"<w:document {W}><w:body>{filler}{late}</w:body></w:document>"}
+    found = reveal.ooxml_findings(office_dated(tmp_path / "big.docx", big))
+    assert details(found, "author") == ["Tracked changes by Late Author"]
+
+
+def test_a_zip_bomb_office_file_is_refused_before_reading(tmp_path: Path) -> None:
+    src = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        info = zipfile.ZipInfo("word/document.xml", FIXED)
+        info.compress_type = zipfile.ZIP_DEFLATED  # ZipInfo ignores the archive's setting
+        z.writestr(info, b"0" * (400 * 1024 * 1024))
+    with pytest.raises(AdapterError) as e:
+        reveal.ooxml_findings(src)
+    assert e.value.code == "E_LIMIT_EXCEEDED"
+
+
+def pdf_with_jpeg(path: Path, jpeg: bytes, flate: bool = False) -> Path:
+    import zlib
+
+    import pikepdf
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page()
+    stream = pikepdf.Stream(pdf, zlib.compress(jpeg) if flate else jpeg)
+    stream.Type = pikepdf.Name.XObject
+    stream.Subtype = pikepdf.Name.Image
+    stream.Width = stream.Height = 16
+    stream.ColorSpace = pikepdf.Name.DeviceRGB
+    stream.BitsPerComponent = 8
+    stream.Filter = (
+        pikepdf.Array([pikepdf.Name.FlateDecode, pikepdf.Name.DCTDecode])
+        if flate
+        else pikepdf.Name.DCTDecode
+    )
+    pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=stream))
+    pdf.save(path)
+    return path
+
+
+@pytest.mark.parametrize("flate", [False, True], ids=["DCT", "Flate then DCT"])
+def test_metadata_inside_a_pdf_jpeg_is_read(tmp_path: Path, flate: bool) -> None:
+    import pikepdf
+
+    src = pdf_with_jpeg(tmp_path / "a.pdf", jpeg_with_gps(tmp_path), flate)
+    with pikepdf.open(src) as pdf:
+        found = reveal.pdf_findings(pdf)
+    assert details(found, "location") == ["37.7749, -122.4194"]
+    assert "Acme X100" in details(found, "device")
+
+
+def test_a_pdf_jpeg_without_metadata_reveals_nothing(tmp_path: Path) -> None:
+    import pikepdf
+
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16)).save(buf, "JPEG")
+    src = pdf_with_jpeg(tmp_path / "a.pdf", buf.getvalue())
+    with pikepdf.open(src) as pdf:
+        assert reveal.pdf_findings(pdf) == []
+
+
+def test_data_streams_are_a_finding() -> None:
+    info = {
+        "format": {"tags": {}},
+        "streams": [{"codec_type": "video"}, {"codec_type": "data", "tags": {"handler_name": "x"}}],
+    }
+    assert details(reveal.media_findings(info), "hiddenContent") == ["Data tracks"]
+    assert reveal.media_findings({"streams": [{"codec_type": "audio"}]}) == []
+
+
+def test_ffmpeg_is_present_on_ci() -> None:
+    if os.environ.get("CI"):
+        assert files.ffmpeg() is not None, "CI must provide FFmpeg"

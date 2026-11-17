@@ -18,6 +18,7 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     AUDIO_FORMATS,
     LOSSLESS_AUDIO,
@@ -30,7 +31,6 @@ from converter_sdk.media import (
     render_waveform,
 )
 
-MB = 1024 * 1024
 LOSSY = [f for f in AUDIO_FORMATS if f not in LOSSLESS_AUDIO]
 # Decoding keeps every sample, so a lossless target loses nothing more.
 # AAC in ADTS moves into M4A without re-encoding.

@@ -13,7 +13,8 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import AdapterError, JobContext, OutputFile, run_main
-from converter_sdk.pdf import OpenedInput, PdfAdapter, encryption_state, param_issue, save_pdf
+from converter_sdk.adapter import issue
+from converter_sdk.pdf import OpenedInput, PdfAdapter, encryption_state, save_pdf
 from converter_sdk.protocol import ValidationIssue
 
 SECRET_PARAMS = ("userPassword", "ownerPassword", "password")
@@ -45,26 +46,26 @@ class PdfProtectAdapter(PdfAdapter):
     ) -> list[ValidationIssue]:
         if any(k in params for k in SECRET_PARAMS):
             # Params can be logged and stored; passwords may only arrive as secrets.
-            return [param_issue("secrets", "passwordInParams")]
+            return [issue("secrets", "passwordInParams")]
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         pdf = inputs[0].pdf
         mode = params.get("mode", "protect")
         if mode == "protect":
             if pdf.is_encrypted:
-                return [param_issue("mode", "alreadyEncrypted")]
+                return [issue("mode", "alreadyEncrypted")]
             if ctx.secrets is None or ctx.secrets.userPassword is None:
-                return [param_issue("userPassword", "required")]
+                return [issue("userPassword", "required")]
             return []
         if mode == "unlock":
             if not pdf.is_encrypted:
-                return [param_issue("mode", "notEncrypted")]
+                return [issue("mode", "notEncrypted")]
             if self._needs_confirmation(ctx, inputs[0].path, pdf) and (
                 params.get("confirmRights") is not True
             ):
-                return [param_issue("confirmRights", "required")]
+                return [issue("confirmRights", "required")]
             return []
-        return [param_issue("mode", "invalid")]
+        return [issue("mode", "invalid")]
 
     @staticmethod
     def _needs_confirmation(ctx: JobContext, path: Path, pdf: pikepdf.Pdf) -> bool:

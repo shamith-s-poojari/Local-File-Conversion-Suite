@@ -144,3 +144,15 @@ def test_bad_params_are_param_errors(tmp_path: Path) -> None:
     src = make_images(tmp_path, ("png",))
     assert run(tmp_path / "a", src, columns=2).errors[0].param == "columns"
     assert run(tmp_path / "b", src, sheet="a0").errors[0].param == "sheet"
+
+
+def test_every_sheet_layout_stays_under_the_pixel_cap() -> None:
+    """P11: a contact sheet is never larger than the SDK's raster limit."""
+    from converter_conformance.harness import load_adapter_class  # noqa: PLC0415
+    from converter_sdk.limits import MAX_PIXELS  # noqa: PLC0415
+
+    module = __import__("sys").modules[load_adapter_class(ADAPTER).__module__]
+    for sheet in module.SHEET_PX:
+        for columns in range(3, 9):
+            g = module.geometry({"sheet": sheet, "columns": columns})
+            assert g.width * (g.height or g.width * 4) <= MAX_PIXELS

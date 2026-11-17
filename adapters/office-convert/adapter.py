@@ -23,11 +23,17 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.markup import html_to_markdown, markdown_to_html, read_text
-from converter_sdk.office import IMPORT_FILTERS, export_filter, soffice_convert
+from converter_sdk.office import (
+    IMPORT_FILTERS,
+    export_filter,
+    is_encrypted_ooxml,
+    reject_encrypted_ooxml,
+    soffice_convert,
+)
 from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 WRITER = ["docx", "doc", "odt", "rtf"]
 IMPRESS = ["pptx", "ppt", "odp"]
 CALC = ["xlsx", "xls", "ods"]
@@ -83,11 +89,19 @@ class OfficeConvertAdapter(ConversionAdapter):
             if size == 0:
                 raise AdapterError("E_INPUT_CORRUPT")
             sizes.append(size)
+            rel = p.relative_to(ctx.job_dir.resolve()).as_posix()
+            if is_encrypted_ooxml(p, source_format(p)):
+                # Not corrupt: Office wrapped it for a password LibreOffice can't be given.
+                report.errors.append(
+                    ValidationIssue(
+                        code="E_PASSWORD_REQUIRED", input=rel, detail={"reason": "officePassword"}
+                    )
+                )
+                continue
             if source_format(p) == "pdf":
                 try:
                     self._plain_pdf(ctx, p, check_only=True)
                 except AdapterError as e:
-                    rel = p.relative_to(ctx.job_dir.resolve()).as_posix()
                     report.errors.append(ValidationIssue(code=e.code, input=rel))
         report.metadata = {"bytes": sizes}
         return report
@@ -109,6 +123,7 @@ class OfficeConvertAdapter(ConversionAdapter):
         total = len(ctx.inputs)
         for i, path in enumerate(ctx.inputs):
             ctx.check_cancelled()
+            reject_encrypted_ooxml(path, source_format(path))
             ctx.stage("convert", i + 1, total)
             ctx.progress("convert", i, total)
             outputs += self._one(ctx, path, source_format(path), to, params, i)
@@ -134,6 +149,8 @@ class OfficeConvertAdapter(ConversionAdapter):
         elif src in IMPORT_FILTERS:
             import_filter = IMPORT_FILTERS[src]
 
+        # Not disarmed first (audit P15): that would drop objects and links the
+        # conversion should keep; see "Why inputs aren't disarmed" in the README.
         if to == "txt" and src in CALC:
             produced = soffice_convert(ctx, source, TEXT_SHEETS, import_filter=import_filter)
             ctx.warn("FORMULAS_DROPPED")
@@ -200,6 +217,8 @@ class OfficeConvertAdapter(ConversionAdapter):
             outs = []
             for n in range(len(doc)):
                 ctx.check_cancelled()
+                width, height = doc[n].get_size()
+                check_pixels(*rendered_size(width, height, dpi / 72))
                 img = doc[n].render(scale=dpi / 72).to_pil().convert("RGB")
                 name = f"{title}.{to}" if len(doc) == 1 else f"{title}-page-{n + 1}.{to}"
                 out = ctx.output_path(name)
@@ -225,6 +244,8 @@ class OfficeConvertAdapter(ConversionAdapter):
                     return path
                 out = ctx.temp_path(".pdf")
                 pdf.save(out)  # without `encryption`, pikepdf writes it unencrypted
+                # Whatever is made from this copy has no password or limits.
+                ctx.warn_encryption_removed()
                 return out
         except pikepdf.PasswordError:
             raise AdapterError("E_PASSWORD_WRONG" if password else "E_PASSWORD_REQUIRED") from None

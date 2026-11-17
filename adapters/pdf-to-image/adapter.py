@@ -14,18 +14,19 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
+from converter_sdk.adapter import issue
 from converter_sdk.convert import Tier, source_format
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     RangeError,
     pages_in,
-    param_issue,
     parse_page_ranges,
+    warn_if_encrypted,
 )
 from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 MAX_PIXELS_PER_PAGE = 100_000_000
 TARGETS: dict[str, Tier] = {
     "png": "H",
@@ -60,16 +61,16 @@ class PdfToImageAdapter(PdfAdapter):
     ) -> list[ValidationIssue]:
         to = str(params.get("to", ""))
         if to not in TARGETS:
-            return [param_issue("to", "unsupportedConversion")]
+            return [issue("to", "unsupportedConversion")]
         if any(source_format(o.path) != "pdf" for o in inputs):
-            return [param_issue("to", "unsupportedConversion")]
+            return [issue("to", "unsupportedConversion")]
         ranges = str(params.get("pages", "") or "")
         if ranges.strip():
             for o in inputs:
                 try:
                     parse_page_ranges(ranges, o.pages)
                 except RangeError as e:
-                    return [param_issue("pages", e.reason)]
+                    return [issue("pages", e.reason)]
         return []
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
@@ -103,6 +104,7 @@ class PdfToImageAdapter(PdfAdapter):
         ctx.stage("render", 1, 1)
         plans = []
         for path in ctx.inputs:
+            warn_if_encrypted(ctx, path)
             count = self._page_count(ctx, path)
             pages = (
                 list(pages_in(parse_page_ranges(ranges, count)))
@@ -178,6 +180,7 @@ class PdfToImageAdapter(PdfAdapter):
         scale = dpi / 72
         if w * h * scale * scale > MAX_PIXELS_PER_PAGE:
             scale = (MAX_PIXELS_PER_PAGE / (w * h)) ** 0.5
+        check_pixels(*rendered_size(w, h, scale))
         return p.render(scale=scale, may_draw_forms=True).to_pil()
 
     def _save(self, img, out: Path, to: str, params: dict[str, Any]) -> None:

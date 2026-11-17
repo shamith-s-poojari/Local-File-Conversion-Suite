@@ -8,22 +8,28 @@ on:
 permissions:
   contents: read
 
+env:
+  CI: "true"
+  LFCS_DEV: "1" # the checkout's .venv is the runtime
+
+# Action versions are pinned to commit SHAs; the release is in the comment.
+
 jobs:
   fuzz-sniffer:
     name: Fuzz the sniffer (spec section 6)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install nightly and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --locked
+          cargo +nightly install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz for 10 minutes
         working-directory: crates/sniffer
         run: cargo +nightly fuzz run sniff -- -max_total_time=600 -max_len=262144
       - name: Upload crash inputs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sniffer-fuzz-artifacts
           path: crates/sniffer/fuzz/artifacts/
@@ -36,15 +42,22 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
       - name: Install Rust toolchain
         run: rustup toolchain install
       - name: Install Linux packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y strace bubblewrap tcpdump libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          sudo apt-get install -y strace bubblewrap tcpdump ffmpeg libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which stops bubblewrap.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
       - run: uv sync --locked
       - name: Capture and attribute traffic
         run: sudo -E env "PATH=$PATH" tools/network-test/capture.sh

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -12,7 +13,15 @@ from converter_sdk import reveal
 from converter_sdk.media import probe
 
 ADAPTER = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(files.ffmpeg() is None, reason="needs ffmpeg")
+pytestmark = pytest.mark.skipif(
+    files.ffmpeg() is None and not os.environ.get("CI"), reason="needs ffmpeg"
+)
+
+
+def test_ffmpeg_is_present_on_ci() -> None:
+    if os.environ.get("CI"):
+        assert files.ffmpeg() is not None, "CI must provide FFmpeg"
+
 
 TAGS = [
     "-metadata", "location=+37.7749-122.4194+010.0/",
@@ -98,3 +107,60 @@ def test_cover_art_is_kept_unless_asked(tmp_path: Path) -> None:
     gone = run_in_process(ADAPTER, tmp_path / "b", [src], {"removeCoverArt": True})
     gone_info = probed(tmp_path, gone.outputs[0])
     assert [s["codec_type"] for s in gone_info["streams"]] == ["audio"]
+
+
+def test_data_streams_are_dropped_and_the_job_checks(tmp_path: Path) -> None:
+    src = tmp_path / "in.mov"
+    subprocess.run(  # noqa: S603
+        [str(files.ffmpeg()), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+         "-timecode", "01:00:00:00", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    before = probed(tmp_path, src)
+    assert "data" in [s["codec_type"] for s in before["streams"]]
+    assert "Data tracks" in [f.detail for f in reveal.media_findings(before)]
+    r = run_in_process(ADAPTER, tmp_path / "job", [src], {})
+    assert not r.errors
+    out = probed(tmp_path, r.outputs[0])
+    assert [s["codec_type"] for s in out["streams"]] == ["video"]
+    assert "Data tracks" not in [f.detail for f in reveal.media_findings(out)]
+
+
+def test_attachment_filename_and_mimetype_are_kept(tmp_path: Path) -> None:
+    font = tmp_path / "Font.ttf"
+    font.write_bytes(b"\x00\x01\x00\x00fontdata")
+    src = tmp_path / "in.mkv"
+    subprocess.run(  # noqa: S603
+        [str(files.ffmpeg()), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+         "-attach", str(font), "-metadata:s:t:0", "mimetype=font/ttf",
+         "-metadata:s:t:0", "title=Private note", "-metadata", "artist=Ada",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    r = run_in_process(ADAPTER, tmp_path / "job", [src], {})
+    assert not r.errors
+    out = probed(tmp_path, r.outputs[0])
+    attachment = next(s for s in out["streams"] if s["codec_type"] == "attachment")
+    tags = {k.lower(): v for k, v in attachment["tags"].items()}
+    assert tags["filename"] == "Font.ttf" and tags["mimetype"] == "font/ttf"
+    assert "title" not in tags
+    assert b"Private note" not in r.outputs[0].read_bytes()
+    assert "author" not in {f.kind for f in reveal.media_findings(out)}
+
+
+def test_clean_args_drop_data_and_keep_attachment_tags() -> None:
+    from importlib import util
+
+    spec = util.spec_from_file_location("mc_adapter", ADAPTER / "adapter.py")
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    info = {"streams": [
+        {"index": 0, "codec_type": "video", "tags": {"title": "t"}},
+        {"index": 1, "codec_type": "data", "tags": {}},
+        {"index": 2, "codec_type": "attachment",
+         "tags": {"filename": "a.ttf", "mimetype": "font/ttf", "title": "x"}},
+    ]}  # fmt: skip
+    args = module.clean_args(info, False)
+    assert "-0:1" in args
+    assert args.count("title=") == 2  # cleared on the video and on the attachment
+    assert "filename=a.ttf" in args and "mimetype=font/ttf" in args

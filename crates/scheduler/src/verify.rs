@@ -67,8 +67,26 @@ pub fn verify_outputs(
     Ok(())
 }
 
+/// Opens an output for hashing without following a link or blocking on a
+/// FIFO, and refuses anything that isn't a regular file. `record_outputs`
+/// has checked this already; the open is the check that can't be raced.
+fn open_regular(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let f = options.open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    Ok(f)
+}
+
 fn sha256_hex(path: &Path) -> std::io::Result<String> {
-    let mut f = File::open(path)?;
+    let mut f = open_regular(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {
@@ -83,4 +101,31 @@ fn sha256_hex(path: &Path) -> std::io::Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hashing_refuses_links_and_fifos_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            sha256_hex(&file).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let link = dir.path().join("l");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(sha256_hex(&link).is_err());
+        let fifo = dir.path().join("p");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        // Would hang forever without O_NONBLOCK.
+        assert!(sha256_hex(&fifo).is_err());
+    }
 }

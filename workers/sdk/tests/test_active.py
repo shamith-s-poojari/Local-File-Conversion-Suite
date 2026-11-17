@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 import zipfile
 from pathlib import Path
 
@@ -526,3 +527,300 @@ def test_other_formats_have_no_findings(tmp_path: Path) -> None:
     f = tmp_path / "a.png"
     f.write_bytes(b"x")
     assert active_findings(f, "png") == []
+
+
+# ------------------------------------------------------- audit 2026-11-15
+
+
+def svg_with_style(path: Path, css: str, attr: str = "") -> Path:
+    path.write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg"><style>{css}</style><rect {attr}/></svg>'
+    )
+    return path
+
+
+PATHOLOGICAL_CSS = {
+    "a": "a" * 60_000,
+    "url(": "url(" * 15_000,
+    'url("': 'url("' * 12_000,
+    "url(a ": "url(a " * 12_000,
+    "@import": "@import " * 7_000,
+    "expression(": "expression(" * 5_000,
+    "expression + spaces": "expression" + " " * 60_000,
+    "/*": "/*" * 30_000,
+    ";": ";" * 60_000,
+    "{url(h": "{url(h" * 10_000,
+    "behavior": "behavior" * 7_000,
+}
+
+
+@pytest.mark.parametrize("name", list(PATHOLOGICAL_CSS))
+def test_css_scanning_is_linear(tmp_path: Path, name: str) -> None:
+    # Under the old regexes (lazy ``.*?`` and ``[^;{}]*`` in front of a token) each
+    # of the repeated-token strings took minutes; a linear scan takes milliseconds.
+    src = svg_with_style(tmp_path / "a.svg", PATHOLOGICAL_CSS[name])
+    started = time.monotonic()
+    active_findings(src, "svg")
+    disarm_markup(src, tmp_path / "b.svg", "svg")
+    assert time.monotonic() - started < 1.0
+    assert active_findings(tmp_path / "b.svg", "svg") == []
+
+
+def test_css_in_a_style_attribute_is_linear_too(tmp_path: Path) -> None:
+    src = svg_with_style(tmp_path / "a.svg", "", f'style="{"url(" * 15_000}"')
+    started = time.monotonic()
+    disarm_markup(src, tmp_path / "b.svg", "svg")
+    assert time.monotonic() - started < 1.0
+
+
+def test_one_megabyte_of_css_is_hostile_and_removed(tmp_path: Path) -> None:
+    src = svg_with_style(tmp_path / "a.svg", "a" * 1_000_000)
+    started = time.monotonic()
+    found = kinds(active_findings(src, "svg"))
+    counts = disarm_markup(src, tmp_path / "b.svg", "svg")
+    assert time.monotonic() - started < 1.0
+    assert found == {"Oversized styles": "activeContent"}
+    assert counts == {"cssOversize": 1}
+    assert active_findings(tmp_path / "b.svg", "svg") == []  # detector and remover agree
+    assert "aaaa" not in (tmp_path / "b.svg").read_text()
+
+
+def test_css_at_the_cap_is_still_read(tmp_path: Path) -> None:
+    css = "@import url(http://evil.example/a.css);" + "p{color:red}" * 5000
+    assert len(css) < 64 * 1024
+    src = svg_with_style(tmp_path / "a.svg", css)
+    assert disarm_markup(src, tmp_path / "b.svg", "svg") == {
+        "external": 1
+    }  # the url() belongs to the @import
+
+
+def test_css_removals_keep_what_is_harmless(tmp_path: Path) -> None:
+    css = (
+        "@import 'http://evil.example/a.css'; a { fill: url(#g); b: url( data:image/png;base64,AA ) }"
+        " c { width: expression(alert(1)); color: red } d { -moz-binding: url(http://x/y) }"
+        " e { behavior: url(x.htc); margin: 0 } f { background: url( 'http://t/p.png' ) }"
+        ' g { background: url("rel/img.png") } h { background: url(http://unclosed'
+    )
+    src = svg_with_style(tmp_path / "a.svg", css)
+    counts = disarm_markup(src, tmp_path / "b.svg", "svg")
+    assert counts["cssActive"] == 3 and counts["external"] >= 4
+    text = (tmp_path / "b.svg").read_text()
+    assert "evil.example" not in text and "t/p.png" not in text and "unclosed" not in text
+    assert "url(#g)" in text and "data:image/png" in text and "rel/img.png" in text
+    assert "color: red" in text and "margin: 0" in text
+    assert active_findings(tmp_path / "b.svg", "svg") == []
+
+
+# ----------------------------------------------------------------- DOCTYPE
+
+SVG11 = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+    '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+    '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n'
+    '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="1" height="1"/></svg>'
+)
+SVG10 = SVG11.replace("1.1//EN", "1.0//EN").replace(
+    "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd",
+    "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd",
+)
+
+
+@pytest.mark.parametrize("text", [SVG11, SVG10], ids=["1.1", "1.0"])
+def test_standard_svg_doctype_is_accepted(tmp_path: Path, text: str) -> None:
+    src = tmp_path / "a.svg"
+    src.write_text(text)
+    assert active_findings(src, "svg") == []
+    disarm_markup(src, tmp_path / "b.svg", "svg")
+    assert "DOCTYPE" not in (tmp_path / "b.svg").read_text()
+    etree.parse(str(tmp_path / "b.svg"))
+
+
+@pytest.mark.parametrize(
+    "doctype",
+    [
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [<!ENTITY e "x">]>',
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://evil.example/svg11.dtd">',
+        '<!DOCTYPE svg PUBLIC "-//EVIL//DTD//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
+        '<!DOCTYPE svg SYSTEM "file:///etc/passwd">',
+        "<!DOCTYPE svg [ <!ELEMENT svg ANY> ]>",
+    ],
+    ids=[
+        "internal subset",
+        "other system id",
+        "other public id",
+        "mismatched ids",
+        "system",
+        "bare subset",
+    ],
+)
+def test_other_svg_doctypes_are_still_refused(tmp_path: Path, doctype: str) -> None:
+    src = tmp_path / "a.svg"
+    src.write_text(f'{doctype}<svg xmlns="http://www.w3.org/2000/svg"/>')
+    with pytest.raises(AdapterError) as e:
+        active_findings(src, "svg")
+    assert e.value.code == "E_INPUT_CORRUPT"
+
+
+def test_the_svg_doctype_is_not_accepted_in_office_parts() -> None:
+    with pytest.raises(AdapterError):
+        parse_xml(SVG11.encode())
+    assert parse_xml(SVG11.encode(), svg=True).tag.endswith("svg")
+
+
+# --------------------------------------------------------- more active content
+
+SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def xlsx_package(extra: dict[str, bytes | str], workbook_rels=()) -> dict[str, bytes | str]:
+    return {
+        "[Content_Types].xml": (
+            f'<Types xmlns="{CT}"><Override PartName="/xl/workbook.xml" ContentType="x"/>'
+            '<Override PartName="/xl/connections.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.connections+xml"/>'
+            '<Override PartName="/customXml/itemProps1.xml" ContentType="p"/></Types>'
+        ),
+        "_rels/.rels": rels(("rId1", "officeDocument", "xl/workbook.xml", False)),
+        "xl/workbook.xml": f'<workbook xmlns="{SHEET_NS}"><sheets/></workbook>',
+        "xl/_rels/workbook.xml.rels": rels(*workbook_rels),
+        **extra,
+    }
+
+
+def test_xlsx_data_connections_are_found_and_removed(tmp_path: Path) -> None:
+    src = write_zip(
+        tmp_path / "a.xlsx",
+        xlsx_package(
+            {
+                "xl/connections.xml": f'<connections xmlns="{SHEET_NS}"><connection id="1" name="c"><webPr url="http://evil.example/q"/></connection></connections>',
+                "xl/queryTables/queryTable1.xml": f'<queryTable xmlns="{SHEET_NS}" name="q" connectionId="1"/>',
+                "xl/queryTables/_rels/queryTable1.xml.rels": rels(),
+                "xl/tables/table1.xml": f'<table xmlns="{SHEET_NS}"/>',
+                "xl/tables/_rels/table1.xml.rels": rels(
+                    ("rId1", "queryTable", "../queryTables/queryTable1.xml", False)
+                ),
+            },
+            [("rId5", "connections", "connections.xml", False)],
+        ),
+    )
+    assert kinds(active_findings(src, "xlsx")) == {"Data connections": "externalLinks"}
+    counts = disarm_ooxml(src, tmp_path / "b.xlsx")
+    assert counts["connections"] == 2
+    assert active_findings(tmp_path / "b.xlsx", "xlsx") == []
+    with zipfile.ZipFile(tmp_path / "b.xlsx") as z:
+        names = z.namelist()
+        assert not [n for n in names if "connections" in n.lower() or "queryTable" in n]
+        assert b"connections" not in z.read("[Content_Types].xml")
+        assert b"queryTable" not in z.read("xl/tables/_rels/table1.xml.rels")
+        assert b"rId5" not in z.read("xl/_rels/workbook.xml.rels")
+
+
+def test_custom_xml_parts_are_found_and_removed(tmp_path: Path) -> None:
+    src = write_zip(
+        tmp_path / "a.xlsx",
+        xlsx_package(
+            {
+                "customXml/item1.xml": "<root>data</root>",
+                "customXml/itemProps1.xml": "<props/>",
+                "customXml/_rels/item1.xml.rels": rels(
+                    ("rId1", "customXmlProps", "itemProps1.xml", False)
+                ),
+            },
+            [("rId9", "customXml", "../customXml/item1.xml", False)],
+        ),
+    )
+    assert kinds(active_findings(src, "xlsx")) == {"Custom data parts": "activeContent"}
+    counts = disarm_ooxml(src, tmp_path / "b.xlsx")
+    assert counts["customXml"] == 2
+    assert active_findings(tmp_path / "b.xlsx", "xlsx") == []
+    with zipfile.ZipFile(tmp_path / "b.xlsx") as z:
+        assert not [n for n in z.namelist() if n.lower().startswith("customxml")]
+        assert b"customXml" not in z.read("xl/_rels/workbook.xml.rels")
+        assert b"itemProps" not in z.read("[Content_Types].xml")
+
+
+RIBBON = "http://schemas.microsoft.com/office/2006/01/customui"
+
+
+def ribbon_package(ui: str) -> dict[str, bytes | str]:
+    return xlsx_package(
+        {"customUI/customUI14.xml": ui},
+        [],
+    ) | {
+        "_rels/.rels": rels(
+            ("rId1", "officeDocument", "xl/workbook.xml", False),
+            ("rId2", "ui/extensibility", "customUI/customUI14.xml", False),
+        )
+    }
+
+
+def test_custom_ribbon_with_callbacks_is_active(tmp_path: Path) -> None:
+    ui = (
+        f'<customUI xmlns="{RIBBON}" onLoad="Boot"><ribbon><tabs><tab id="t">'
+        '<group id="g"><button id="b" label="x" onAction="Run"/></group></tab></tabs></ribbon></customUI>'
+    )
+    src = write_zip(tmp_path / "a.xlsx", ribbon_package(ui))
+    assert kinds(active_findings(src, "xlsx")) == {"Custom ribbon code": "activeContent"}
+    assert disarm_ooxml(src, tmp_path / "b.xlsx")["customUI"] == 1
+    assert active_findings(tmp_path / "b.xlsx", "xlsx") == []
+    with zipfile.ZipFile(tmp_path / "b.xlsx") as z:
+        assert not [n for n in z.namelist() if n.lower().startswith("customui")]
+        assert b"customUI" not in z.read("_rels/.rels")
+
+
+def test_custom_ribbon_without_callbacks_is_not_reported(tmp_path: Path) -> None:
+    ui = f'<customUI xmlns="{RIBBON}"><ribbon><tabs><tab idMso="TabHome"/></tabs></ribbon></customUI>'
+    src = write_zip(tmp_path / "a.xlsx", ribbon_package(ui))
+    assert active_findings(src, "xlsx") == []
+
+
+def test_alt_chunk_imports_are_found_and_removed(tmp_path: Path) -> None:
+    body = '<w:p><w:r><w:t>kept</w:t></w:r></w:p><w:altChunk r:id="rId7"/>'
+    src = write_zip(
+        tmp_path / "a.docx",
+        {
+            "[Content_Types].xml": f'<Types xmlns="{CT}"><Override PartName="/word/document.xml" ContentType="{MAIN_DOCX}"/><Default Extension="mht" ContentType="message/rfc822"/></Types>',
+            "word/document.xml": f'<w:document xmlns:w="{W}" xmlns:r="{REL}"><w:body>{body}</w:body></w:document>',
+            "word/_rels/document.xml.rels": rels(("rId7", "aFChunk", "/word/chunk.mht", False)),
+            "word/chunk.mht": "MIME-Version: 1.0\r\n<script>x</script>",
+            "word/_rels/chunk.mht.rels": rels(("rId1", "image", "http://t/p.png", True)),
+        },
+    )
+    assert kinds(active_findings(src, "docx")) == {"Imports other documents": "activeContent"}
+    counts = disarm_ooxml(src, tmp_path / "b.docx")
+    assert counts["altChunks"] == 1
+    assert active_findings(tmp_path / "b.docx", "docx") == []
+    with zipfile.ZipFile(tmp_path / "b.docx") as z:
+        assert "word/chunk.mht" not in z.namelist()
+        document = z.read("word/document.xml").decode()
+        assert "altChunk" not in document and "kept" in document
+
+
+# ----------------------------------------------------------------- P13
+
+
+def test_word_and_deck_parts_are_computed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from converter_sdk import active
+
+    calls = {"word": 0, "deck": 0}
+    real = active._Package
+
+    class Counting(real):  # type: ignore[misc, valid-type]
+        def word_parts(self) -> list[str]:
+            calls["word"] += 1
+            return super().word_parts()
+
+        def deck_parts(self) -> list[str]:
+            calls["deck"] += 1
+            return super().deck_parts()
+
+    monkeypatch.setattr(active, "_Package", Counting)
+    parts: dict[str, bytes | str] = {"[Content_Types].xml": f'<Types xmlns="{CT}"/>'}
+    for i in range(60):
+        parts[f"word/part{i}.xml"] = f'<w:x xmlns:w="{W}"/>'
+        parts[f"ppt/slides/slide{i}.xml"] = "<s/>"
+    src = write_zip(tmp_path / "a.docx", parts)
+    disarm_ooxml(src, tmp_path / "b.docx")
+    assert calls["word"] <= 2 and calls["deck"] <= 2

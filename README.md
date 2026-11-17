@@ -20,13 +20,16 @@ And, for every file you add ([ADR 0005](docs/adr/0005-safety-privacy-and-conveni
 - **Contact sheets** of photos, PDF pages or a video; **suggestions** for the selection; **folders** in and out with their layout kept; **paste** a picture or a table, and **copy** a result.
 - **`lfcs`**, a command line that runs the same sandboxed tools. See [apps/cli](apps/cli/README.md).
 
-**Status:** On macOS, every conversion and tool runs end to end in a per-job sandbox. The Windows and Linux builds compile and pass the lint and type checks, but their sandboxes haven't run on those systems yet. Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't. There are no installers yet. See [known limits](docs/known-limits.md).
+**Status:** On macOS, every conversion and tool runs end to end in a per-job sandbox. CI runs the same tests on Windows and Linux, but the Linux sandbox tests have never passed, and the Windows sandbox is unconfirmed on real machines. See [known limits](docs/known-limits.md#what-ci-proves). Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't. There are no installers yet, so the app runs only from a checkout in development mode (below). See [known limits](docs/known-limits.md).
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
 - [Phase 1 specification](docs/specs/phase-1.md) (wins wherever it differs from the blueprint)
 - [Architecture decision records](docs/adr/)
 - [Privacy](docs/privacy.md): what "processed on your device" means, and how it's tested
 - [Known limits](docs/known-limits.md)
+- [Threat model](docs/threat-model.md)
+- [Release plan](docs/release-plan.md): what stands between this and a 1.0
+- [Contributing](CONTRIBUTING.md) and [security reports](SECURITY.md)
 
 ## Prerequisites
 
@@ -62,6 +65,31 @@ pnpm check
 ```bash
 pnpm dev
 ```
+
+## Development mode
+
+There is no bundled runtime yet, so the app and `lfcs` use this checkout's `.venv` as the Python runtime. That is opt-in. Set `LFCS_DEV=1`, or pass `lfcs --dev` (coming; not available yet), when running from a checkout:
+
+```bash
+LFCS_DEV=1 pnpm dev
+```
+
+```bash
+LFCS_DEV=1 cargo run -p lfcs -- doctor
+```
+
+Without it the core doesn't search the working directory for a runtime, so a hostile folder can't supply one. The core also refuses a development runtime that isn't inside the repository or isn't owned by the current user.
+
+## Running the full tests
+
+`pnpm check` runs everything that needs no outside program: the generated-code check, type checks, frontend tests, `cargo fmt`, `clippy`, the Rust tests, the adapter registry check, `ruff` and `pytest`. Some tests start programs that aren't part of the repository, and skip when they aren't there. Install them to run the whole suite (CI does, and with `CI=true` those tests fail instead of skipping):
+
+- **FFmpeg**: audio and video tests. `brew install ffmpeg`, `sudo apt-get install ffmpeg` or `choco install ffmpeg`.
+- **LibreOffice**: Office conversion tests. `brew install --cask libreoffice` or `sudo apt-get install libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress`. Run its tests one at a time, not alongside other test runs: `uv run pytest adapters/office-convert`, then the end-to-end test alone, with `cargo test -p converter-app-core --test end_to_end`.
+- **bubblewrap** (Linux only): the sandbox. `sudo apt-get install bubblewrap`. On Ubuntu 24.04 and later, AppArmor blocks unprivileged user namespaces; as a test machine only, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The sandbox, command-line, end-to-end and network tests need it. Without it the app turns processing off.
+- **strace and tcpdump** (Linux, only for `tools/network-test/capture.sh`).
+
+The Rust tests that run the workers need `uv sync` first, and `LFCS_DEV=1` if you run `lfcs` yourself.
 
 ## Repository layout
 

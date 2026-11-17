@@ -12,6 +12,7 @@ use crate::error::JobError;
 use crate::fsutil::{create_private_dir, normalize, remove_with_retry, RetryPolicy};
 use crate::id::JobId;
 use crate::lease::Lease;
+use crate::name::is_windows_device_name;
 use crate::sync::SyncRoots;
 
 /// Job states (spec section 10.1):
@@ -80,6 +81,12 @@ impl JobState {
         )
     }
 }
+
+/// Most warnings one job keeps, counting the [`WARNINGS_TRUNCATED`] notice.
+pub const MAX_WARNINGS_PER_JOB: usize = 64;
+
+/// Warning code added once when the cap dropped warnings.
+pub const WARNINGS_TRUNCATED: &str = "WARNINGS_TRUNCATED";
 
 /// A warning attached to a job. `detail` is worker text: the UI renders it as
 /// plain text only.
@@ -548,11 +555,45 @@ impl JobStore {
         })
     }
 
-    /// Adds a warning. The event carries just this warning.
+    /// Adds a warning. The event carries just this warning, or none if it
+    /// was dropped.
+    ///
+    /// A job keeps one warning per code (the first, with its detail) and at
+    /// most [`MAX_WARNINGS_PER_JOB`] in all, the last being
+    /// [`WARNINGS_TRUNCATED`]. `PART_FAILED` is the exception to the first
+    /// rule: each failed part gets its own, told apart by detail. A worker can send warnings without limit; the
+    /// list is shown to the user and held in memory, so the store bounds it
+    /// whoever the caller is.
     pub fn add_warning(&self, id: &JobId, warning: Warning) -> Result<JobEvent, JobError> {
         self.update_active(id, |job| {
-            job.warnings.push(warning.clone());
-            vec![warning]
+            let n = job.warnings.len();
+            let repeated = job.warnings.iter().any(|w| {
+                w.code == warning.code
+                    && (warning.code != "PART_FAILED" || w.detail == warning.detail)
+            });
+            if repeated || n >= MAX_WARNINGS_PER_JOB {
+                return Vec::new();
+            }
+            // Keep the last slot for the notice that some were dropped.
+            let kept = if n + 1 == MAX_WARNINGS_PER_JOB {
+                Warning {
+                    code: WARNINGS_TRUNCATED.to_owned(),
+                    detail: None,
+                }
+            } else {
+                warning
+            };
+            job.warnings.push(kept.clone());
+            vec![kept]
+        })
+    }
+
+    /// Removes every warning with `code`, for a job about to run again from
+    /// the start. Emits no warning event: events carry additions only.
+    pub fn remove_warnings(&self, id: &JobId, code: &str) -> Result<JobEvent, JobError> {
+        self.update_active(id, |job| {
+            job.warnings.retain(|w| w.code != code);
+            Vec::new()
         })
     }
 
@@ -638,20 +679,19 @@ impl JobStore {
         let inner = self.lock();
         Snapshot {
             seq: inner.seq,
-            jobs: inner
-                .jobs
-                .values()
-                .map(|j| JobSnapshot {
-                    job_id: j.id.clone(),
-                    state: j.state,
-                    stage: j.stage.clone(),
-                    progress: j.progress,
-                    warnings: j.warnings.clone(),
-                    error: j.error.clone(),
-                    outputs: j.outputs.clone(),
-                })
-                .collect(),
+            jobs: inner.jobs.values().map(job_snapshot_of).collect(),
         }
+    }
+
+    /// One job's current state. Callers that need a single job use this
+    /// rather than cloning every job's warnings and outputs (audit R10).
+    pub fn job_snapshot(&self, id: &JobId) -> Result<JobSnapshot, JobError> {
+        let inner = self.lock();
+        inner
+            .jobs
+            .get(id)
+            .map(job_snapshot_of)
+            .ok_or_else(|| JobError::UnknownJob(id.clone()))
     }
 
     /// Deletes a finished job and its directory (spec section 10.5,
@@ -754,6 +794,18 @@ impl JobStore {
     }
 }
 
+fn job_snapshot_of(j: &Job) -> JobSnapshot {
+    JobSnapshot {
+        job_id: j.id.clone(),
+        state: j.state,
+        stage: j.stage.clone(),
+        progress: j.progress,
+        warnings: j.warnings.clone(),
+        error: j.error.clone(),
+        outputs: j.outputs.clone(),
+    }
+}
+
 fn check_transition(job: &Job, to: JobState) -> Result<(), JobError> {
     if job.busy || !job.state.can_go_to(to) {
         return Err(JobError::InvalidTransition {
@@ -777,6 +829,10 @@ fn check_output(out: &Path, o: &OutputFile) -> Result<(), JobError> {
     // Every step must be a real directory or file, not a link.
     let mut current = out.to_path_buf();
     for c in rel.components() {
+        // Windows would open `NUL` or `CON.pdf` as a device, not the file.
+        if c.as_os_str().to_str().is_none_or(is_windows_device_name) {
+            return Err(JobError::InvalidOutput("output name is a device name"));
+        }
         current.push(c);
         let meta = std::fs::symlink_metadata(&current)
             .map_err(|_| JobError::InvalidOutput("output file is missing"))?;

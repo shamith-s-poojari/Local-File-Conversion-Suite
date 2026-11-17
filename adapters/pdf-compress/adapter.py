@@ -18,13 +18,13 @@ import shutil
 from typing import Any, ClassVar, Literal
 
 import pikepdf
-from converter_sdk import JobContext, OutputFile, run_main
+from converter_sdk import AdapterError, JobContext, OutputFile, run_main
 from converter_sdk.convert import ConversionAdapter
+from converter_sdk.limits import MB, check_pixels
 from converter_sdk.pdf import PdfAdapter, save_pdf
 from pikepdf import Name
 from PIL import Image
 
-MB = 1024 * 1024
 LEVELS: dict[str, tuple[int, int] | None] = {
     "balanced": (150, 75),
     "strong": (96, 55),
@@ -71,7 +71,12 @@ def candidate(obj: pikepdf.Object) -> bool:
 def recompress(obj: pikepdf.Stream, max_side: int, quality: int) -> tuple[bool, bool]:
     """Re-encode one picture in place: (replaced, downscaled)."""
     try:
+        # The declared size decides what decoding allocates; a picture over
+        # the limit is left as it is rather than failing the whole file.
+        check_pixels(int(obj.get(Name.Width, 0)), int(obj.get(Name.Height, 0)))
         img = pikepdf.PdfImage(obj).as_pil_image()
+    except AdapterError:
+        return False, False
     except Exception:  # noqa: BLE001 - pikepdf raises many types for odd images
         return False, False
     if img.mode not in ("L", "RGB"):

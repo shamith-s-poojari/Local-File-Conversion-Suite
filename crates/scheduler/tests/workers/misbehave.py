@@ -103,6 +103,31 @@ for raw in sys.stdin.buffer:
             f.write(str(child.pid))
         while True:
             time.sleep(1)
+    elif mode == "escape_group":
+        # A descendant in its own session is outside the worker's process
+        # group, so only a hunt by parent and session finds it.
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True
+        )
+        with open("child.pid", "w") as f:
+            f.write(str(child.pid))
+        send({"type": "executeResult", "outputs": [write_output("o.pdf", PDF)], "fidelity": "E"})
+    elif mode == "fill_work":
+        os.makedirs("work", exist_ok=True)
+        with open(os.path.join("work", "big"), "wb") as f:
+            f.write(b"\0" * 3_000_000)
+        while True:
+            time.sleep(1)
+    elif mode == "write_then_fail":
+        # Half an output and some scratch, then an ordinary failure.
+        write_output("0.pdf", PDF)
+        os.makedirs("work", exist_ok=True)
+        with open(os.path.join("work", "scratch"), "wb") as f:
+            f.write(b"x")
+        send({"type": "error", "code": "E_PASSWORD_REQUIRED", "retryable": True})
+    elif mode == "hang_execute":
+        while True:
+            time.sleep(1)
     elif mode == "exit_silently":
         sys.exit(3)
     else:

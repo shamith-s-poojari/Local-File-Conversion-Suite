@@ -29,8 +29,8 @@ pub(crate) struct Args {
     pub job_id: String,
     /// Processes the worker may run at once, itself included. Windows
     /// enforces it with the Job Object; macOS limits what may be executed
-    /// and Linux gives each worker its own PID namespace instead.
-    #[cfg_attr(unix, allow(dead_code))]
+    /// and Linux caps tasks with `RLIMIT_NPROC` (see `task_cap`).
+    #[cfg_attr(all(unix, not(target_os = "linux")), allow(dead_code))]
     pub max_processes: u32,
     pub program: Vec<String>,
 }
@@ -114,10 +114,44 @@ mod unix {
 
     const POLL: Duration = Duration::from_millis(50);
 
+    /// `RLIMIT_NPROC` for a worker: what the machine runs now, plus room per
+    /// permitted process. It counts tasks, threads included (ffmpeg and
+    /// LibreOffice start dozens), and is checked against the user's tasks
+    /// system-wide where the limit is inherited, so a small absolute number
+    /// would break workers outright. The point is to stop a fork bomb, not
+    /// to count processes: the memory watchdog and the PID namespace do the
+    /// precise work. Unix-wide so it can be tested anywhere.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn task_cap(tasks_now: u64, max_processes: u32) -> u64 {
+        tasks_now
+            .saturating_add(256)
+            .saturating_add(256 * u64::from(max_processes))
+    }
+
+    /// Kernel scheduling entities now: the fourth field of `/proc/loadavg`
+    /// (`running/total`).
+    #[cfg(target_os = "linux")]
+    fn tasks_now() -> u64 {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .nth(3)?
+                    .split('/')
+                    .nth(1)?
+                    .parse::<u64>()
+                    .ok()
+            })
+            // Unreadable /proc: a generous guess rather than no limit at all.
+            .unwrap_or(32768)
+    }
+
     pub fn main(args: Args) -> ExitCode {
         let mut cmd = Command::new(&args.program[0]);
         cmd.args(&args.program[1..]);
         let limit = args.memory_limit;
+        #[cfg(target_os = "linux")]
+        let nproc = task_cap(tasks_now(), args.max_processes) as libc::rlim_t;
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
             cmd.pre_exec(move || {
@@ -136,6 +170,11 @@ mod unix {
                         rlim_max: cap,
                     };
                     libc::setrlimit(libc::RLIMIT_AS, &lim);
+                    let procs = libc::rlimit {
+                        rlim_cur: nproc,
+                        rlim_max: nproc,
+                    };
+                    libc::setrlimit(libc::RLIMIT_NPROC, &procs);
                 }
                 let _ = limit;
                 Ok(())
@@ -264,5 +303,17 @@ mod unix {
                     .and_then(|r| r.parse::<u64>().ok())
             })
             .map_or(0, |pages| pages * page)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::unix::task_cap;
+
+    #[test]
+    fn the_task_cap_leaves_room_but_is_finite() {
+        assert_eq!(task_cap(1000, 1), 1000 + 256 + 256);
+        assert_eq!(task_cap(0, 3), 256 + 768);
+        assert_eq!(task_cap(u64::MAX, 3), u64::MAX);
     }
 }

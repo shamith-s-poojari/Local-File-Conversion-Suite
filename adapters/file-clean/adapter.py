@@ -25,17 +25,20 @@ from converter_sdk import (
     reveal,
     run_main,
 )
+from converter_sdk.active import is_web_url, neutralize_relationship_ids
 from converter_sdk.convert import ConversionAdapter, source_format
 from converter_sdk.errors import AdapterError
 from converter_sdk.images import encode, open_image, pixels, read_frames
+from converter_sdk.limits import MB, check_pixels
+from converter_sdk.markup import check_zip
 from converter_sdk.pdf import save_pdf
 from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 MAX_ENTRIES = 20_000
 MAX_OFFICE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_REWRITE = 64 * MB
-"""Largest XML part read whole to be rewritten; anything larger is copied as it is."""
+"""Largest XML part read whole to be rewritten; a larger one that has to change
+fails the job (``E_LIMIT_EXCEEDED``) rather than go out as it was."""
 CHUNK = 1 << 20
 IMAGES = {"jpg", "png", "webp", "tiff", "avif"}
 OFFICE = {"docx", "xlsx", "pptx"}
@@ -201,6 +204,22 @@ def reencode(ctx: JobContext, path: Path, fmt: str) -> bytes:
 # -------------------------------------------------------------------- PDF
 
 
+def _clean_pdf_picture(obj: Any) -> None:
+    """A JPEG in a PDF is the camera's file as it was: EXIF, XMP and all. The
+    compressed data is kept byte for byte, so the picture doesn't change."""
+    from pikepdf import Name  # noqa: PLC0415
+
+    data = reveal.dct_image_bytes(obj)
+    if data is None:
+        return
+    cleaned = clean_jpeg_bytes(data)
+    if cleaned == data and obj.get("/Filter") == Name.DCTDecode:
+        return
+    # A colour-transform hint in the parameters belongs to the JPEG filter and stays.
+    parms = obj.get("/DecodeParms") if obj.get("/Filter") == Name.DCTDecode else None
+    obj.write(cleaned, filter=Name.DCTDecode, decode_parms=parms)
+
+
 def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) -> int:
     import pikepdf  # noqa: PLC0415
     from pikepdf import Name  # noqa: PLC0415
@@ -216,6 +235,8 @@ def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) ->
             for key in (Name.Metadata, Name.PieceInfo, Name.Thumb):
                 if key in obj:
                     del obj[key]
+            if isinstance(obj, pikepdf.Stream):
+                _clean_pdf_picture(obj)
         if params.get("removeComments", True):
             for page in pdf.pages:
                 ctx.check_cancelled()
@@ -290,15 +311,11 @@ def _clean_core(data: bytes) -> bytes:
 
 
 def _clean_app(data: bytes) -> bytes:
-    from lxml import etree  # noqa: PLC0415
-
+    """Only the counts (pages, words) stay. The program that wrote the file is
+    left out, not replaced: naming one would be making it up."""
     root = reveal.parse_xml(data)
-    ns = root.tag.partition("}")[0] + "}" if root.tag.startswith("{") else ""
     for el in [e for e in root if _local(e.tag) not in APP_KEEP]:
         root.remove(el)
-    app = etree.Element(f"{ns}Application")
-    app.text = "Microsoft Office"
-    root.insert(0, app)
     return _xml_bytes(root)
 
 
@@ -310,12 +327,18 @@ def _clean_content_types(data: bytes, dropped: set[str]) -> bytes:
     return _xml_bytes(root)
 
 
-def _clean_rels(name: str, data: bytes, dropped: set[str]) -> bytes:
+def _clean_rels(name: str, data: bytes, dropped: set[str], outside: set[str]) -> bytes:
+    """Delete the relationships to dropped parts and the ids in ``outside``."""
     root = reveal.parse_xml(data)
     base = posixpath.dirname(posixpath.dirname(name))
     for el in list(root):
+        if _local(el.tag) != "Relationship":
+            continue
+        if el.get("Id") in outside:
+            root.remove(el)
+            continue
         target = el.get("Target") or ""
-        if _local(el.tag) != "Relationship" or el.get("TargetMode") == "External":
+        if el.get("TargetMode") == "External":
             continue
         resolved = posixpath.normpath(
             target.lstrip("/") if target.startswith("/") else posixpath.join(base, target)
@@ -336,26 +359,68 @@ def _parts_to_drop(names: list[str], fmt: str, params: dict[str, Any]) -> set[st
     return drop
 
 
+def _source_of(rels: str) -> str:
+    """The part a ``.rels`` file belongs to (``""`` for the package itself)."""
+    directory, _, base = rels.rpartition("/")
+    directory = directory.removesuffix("_rels").rstrip("/")
+    name = base.removesuffix(".rels")
+    return f"{directory}/{name}" if directory and name else name
+
+
+class _Plan:
+    """What to change in one Office package, worked out before any part is written."""
+
+    def __init__(self, zin: zipfile.ZipFile, infos: list[zipfile.ZipInfo], fmt: str,
+                 params: dict[str, Any]) -> None:  # fmt: skip
+        self.fmt = fmt
+        self.drop = _parts_to_drop([i.filename for i in infos], fmt, params)
+        self.strip_anchors = fmt == "docx" and bool(params.get("removeComments", True))
+        # External relationships other than plain web links: the template, a
+        # linked picture or file. They name the author's folders and servers.
+        self.outside_by_rels: dict[str, set[str]] = {}
+        self.outside_by_source: dict[str, set[str]] = {}
+        for info in infos:
+            name = info.filename
+            if (
+                not name.endswith(".rels")
+                or name in self.drop
+                or name.lower().startswith("xl/externallinks/")
+            ):
+                continue
+            ids = set()
+            for rel in reveal.parse_xml(_read(zin, info)):
+                if _local(rel.tag) != "Relationship":
+                    continue
+                if (rel.get("TargetMode") or "").lower() != "external":
+                    continue
+                hyperlink = (rel.get("Type") or "").lower().endswith("/hyperlink")
+                if not (hyperlink and is_web_url(rel.get("Target") or "")):
+                    ids.add(rel.get("Id") or "")
+            if ids:
+                self.outside_by_rels[name] = ids
+                if source := _source_of(name):
+                    self.outside_by_source[source] = ids
+        self.outside = sum(len(v) for v in self.outside_by_rels.values())
+
+
 def clean_ooxml(ctx: JobContext, path: Path, out: Path, fmt: str, params: dict[str, Any]) -> None:
     try:
         with zipfile.ZipFile(path) as zin:
-            infos = zin.infolist()
+            infos = check_zip(zin, member_max=MAX_OFFICE_BYTES, total_max=MAX_OFFICE_BYTES)
             if len(infos) > MAX_ENTRIES:
                 raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "entries"})
-            if sum(i.file_size for i in infos) > MAX_OFFICE_BYTES:
-                raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "size"})
-            drop = _parts_to_drop([i.filename for i in infos], fmt, params)
-            strip_anchors = fmt == "docx" and bool(params.get("removeComments", True))
+            plan = _Plan(zin, infos, fmt, params)
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zout:
                 for info in infos:
                     ctx.check_cancelled()
                     name = info.filename
-                    if name in drop or name.endswith("/"):
+                    if name in plan.drop or name.endswith("/"):
                         continue
-                    zi = zipfile.ZipInfo(name, info.date_time)
+                    # Every part gets the same date: the ZIP records when each was saved.
+                    zi = zipfile.ZipInfo(name, reveal.FIXED_ZIP_DATE)
                     zi.compress_type = zipfile.ZIP_DEFLATED
                     zi.external_attr = info.external_attr
-                    new = _rewrite(zin, info, drop, strip_anchors)
+                    new = _rewrite(zin, info, plan)
                     if new is not None:
                         zout.writestr(zi, new)
                         continue
@@ -370,24 +435,87 @@ def clean_ooxml(ctx: JobContext, path: Path, out: Path, fmt: str, params: dict[s
         raise corrupt() from None
 
 
-def _rewrite(
-    zin: zipfile.ZipFile, info: zipfile.ZipInfo, drop: set[str], strip_anchors: bool
-) -> bytes | None:
+def _blank_tracked(data: bytes) -> bytes:
+    """Tracked changes keep their text but not who made them or when."""
+
+    def attribute(m: re.Match[bytes]) -> bytes:
+        if m.group(3) == b"author":
+            return m.group(1) + m.group(2) + b"author" + m.group(4) + b'"Author"'
+        return b""
+
+    return reveal.TRACKED_TAG.sub(
+        lambda tag: reveal.TRACKED_ATTR.sub(attribute, tag.group(0)), data
+    )
+
+
+def _clean_picture(data: bytes) -> bytes | None:
+    """A picture from ``media/`` without its metadata, or None if it isn't a
+    kind of picture that carries any. Identified by content, not by name."""
+    if data[:2] == b"\xff\xd8":
+        return clean_jpeg_bytes(data)
+    if data[:8] == PNG_SIGNATURE:
+        return clean_png_bytes(data)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return clean_webp_bytes(data)
+    if data[:4] in (b"II*\x00", b"MM\x00*"):
+        return _clean_tiff_bytes(data)
+    return None
+
+
+def _clean_tiff_bytes(data: bytes) -> bytes:
+    from PIL import Image, ImageSequence  # noqa: PLC0415
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            check_pixels(img.width, img.height, int(getattr(img, "n_frames", 1)))
+            frames = [f.copy() for f in ImageSequence.Iterator(img)]
+            icc = img.info.get("icc_profile")
+        buf = io.BytesIO()
+        save: dict[str, Any] = {"compression": "tiff_lzw", "save_all": len(frames) > 1,
+                                "append_images": frames[1:]}  # fmt: skip
+        if icc:
+            save["icc_profile"] = icc
+        frames[0].save(buf, "TIFF", **save)
+    except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError):
+        raise corrupt() from None
+    return buf.getvalue()
+
+
+def _rewrite(zin: zipfile.ZipFile, info: zipfile.ZipInfo, plan: _Plan) -> bytes | None:
     """The new content of a part that changes, or None to copy it as it is."""
     name = info.filename
     if name == "docProps/core.xml":
         return _clean_core(_read(zin, info))
     if name == "docProps/app.xml":
         return _clean_app(_read(zin, info))
-    if name == "[Content_Types].xml" and drop:
-        return _clean_content_types(_read(zin, info), drop)
-    if name.endswith(".rels") and drop:
-        return _clean_rels(name, _read(zin, info), drop)
-    if strip_anchors and re.fullmatch(r"word/[^/]+\.xml", name) and info.file_size <= MAX_REWRITE:
-        data = _read(zin, info)
-        cleaned = COMMENT_ANCHORS.sub(b"", data)
-        return cleaned if cleaned != data else None
-    return None
+    if name == "[Content_Types].xml" and plan.drop:
+        return _clean_content_types(_read(zin, info), plan.drop)
+    if name.endswith(".rels"):
+        outside = plan.outside_by_rels.get(name, set())
+        if plan.drop or outside:
+            return _clean_rels(name, _read(zin, info), plan.drop, outside)
+        return None
+    if reveal.MEDIA_PART.fullmatch(name):
+        if info.file_size > reveal.MAX_MEDIA_BYTES:
+            raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pictureSize"})
+        data = _read(zin, info, reveal.MAX_MEDIA_BYTES)
+        cleaned = _clean_picture(data)
+        return None if cleaned is None or cleaned == data else cleaned
+    is_word = plan.fmt == "docx" and re.fullmatch(r"word/[^/]+\.xml", name) is not None
+    outside = plan.outside_by_source.get(name, set())
+    if not (is_word or outside):
+        return None
+    data = _read(zin, info)
+    changed = data
+    if is_word:
+        if plan.strip_anchors:
+            changed = COMMENT_ANCHORS.sub(b"", changed)
+        changed = _blank_tracked(changed)
+    if outside:
+        root = reveal.parse_xml(changed)
+        if neutralize_relationship_ids(root, outside):
+            changed = _xml_bytes(root)
+    return changed if changed != data else None
 
 
 # ---------------------------------------------------------------- adapter
@@ -412,7 +540,7 @@ class FileCleanAdapter(Adapter):
                 elif fmt in OFFICE:
                     try:
                         with zipfile.ZipFile(p) as z:
-                            z.namelist()
+                            check_zip(z, member_max=MAX_OFFICE_BYTES, total_max=MAX_OFFICE_BYTES)
                     except (zipfile.BadZipFile, OSError):
                         raise corrupt() from None
             except AdapterError as e:

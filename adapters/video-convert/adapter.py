@@ -18,6 +18,7 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     AUDIO_CODEC,
     AUDIO_FORMATS,
@@ -34,7 +35,6 @@ from converter_sdk.media import (
     video_streams,
 )
 
-MB = 1024 * 1024
 REMUX = {"mp4", "mov", "mkv"}
 """Containers that can take each other's H.264/HEVC/AAC streams unchanged."""
 

@@ -13,9 +13,10 @@ use std::time::Duration;
 use converter_jobstore::{
     DataRoot, InputSource, JobId, JobSnapshot, JobState, JobStore, StoreConfig, SyncRoots,
 };
+use converter_protocol::Codec;
 use converter_scheduler::{
-    FixedMemory, JobSpec, LaunchSpec, Launcher, Runner, RunnerConfig, Timing, GENERIC_WARNING_CODE,
-    MAX_DETAIL_BYTES,
+    CancelToken, FixedMemory, JobSpec, LaunchSpec, Launcher, RequestKind, Runner, RunnerConfig,
+    Timing, Watchdog, Worker, GENERIC_WARNING_CODE, MAX_DETAIL_BYTES,
 };
 use converter_sniffer::Format;
 use serde_json::{json, Value};
@@ -165,6 +166,12 @@ macro_rules! need_python {
         match python() {
             Some(p) => p,
             None => {
+                // CI always runs `uv sync`; a missing venv there is a broken
+                // setup, not a reason to pass without testing.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "no .venv under CI; the end-to-end tests must run"
+                );
                 eprintln!("skipped: no .venv; run `uv sync`");
                 return;
             }
@@ -505,21 +512,257 @@ fn killing_takes_the_whole_process_tree() {
         .trim()
         .parse()
         .unwrap();
-    let mut alive = true;
+    let alive = is_alive(pid);
+    assert!(!alive, "the worker's child survived");
+}
+
+/// A panic while driving a job (here, in the launcher) must fail the job
+/// rather than leave it running with nothing left to finish it.
+#[test]
+fn a_panicking_driver_fails_the_job_with_e_internal() {
+    struct Panics;
+    impl Launcher for Panics {
+        fn command(&self, _: &LaunchSpec) -> Result<Command, String> {
+            panic!("boom");
+        }
+    }
+    let e = env();
+    let id = e.staged_job();
+    let job = e.run(Panics, config(), spec(&id, "dev-fake", json!({})));
+    assert_eq!(job.state, JobState::Failed, "{job:?}");
+    assert_eq!(error_code(&job), Some("E_INTERNAL"));
+}
+
+/// The group kill can't reach a descendant that started its own session; the
+/// supervisor must find it by parent before the worker goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn shutdown_kills_a_descendant_that_left_the_process_group() {
+    let py = need_python!();
+    let e = env();
+    let id = e.staged_job();
+    let root = e.store.job_dirs(&id).unwrap().root;
+    let job = e.run(
+        bad(&py, "escape_group"),
+        config(),
+        spec(&id, "misbehave", json!({})),
+    );
+    assert_eq!(job.state, JobState::Succeeded, "{job:?}");
+    let pid: u32 = std::fs::read_to_string(root.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!is_alive(pid), "the escaped descendant survived");
+}
+
+fn is_alive(pid: u32) -> bool {
     for _ in 0..50 {
         let mut sys = sysinfo::System::new();
         let p = sysinfo::Pid::from_u32(pid);
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
-        alive = sys.process(p).is_some_and(|p| {
+        let alive = sys.process(p).is_some_and(|p| {
             !matches!(
                 p.status(),
                 sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
             )
         });
         if !alive {
-            break;
+            return false;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!alive, "the worker's child survived");
+    true
+}
+
+#[test]
+fn a_worker_filling_work_past_the_disk_limit_is_killed() {
+    let py = need_python!();
+    let e = env();
+    let id = e.staged_job();
+    let dirs = e.store.job_dirs(&id).unwrap();
+    let spec = LaunchSpec {
+        adapter_id: "misbehave".into(),
+        job_id: id.clone(),
+        job_dir: dirs.root.clone(),
+        memory_limit: None,
+    };
+    let mut worker = Worker::spawn(
+        &bad(&py, "fill_work"),
+        &spec,
+        Arc::new(Codec::new()),
+        config().timing,
+    )
+    .unwrap();
+    let watchdog = Watchdog::from_limits(30, 1.0, 20, 1).with_disk_limit(Some(1_000_000));
+    let started = std::time::Instant::now();
+    let err = worker
+        .request(
+            RequestKind::Execute,
+            json!({"inputs": ["in/0.pdf"], "outDir": "out", "workDir": "work", "params": {}}),
+            None,
+            watchdog,
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "E_RESOURCE_DISK");
+    assert!(err.retryable);
+    // Caught by the 1 s disk check, not the 20 s silence limit.
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+/// Part 1 runs the dev-fake adapter; part 2 runs `misbehave` in `mode`.
+struct TwoParts {
+    python: PathBuf,
+    second: &'static str,
+}
+
+impl Launcher for TwoParts {
+    fn command(&self, spec: &LaunchSpec) -> Result<Command, String> {
+        let mode = (spec.adapter_id != "dev-fake").then_some(self.second);
+        TestLauncher {
+            python: self.python.clone(),
+            mode,
+        }
+        .command(spec)
+    }
+}
+
+fn two_part_job(e: &Env, first: Value, second_adapter: &str) -> JobSpec {
+    let (id, _) = e.store.create_job().unwrap();
+    let input = InputSource {
+        path: e.input.clone(),
+        extension: "pdf".into(),
+    };
+    e.store
+        .stage_inputs(&id, &[input.clone(), input], 1.0)
+        .unwrap();
+    let mut s = spec(&id, "dev-fake", first);
+    let mut second = s.parts[0].clone();
+    second.adapter_id = second_adapter.into();
+    second.params = json!({});
+    s.parts[0].inputs = vec![0];
+    second.inputs = vec![1];
+    s.parts.push(second);
+    s
+}
+
+fn out_names(e: &Env, id: &JobId) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(e.store.job_dirs(id).unwrap().out)
+        .unwrap()
+        .map(|d| d.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_failed_part_leaves_a_partial_job_with_the_other_parts_outputs() {
+    let py = need_python!();
+    let e = env();
+    let s = two_part_job(&e, json!({"pages": 1, "delayMs": 1}), "misbehave");
+    let id = s.job.clone();
+    let job = e.run(
+        TwoParts {
+            python: py,
+            second: "write_then_fail",
+        },
+        config(),
+        s,
+    );
+    assert_eq!(job.state, JobState::Partial, "{job:?}");
+    let paths: Vec<&str> = job.outputs.iter().map(|o| o.path.as_str()).collect();
+    assert_eq!(paths, ["p0-0.pdf"]);
+    // The failed part's half-written output is gone, not just unlisted.
+    assert_eq!(out_names(&e, &id), ["p0-0.pdf"]);
+    let failed: Vec<_> = job
+        .warnings
+        .iter()
+        .filter(|w| w.code == "PART_FAILED")
+        .collect();
+    assert_eq!(failed.len(), 1, "{:?}", job.warnings);
+    let detail: Value = serde_json::from_str(failed[0].detail.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        detail,
+        json!({"code": "E_PASSWORD_REQUIRED", "inputs": [1]})
+    );
+    assert!(job.error.is_none());
+}
+
+#[test]
+fn a_job_whose_every_part_fails_fails_with_the_first_error() {
+    let py = need_python!();
+    let e = env();
+    let s = two_part_job(
+        &e,
+        json!({"failWith": "E_INPUT_CORRUPT", "delayMs": 1}),
+        "misbehave",
+    );
+    let id = s.job.clone();
+    let job = e.run(
+        TwoParts {
+            python: py,
+            second: "write_then_fail",
+        },
+        config(),
+        s,
+    );
+    assert_eq!(job.state, JobState::Failed, "{job:?}");
+    assert_eq!(error_code(&job), Some("E_INPUT_CORRUPT"));
+    assert!(job.outputs.is_empty());
+    assert!(!e.store.job_dirs(&id).unwrap().out.exists());
+}
+
+#[test]
+fn cancelling_during_a_later_part_cancels_rather_than_partial() {
+    let py = need_python!();
+    let e = env();
+    let s = two_part_job(&e, json!({"pages": 1, "delayMs": 1}), "misbehave");
+    let id = s.job.clone();
+    let runner = Runner::new(
+        e.store.clone(),
+        Arc::new(TwoParts {
+            python: py,
+            second: "hang_execute",
+        }),
+        Arc::new(FixedMemory(64 << 30)),
+        config(),
+    );
+    let handle = runner.start(s);
+    // Part 1's output is renamed just before part 2 starts.
+    let first = e.store.job_dirs(&id).unwrap().out.join("p0-0.pdf");
+    for _ in 0..400 {
+        if first.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(first.exists());
+    assert!(runner.cancel(&id));
+    handle.join().unwrap();
+    assert_eq!(e.job(&id).state, JobState::Cancelled);
+}
+
+/// Re-queueing after `E_RESOURCE_MEMORY` wipes out/, so the retry must run
+/// part 1 again as well, or its output would be listed but gone.
+#[test]
+fn a_memory_retry_reruns_every_part() {
+    let py = need_python!();
+    let e = env();
+    let s = two_part_job(&e, json!({"pages": 1, "delayMs": 1}), "misbehave");
+    let id = s.job.clone();
+    let job = e.run(
+        TwoParts {
+            python: py,
+            second: "memory_once",
+        },
+        config(),
+        s,
+    );
+    assert_eq!(job.state, JobState::Succeeded, "{job:?}");
+    let paths: Vec<&str> = job.outputs.iter().map(|o| o.path.as_str()).collect();
+    assert_eq!(paths, ["p0-0.pdf", "p1-o.pdf"]);
+    assert!(job.warnings.iter().all(|w| w.code != "PART_FAILED"));
+    assert_eq!(out_names(&e, &id), ["p0-0.pdf", "p1-o.pdf"]);
 }

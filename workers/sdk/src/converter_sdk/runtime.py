@@ -198,7 +198,9 @@ class Worker:
         except MemoryError:
             self._error("E_RESOURCE_MEMORY", None, True)
         except OSError as e:
-            if e.errno == errno.ENOSPC:
+            # EFBIG: the file-size limit was hit. Python ignores SIGXFSZ, so the
+            # write fails with an error instead of killing the worker.
+            if e.errno in (errno.ENOSPC, errno.EFBIG):
                 self._error("E_RESOURCE_DISK", None, True)
             else:
                 # Only the type and errno: messages can contain file paths.
