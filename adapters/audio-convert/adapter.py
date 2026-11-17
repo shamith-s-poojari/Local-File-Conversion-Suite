@@ -22,6 +22,7 @@ from converter_sdk.limits import MB
 from converter_sdk.media import (
     AUDIO_FORMATS,
     LOSSLESS_AUDIO,
+    audio_codec,
     audio_streams,
     duration_s,
     ffmpeg,
@@ -163,7 +164,7 @@ class AudioConvertAdapter(ConversionAdapter):
             elif to in ("wav", "aiff"):
                 args += pcm_codec(to, source_bits(stream))
             else:
-                args += CODEC[to]
+                args += audio_codec(to) if to == "ogg" else CODEC[to]
                 if to in LOSSY:
                     args += ["-b:a", f"{bitrate}k"]
             in_rate = int(stream.get("sample_rate") or 0)

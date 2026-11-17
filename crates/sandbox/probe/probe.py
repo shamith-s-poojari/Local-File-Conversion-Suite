@@ -42,12 +42,22 @@ RESOLVER = {
 }
 
 
-def attempt(fn, expected):
+# Windows error codes for a process the sandbox won't start: access denied,
+# or the Job Object's process cap (ERROR_NOT_ENOUGH_QUOTA). Python maps the
+# second to no specific errno, so it is matched by its Windows code.
+SPAWN_REFUSED_WIN = {5, 1816}
+
+
+def attempt(fn, expected, winerrors=frozenset()):
     try:
         fn()
     except OSError as e:
         code = e.errno
-        if code in expected or (TIMED_OUT and isinstance(e, TimeoutError)):
+        if (
+            code in expected
+            or getattr(e, "winerror", None) in winerrors
+            or (TIMED_OUT and isinstance(e, TimeoutError))
+        ):
             return {"outcome": "blocked", "errno": code}
         return {"outcome": "inconclusive", "error": type(e).__name__, "errno": code}
     except Exception as e:  # noqa: BLE001 - not a refusal; record what it was
@@ -122,7 +132,11 @@ def access(cfg):
             lambda: socket.getaddrinfo("example.com", 80),
             NETWORK | RESOLVER,
         ),
-        "spawn_shell": attempt(lambda: subprocess.run(shell(), check=True), fs),  # noqa: S603
+        "spawn_shell": attempt(
+            lambda: subprocess.run(shell(), check=True),  # noqa: S603
+            fs,
+            SPAWN_REFUSED_WIN,
+        ),
         # A hard link makes the outside file part of the job directory, and
         # every later read of it allowed.
         "hardlink_out": attempt(hard_link, fs | codes("EXDEV")),

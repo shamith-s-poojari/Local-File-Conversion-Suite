@@ -20,11 +20,11 @@ from converter_sdk import (
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
 from converter_sdk.limits import MB
 from converter_sdk.media import (
-    AUDIO_CODEC,
     AUDIO_FORMATS,
     LOSSLESS_AUDIO,
     MUXER,
     VIDEO_FORMATS,
+    audio_codec,
     audio_streams,
     duration_s,
     ffmpeg,
@@ -193,7 +193,7 @@ class VideoConvertAdapter(ConversionAdapter):
     def _audio_args(
         self, ctx: JobContext, info: dict[str, Any], to: str, params: dict[str, Any]
     ) -> list[str]:
-        args = ["-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "0", *AUDIO_CODEC[to]]
+        args = ["-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "0", *audio_codec(to)]
         stream = audio_streams(info)[0]
         if to in ("m4a", "aac") and stream.get("codec_name") == "aac":
             args[-2:] = ["-c:a", "copy"]

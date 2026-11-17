@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Callable, Sequence
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
 from .adapter import ValidationReport, issue
 from .context import JobContext
-from .engines import binary, run
+from .engines import available, binary, engine_env, run
 from .errors import AdapterError
 from .protocol import MediaInfo
 
@@ -60,9 +62,48 @@ MUXER = {
 OPUS_RATES = {48000, 24000, 16000, 12000, 8000}
 
 
+VORBIS_BUILTIN = ["-c:a", "vorbis", "-strict", "experimental", "-ac", "2"]
+"""FFmpeg's own Vorbis encoder: experimental and stereo only, but always built."""
+
+
+@cache
+def _encoders(exe: str) -> frozenset[str]:
+    """Encoder names this FFmpeg build has; empty if it couldn't be asked."""
+    try:
+        out = subprocess.run(  # noqa: S603 - the granted FFmpeg, fixed arguments
+            [exe, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            input="",  # a pipe: an AppContainer is denied the null device
+            timeout=20,
+            env=engine_env(),
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    # Lines look like " A....D libvorbis   libvorbis (codec vorbis)".
+    return frozenset(
+        parts[1]
+        for line in out.splitlines()
+        if len(parts := line.split()) > 1 and len(parts[0]) == 6
+    )
+
+
+def audio_codec(to: str) -> list[str]:
+    """The encoder arguments for an audio format. Ogg uses libvorbis, or
+    FFmpeg's own encoder where the build has no libvorbis (Homebrew's FFmpeg
+    9 is built without it)."""
+    if to == "ogg" and available("ffmpeg"):
+        found = _encoders(str(binary("ffmpeg")))
+        # Asking failed: keep the usual encoder and let FFmpeg report it.
+        if found and "libvorbis" not in found:
+            return list(VORBIS_BUILTIN)
+    return list(AUDIO_CODEC[to])
+
+
 def audio_encode_args(to: str, bitrate_kbps: int = 192, rate: int = 0) -> list[str]:
     """Encoder, bitrate (lossy formats) and a sample rate the format takes."""
-    args = list(AUDIO_CODEC[to])
+    args = audio_codec(to)
     if to not in LOSSLESS_AUDIO:
         args += ["-b:a", f"{bitrate_kbps}k"]
     if to == "opus" and rate not in OPUS_RATES:

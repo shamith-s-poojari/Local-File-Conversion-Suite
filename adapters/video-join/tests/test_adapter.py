@@ -46,7 +46,11 @@ def test_concat_list_escapes_quotes() -> None:
 
     module = __import__("sys").modules[load_adapter_class(ADAPTER).__module__]
     listing = module.concat_list([Path("/jobs/it's/in/0.mp4"), Path("/jobs/a b/in/1.mp4")])
-    assert listing == "file '/jobs/it'\\''s/in/0.mp4'\nfile '/jobs/a b/in/1.mp4'\n"
+    # Paths are resolved, so Windows adds a drive letter before /jobs.
+    first, second = listing.splitlines()
+    assert first.startswith("file '") and first.endswith("/jobs/it'\\''s/in/0.mp4'")
+    assert second.startswith("file '") and second.endswith("/jobs/a b/in/1.mp4'")
+    assert listing.endswith("\n") and listing.count("\n") == 2
     with pytest.raises(Exception) as e:  # noqa: PT011 - AdapterError
         module.concat_list([Path("/jobs/a\nb/in/0.mp4")])
     assert e.value.code == "E_INTERNAL"

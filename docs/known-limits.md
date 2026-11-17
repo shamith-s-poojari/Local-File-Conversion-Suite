@@ -39,6 +39,7 @@ CI doesn't test installers, signing, updates or real-world machines, and it does
 - **Best-effort conversions** (PDF to Word, PowerPoint or Excel, among others) rebuild structure from the page layout and are hidden until you ask for them. Check the result.
 - **Data files:** values inside values (a list in a JSON record) become JSON text in a spreadsheet cell; Excel formulas become their last saved values; YAML comments are dropped. Excel to Markdown isn't offered.
 - **Audio and video:** subtitles, data tracks and every audio track after the first are dropped when converting video (`STREAMS_DROPPED`). Converting to a lossy format (MP3, AAC, Opus, WebM) re-encodes, which loses a little quality each time.
+- **Ogg (Vorbis)** uses FFmpeg's libvorbis. Some FFmpeg builds lack it (Homebrew's FFmpeg 9); there FFmpeg's own Vorbis encoder is used instead. It writes stereo only, at somewhat lower quality, so a mono Ogg needs an FFmpeg with libvorbis.
 - **Office documents** depend on the installed LibreOffice: fonts the system lacks are substituted, and complex layouts may shift.
 
 ## Tools for images, audio, video and data

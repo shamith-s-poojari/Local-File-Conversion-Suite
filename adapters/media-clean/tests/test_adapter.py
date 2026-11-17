@@ -132,7 +132,9 @@ def test_attachment_filename_and_mimetype_are_kept(tmp_path: Path) -> None:
     src = tmp_path / "in.mkv"
     subprocess.run(  # noqa: S603
         [str(files.ffmpeg()), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+         # filename set explicitly: on Windows -attach records the full path.
          "-attach", str(font), "-metadata:s:t:0", "mimetype=font/ttf",
+         "-metadata:s:t:0", "filename=Font.ttf",
          "-metadata:s:t:0", "title=Private note", "-metadata", "artist=Ada",
          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)],
         check=True, capture_output=True,

@@ -34,7 +34,13 @@ allow = [
 version = 2
 yanked = "deny"
 # Add an advisory ID here only with a written reason and a date to revisit.
-ignore = []
+ignore = [
+  # proc-macro-error is unmaintained (not a vulnerability). It is a
+  # compile-time macro pulled in on Linux by Tauri 2 through gtk-rs 0.18
+  # (glib-macros), which has no release without it. Revisit 2027-02-01 or
+  # when Tauri moves off gtk-rs 0.18.
+  { id = "RUSTSEC-2024-0370", reason = "build-time only, via tauri -> gtk 0.18; no upstream fix" },
+]
 
 [bans]
 multiple-versions = "warn"

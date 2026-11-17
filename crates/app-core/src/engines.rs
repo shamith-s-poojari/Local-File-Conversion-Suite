@@ -454,12 +454,16 @@ fn libreoffice_grant(soffice: &Path) -> Option<Grant> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const HOME: &str = "/Users/me";
 
+    #[cfg(unix)]
     fn roots(bin: &str) -> Option<Vec<PathBuf>> {
         install_root_in(Path::new(bin), Some(Path::new(HOME)))
     }
 
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn homebrew_kegs_share_one_read_root() {
         assert_eq!(
@@ -474,6 +478,8 @@ mod tests {
         );
     }
 
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn a_binary_in_the_home_folder_never_grants_home() {
         // Typical: ~/bin is on PATH.
@@ -502,6 +508,8 @@ mod tests {
         }
     }
 
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn known_layouts_grant_their_install() {
         assert_eq!(
@@ -539,6 +547,8 @@ mod tests {
         .is_none());
     }
 
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn grants_name_the_binaries() {
         let g = binary_grant(&[(

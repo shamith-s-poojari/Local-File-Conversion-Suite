@@ -292,6 +292,9 @@ class ImageConvertAdapter(ConversionAdapter):
         src = source_format(path)
         keep_animation = to in ("gif", "webp", "avif")
         d = decode(ctx, path, max_side=max_side, first_only=not keep_animation)
+        # Between the two slow steps: a cancel during a large decode needn't
+        # also wait for the encode (2 s budget on slower machines).
+        ctx.check_cancelled()
         if d.animated and not keep_animation:
             ctx.warn("ANIMATION_FLATTENED")
         frames = [_fit(f, max_side) for f in d.frames]

@@ -139,7 +139,10 @@ fn args(
         argv.extend(["--setenv".into(), key.into(), value.clone()]);
     }
     // Older bwrap rejects the flag, so it is only added where it exists.
+    // bwrap refuses it without `--unshare-user`: `--unshare-all` only *tries*
+    // a user namespace, and the flag needs one for certain.
     if version.is_some_and(|v| v >= (0, 8)) {
+        argv.push("--unshare-user".into());
         argv.push("--disable-userns".into());
     }
     argv.push("--".into());
@@ -198,6 +201,9 @@ mod tests {
             let flag = a.iter().position(|x| x == "--disable-userns").unwrap();
             let dashes = a.iter().position(|x| x == "--").unwrap();
             assert!(flag < dashes);
+            // bwrap: "--disable-userns requires --unshare-user" (not -try).
+            let user = a.iter().position(|x| x == "--unshare-user").unwrap();
+            assert!(user < dashes, "{v:?}");
         }
     }
 
