@@ -1,10 +1,11 @@
 import { useMachine } from "@xstate/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fromPromise } from "xstate";
 import { api as realApi, events, isCommandError, type Api, type Diagnostics, type Format, type Registry } from "./api";
+import { usePaste } from "./features/paste";
 import { Cancelled, Configure, Failed, Home, ProgressScreen, Result, Review, Saved, Settings } from "./features/screens";
 import { GearIcon, WarningIcon } from "./icons";
-import { ACTION_ERRORS, errorMessage } from "./text";
+import { FINISH_FIRST } from "./text";
 import { appMachine, type FileView } from "./machines/app";
 
 /** Inspects files four at a time: each starts a sandboxed worker. */
@@ -14,6 +15,9 @@ export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[
   const one = async (i: number) => {
     const f = files[i]!;
     if (!f.file) return;
+    // Already inspected (files were added or one was removed since): each
+    // inspection starts a sandboxed worker, so don't repeat it.
+    if (f.inspect && !f.needs) return;
     if (f.file.cloudPlaceholder) {
       out[i] = { ...f, needs: "download" };
       return;
@@ -33,11 +37,17 @@ export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[
       const locked = info.encryption === "openPassword" && info.pages === 0;
       out[i] = locked
         ? { ...f, needs: "password", error: undefined }
-        : { ...f, inspect: info, needs: undefined, error: undefined };
+        : { ...f, inspect: info, needs: undefined, error: undefined, reason: undefined };
     } catch (e) {
       const code = isCommandError(e) ? e.code : "E_INTERNAL";
+      const reason = isCommandError(e) ? e.reason : undefined;
       if (code === "E_SANDBOX_UNAVAILABLE") throw e;
-      out[i] = code === "E_PASSWORD_REQUIRED" ? { ...f, needs: "password" } : { ...f, error: code, needs: undefined };
+      // An Office file's password can't be given to the app: the prompt
+      // would only fail, so say what to do instead.
+      out[i] =
+        code === "E_PASSWORD_REQUIRED" && reason !== "officePassword"
+          ? { ...f, needs: "password" }
+          : { ...f, error: code, reason, needs: undefined };
     }
   };
   const workers = Array.from({ length: Math.min(4, files.length) }, async () => {
@@ -47,21 +57,26 @@ export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[
   return out;
 }
 
-/** Tab-separated lines, as Excel, Sheets and web tables put on the clipboard. */
-export function looksTabular(text: string): boolean {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
-  return lines.length >= 2 && lines.filter((l) => l.includes("\t")).length >= lines.length * 0.8;
-}
+export { looksTabular, readPaste } from "./features/paste";
 
-/** What a paste becomes: a picture, a table or text (ADR 0005). */
-export async function readPaste(
-  data: DataTransfer,
-): Promise<{ kind: "image" | "table" | "text"; bytes: Uint8Array } | null> {
-  const image = Array.from(data.files).find((f) => f.type === "image/png" || f.type === "image/jpeg");
-  if (image) return { kind: "image", bytes: new Uint8Array(await image.arrayBuffer()) };
-  const text = data.getData("text/plain");
-  if (!text.trim()) return null;
-  return { kind: looksTabular(text) ? "table" : "text", bytes: new TextEncoder().encode(text) };
+/** Which screen a machine state shows. Related states share one, so focus
+ * moves to the heading when the screen changes and not within it (audit U11). */
+export function screenOf(state: string, settings: boolean): string {
+  if (settings) return "settings";
+  switch (state) {
+    case "needsInput":
+    case "rejected":
+      return "review";
+    case "configuring":
+    case "preflight":
+      return "configure";
+    case "queued":
+    case "processing":
+    case "cancelling":
+      return "progress";
+    default:
+      return state;
+  }
 }
 
 export function App({ api = realApi }: { api?: Api }) {
@@ -71,13 +86,16 @@ export function App({ api = realApi }: { api?: Api }) {
         actors: {
           inspectAll: fromPromise(({ input }: { input: { files: FileView[] } }) => inspectAll(api, input.files)),
           createJob: fromPromise(
-            ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) =>
+            async ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) =>
               input.to
-                ? api.createConversion(input.fileIds, input.to, input.params)
-                : api.createJob(input.operation, input.fileIds, input.params),
+                ? api.createConversionSkipping(input.fileIds, input.to, input.params)
+                : { jobId: await api.createJob(input.operation, input.fileIds, input.params), skipped: 0 },
           ),
-          save: fromPromise(({ input }: { input: { jobId: string; confirm: boolean; keepLayout?: boolean } }) =>
-            input.confirm ? api.confirmSave(input.jobId) : api.saveOutputs(input.jobId, input.keepLayout ?? false),
+          save: fromPromise(
+            ({ input }: { input: { jobId: string; confirm: boolean; keepLayout?: boolean; token?: string } }) =>
+              input.confirm
+                ? api.confirmSave(input.jobId, input.token ?? "")
+                : api.saveOutputs(input.jobId, input.keepLayout ?? false),
           ),
           snapshotOutputs: fromPromise(async ({ input }: { input: { jobId: string } }) => {
             const s = await api.getSnapshot();
@@ -87,6 +105,7 @@ export function App({ api = realApi }: { api?: Api }) {
         actions: {
           cancelJob: (_, p) => void api.cancelJob(p.jobId).catch(() => {}),
           discardJob: (_, p) => void api.discardJob(p.jobId).catch(() => {}),
+          cancelSave: (_, p) => void api.cancelSave(p.jobId, p.token).catch(() => {}),
           removeFile: (_, p) => void api.removeFile(p.fileId).catch(() => {}),
           clearFiles: (_, p) => p.fileIds.forEach((id) => void api.removeFile(id).catch(() => {})),
         },
@@ -97,32 +116,19 @@ export function App({ api = realApi }: { api?: Api }) {
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [settings, setSettings] = useState(false);
-  const [pasteProblem, setPasteProblem] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const acceptsPaste = !settings && (state.matches("idle") || state.matches("configuring"));
-
-  useEffect(() => {
-    if (!acceptsPaste) return;
-    const onPaste = (e: ClipboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.closest?.("input, textarea, [contenteditable]")) return; // a field's own paste
-      if (!e.clipboardData) return;
-      e.preventDefault();
-      setPasteProblem(null);
-      void readPaste(e.clipboardData)
-        .then((p) => (p ? api.addPasted(p.kind, p.bytes) : []))
-        .then((results) => results.length && send({ type: "FILES_ADDED", results }))
-        .catch((err: { code?: string; reason?: string }) =>
-          setPasteProblem((err.reason && ACTION_ERRORS[err.reason]) ?? errorMessage(err.code ?? "E_INTERNAL").what),
-        );
-    };
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, [acceptsPaste, api, send]);
+  const paste = usePaste(api, acceptsPaste, send);
 
   useEffect(() => {
     const unlisten = [
       events.onJob((event) => send({ type: "JOB", event })),
-      events.onFilesAdded((results) => results.length && send({ type: "FILES_ADDED", results })),
+      events.onFilesAdded((results) => {
+        if (!results.length) return;
+        setSettings(false); // the files land on a screen, not behind Settings
+        send({ type: "FILES_ADDED", results });
+      }),
+      events.onDragState(setDragging),
       events.onSelfTest(() => void api.getDiagnostics().then(setDiag)),
     ];
     api.getDiagnostics().then(setDiag).catch(() => {});
@@ -141,34 +147,46 @@ export function App({ api = realApi }: { api?: Api }) {
   }, [api, send]);
 
   const ctx = state.context;
+  const name = typeof state.value === "string" ? state.value : Object.keys(state.value)[0]!;
+  const screenKey = screenOf(name, settings);
+  // Focus the heading when the screen changes, not on first load.
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    document.querySelector<HTMLElement>("#main h1")?.focus();
+  }, [screenKey]);
+
   let screen;
   if (settings) {
-    screen = <Settings diag={diag} onClose={() => setSettings(false)} />;
+    screen = <Settings diag={diag} registry={registry} onClose={() => setSettings(false)} />;
   } else if (state.matches("idle")) {
-    screen = <Home api={api} send={send} diag={diag} />;
+    screen = <Home api={api} send={send} diag={diag} dragging={dragging} />;
   } else if (state.matches("inspecting")) {
     screen = (
       <section className="screen narrow state-screen" aria-live="polite">
         <span className="state-icon spinning" aria-hidden="true" />
-        <h1>Checking files…</h1>
+        <h1 tabIndex={-1}>Checking files…</h1>
         <p className="lede">Each file is opened in its own sandbox to read its size, pages or length.</p>
       </section>
     );
   } else if (state.matches("needsInput") || state.matches("rejected")) {
     screen = <Review api={api} ctx={ctx} send={send} rejected={state.matches("rejected")} />;
   } else if (state.matches("configuring") || state.matches("preflight")) {
-    screen = <Configure api={api} ctx={ctx} send={send} registry={registry} />;
+    screen = <Configure api={api} ctx={ctx} send={send} registry={registry} diag={diag} busy={state.matches("preflight")} />;
   } else if (state.matches("queued") || state.matches("processing") || state.matches("cancelling")) {
     screen = <ProgressScreen ctx={ctx} send={send} cancelling={state.matches("cancelling")} />;
   } else if (state.matches("preview")) {
     const sub = typeof state.value === "object" ? String(Object.values(state.value)[0]) : "ready";
     screen = <Result api={api} ctx={ctx} send={send} state={sub} />;
   } else if (state.matches("failed")) {
-    screen = <Failed ctx={ctx} send={send} />;
+    screen = <Failed api={api} ctx={ctx} send={send} />;
   } else if (state.matches("cancelled")) {
     screen = <Cancelled send={send} />;
   } else {
-    screen = <Saved ctx={ctx} send={send} />;
+    screen = <Saved api={api} ctx={ctx} send={send} />;
   }
 
   return (
@@ -191,13 +209,24 @@ export function App({ api = realApi }: { api?: Api }) {
           <GearIcon /> Settings
         </button>
       </header>
-      {pasteProblem && (
+      {ctx.notice && (
+        <div className="banner warning paste-problem" role="alert">
+          <WarningIcon />
+          <div>
+            <p>{FINISH_FIRST}</p>
+          </div>
+          <button type="button" className="ghost sm" onClick={() => send({ type: "DISMISS_NOTICE" })}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      {paste.problem && (
         <div className="banner error paste-problem" role="alert">
           <WarningIcon />
           <div>
-            <p>{pasteProblem}</p>
+            <p>{paste.problem}</p>
           </div>
-          <button type="button" className="ghost sm" onClick={() => setPasteProblem(null)}>
+          <button type="button" className="ghost sm" onClick={paste.dismiss}>
             Dismiss
           </button>
         </div>

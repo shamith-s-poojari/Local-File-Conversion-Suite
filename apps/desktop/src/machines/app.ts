@@ -25,6 +25,8 @@ export interface FileView {
   displayName: string;
   /** Sniffer or inspect error. */
   error?: string;
+  /** The command's reason for `error`, when it gave one. */
+  reason?: string;
   inspect?: InspectInfo;
   /** Why the user must act before continuing. */
   needs?: "password" | "format" | "download";
@@ -57,6 +59,12 @@ export interface Context {
   save: SaveResult | null;
   /** Job IDs in `seq` order are applied once each. */
   lastSeq: number;
+  /** A line to show over the current screen. `finishFirst`: files were
+   * dropped while a job was in progress, so they were released (audit U2). */
+  notice: "finishFirst" | null;
+  /** How many files the last conversion left out as already in the target
+   * format (audit U22). */
+  skipped: number;
 }
 
 export type Event =
@@ -79,12 +87,21 @@ export type Event =
   | { type: "ADJUST" }
   | { type: "SAVE"; keepLayout?: boolean }
   | { type: "CONFIRM_OVERWRITE" }
+  | { type: "DECLINE_OVERWRITE" }
   | { type: "DISCARD_CONFIRMED" }
   | { type: "NEW" }
+  | { type: "DISMISS_NOTICE" }
   | { type: "RESTORE"; job: JobSnapshot; seq: number };
 
 const ACTIVE: JobState[] = ["created", "staging", "validating", "queued"];
 const RUNNING: JobState[] = ["running", "verifying"];
+
+/** What creating a job gives back. */
+export interface Started {
+  jobId: string;
+  /** Files left out because they were already in the target format. */
+  skipped: number;
+}
 
 function fileIds(ctx: Context): string[] {
   return ctx.files.flatMap((f) => (f.file?.actionable && !f.needs ? [f.file.fileId] : []));
@@ -121,12 +138,12 @@ export const appMachine = setup({
   actors: {
     inspectAll: fromPromise<FileView[], { files: FileView[] }>(async ({ input }) => input.files),
     createJob: fromPromise<
-      string,
+      Started,
       { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> }
     >(async () => {
       throw new Error("not provided");
     }),
-    save: fromPromise<SaveResult, { jobId: string; confirm: boolean; keepLayout?: boolean }>(async () => {
+    save: fromPromise<SaveResult, { jobId: string; confirm: boolean; keepLayout?: boolean; token?: string }>(async () => {
       throw new Error("not provided");
     }),
     snapshotOutputs: fromPromise<JobSnapshot["outputs"], { jobId: string }>(async () => []),
@@ -135,6 +152,7 @@ export const appMachine = setup({
     // Side effects: real implementations are provided by App.tsx.
     cancelJob: (_, _params: { jobId: string }) => {},
     discardJob: (_, _params: { jobId: string }) => {},
+    cancelSave: (_, _params: { jobId: string; token: string }) => {},
     removeFile: (_, _params: { fileId: string }) => {},
     clearFiles: (_, _params: { fileIds: string[] }) => {},
     applyJob: assign(({ context, event }) => {
@@ -191,8 +209,20 @@ export const appMachine = setup({
     error: null,
     save: null,
     lastSeq: 0,
+    notice: null,
+    skipped: 0,
   },
   on: {
+    DISMISS_NOTICE: { actions: assign({ notice: null }) },
+    // A drop in a state that can't take files: tell the user, and let Rust
+    // forget the files, which it already holds (audit U2). States that can
+    // take files override this.
+    FILES_ADDED: {
+      actions: [
+        { type: "clearFiles", params: ({ event }) => ({ fileIds: resultIds(event.results) }) },
+        assign({ notice: "finishFirst" as const }),
+      ],
+    },
     RESTORE: [
       { guard: "restoreQueued", target: ".queued", actions: "restore" },
       { guard: "restoreRunning", target: ".processing", actions: "restore" },
@@ -211,6 +241,8 @@ export const appMachine = setup({
         job: null,
         error: null,
         save: null,
+        notice: null,
+        skipped: 0,
       }),
       on: {
         FILES_ADDED: {
@@ -222,6 +254,16 @@ export const appMachine = setup({
       },
     },
     inspecting: {
+      on: {
+        // Start again with everything: files already inspected are skipped.
+        FILES_ADDED: {
+          target: "inspecting",
+          reenter: true,
+          actions: assign({
+            files: ({ context, event }) => [...context.files, ...event.results.map(fromResult)],
+          }),
+        },
+      },
       invoke: {
         src: "inspectAll",
         input: ({ context }) => ({ files: context.files }),
@@ -247,16 +289,29 @@ export const appMachine = setup({
     needsInput: {
       on: {
         RESOLVED: "inspecting",
-        REMOVE_FILE: {
+        FILES_ADDED: {
           target: "inspecting",
-          actions: [
-            { type: "removeFile", params: ({ event }) => ({ fileId: event.fileId }) },
-            assign({
-              files: ({ context, event }) =>
-                context.files.filter((f) => f.file?.fileId !== event.fileId),
-            }),
-          ],
+          actions: assign({
+            files: ({ context, event }) => [...context.files, ...event.results.map(fromResult)],
+          }),
         },
+        REMOVE_FILE: [
+          {
+            guard: nothingLeftAfterRemoving,
+            target: "idle",
+            actions: { type: "removeFile", params: ({ event }) => ({ fileId: event.fileId }) },
+          },
+          {
+            target: "inspecting",
+            actions: [
+              { type: "removeFile", params: ({ event }) => ({ fileId: event.fileId }) },
+              assign({
+                files: ({ context, event }) =>
+                  context.files.filter((f) => f.file?.fileId !== event.fileId),
+              }),
+            ],
+          },
+        ],
         ABANDON: {
           target: "idle",
           actions: { type: "clearFiles", params: ({ context }) => ({ fileIds: allIds(context) }) },
@@ -265,6 +320,12 @@ export const appMachine = setup({
     },
     rejected: {
       on: {
+        FILES_ADDED: {
+          target: "inspecting",
+          actions: assign({
+            files: ({ context, event }) => [...context.files, ...event.results.map(fromResult)],
+          }),
+        },
         ACK: {
           target: "idle",
           actions: { type: "clearFiles", params: ({ context }) => ({ fileIds: allIds(context) }) },
@@ -301,8 +362,7 @@ export const appMachine = setup({
         },
         REMOVE_FILE: [
           {
-            guard: ({ context, event }) =>
-              context.files.filter((f) => f.file?.fileId !== event.fileId).length === 0,
+            guard: nothingLeftAfterRemoving,
             target: "idle",
             actions: { type: "removeFile", params: ({ event }) => ({ fileId: event.fileId }) },
           },
@@ -330,14 +390,15 @@ export const appMachine = setup({
           operation: context.operation ?? "",
           to: context.to,
           fileIds: fileIds(context),
-          params: context.params,
+          params: withoutConfirmations(context.params),
         }),
         onDone: {
           target: "queued",
           actions: assign({
             params: ({ context }) => withoutSecrets(context.params),
+            skipped: ({ event }) => event.output.skipped,
             job: ({ event }) => ({
-              jobId: event.output,
+              jobId: event.output.jobId,
               state: "created" as JobState,
               stages: [],
               warnings: [],
@@ -347,10 +408,11 @@ export const appMachine = setup({
           }),
         },
         // Validation errors and INSUFFICIENT_RESOURCES go back to the form.
+        // Passwords stay: nothing was created, and a typo elsewhere
+        // shouldn't mean typing them (twice) again (audit U15).
         onError: {
           target: "configuring",
           actions: assign({
-            params: ({ context }) => withoutSecrets(context.params),
             error: ({ event }) => asError(event.error),
           }),
         },
@@ -429,6 +491,20 @@ export const appMachine = setup({
           on: {
             SAVE: "saving",
             CONFIRM_OVERWRITE: "confirming",
+            // The held destination is dropped on both sides; the token is
+            // used up either way, so it leaves the context too.
+            DECLINE_OVERWRITE: {
+              actions: [
+                {
+                  type: "cancelSave",
+                  params: ({ context }) => ({
+                    jobId: context.job?.jobId ?? "",
+                    token: context.save?.confirmToken ?? "",
+                  }),
+                },
+                assign({ save: null }),
+              ],
+            },
           },
         },
         saving: {
@@ -456,24 +532,30 @@ export const appMachine = setup({
         confirming: {
           invoke: {
             src: "save",
-            input: ({ context }) => ({ jobId: context.job?.jobId ?? "", confirm: true }),
+            input: ({ context }) => ({
+              jobId: context.job?.jobId ?? "",
+              confirm: true,
+              token: context.save?.confirmToken ?? "",
+            }),
             onDone: {
               target: "#app.saved",
               actions: assign({ save: ({ event }) => event.output }),
             },
+            // The token is used up whether or not the save worked.
             onError: {
               target: "ready",
-              actions: assign({ error: ({ event }) => asError(event.error) }),
+              actions: assign({ error: ({ event }) => asError(event.error), save: null }),
             },
           },
         },
       },
       on: {
-        ADJUST: { target: "configuring", actions: [{ type: "discardJob", params: ({ context }) => ({ jobId: context.job?.jobId ?? "" }) }, assign({ job: null })] },
+        ADJUST: { target: "configuring", actions: [{ type: "discardJob", params: ({ context }) => ({ jobId: context.job?.jobId ?? "" }) }, assign({ job: null, save: null })] },
         DISCARD_CONFIRMED: {
           target: "idle",
           actions: [
             { type: "discardJob", params: ({ context }) => ({ jobId: context.job?.jobId ?? "" }) },
+            assign({ save: null }),
             { type: "clearFiles", params: ({ context }) => ({ fileIds: allIds(context) }) },
           ],
         },
@@ -494,12 +576,43 @@ export const appMachine = setup({
  * (spec 12.3: never retained in machine context after submission). */
 export const SECRET_PARAMS = ["userPassword", "ownerPassword"];
 
+/** The form's "type it again" field for a password: `userPasswordConfirm`.
+ * It's checked in the form and never sent. */
+export const CONFIRM_SUFFIX = "Confirm";
+
+function isSecret(key: string): boolean {
+  return SECRET_PARAMS.some((s) => key === s || key === s + CONFIRM_SUFFIX);
+}
+
 function withoutSecrets(params: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(params).filter(([k]) => !SECRET_PARAMS.includes(k)));
+  return Object.fromEntries(Object.entries(params).filter(([k]) => !isSecret(k)));
+}
+
+/** What `create_job` gets: the params without the confirmation fields. */
+function withoutConfirmations(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([k]) => !SECRET_PARAMS.some((s) => k === s + CONFIRM_SUFFIX)),
+  );
 }
 
 function fromResult(r: FileResult): FileView {
   return { file: r.file, displayName: r.displayName, error: r.error, count: r.count };
+}
+
+function resultIds(results: FileResult[]): string[] {
+  return results.flatMap((r) => (r.file ? [r.file.fileId] : []));
+}
+
+/** A file the user can still act on: one the app can use, or one waiting for
+ * a password, a type or a download. Rows that only show an error don't count. */
+function usable(f: FileView): boolean {
+  return Boolean(f.file && (f.file.actionable || f.needs));
+}
+
+/** Removing this file leaves nothing to convert: back to the start. */
+function nothingLeftAfterRemoving({ context, event }: { context: Context; event: Event }): boolean {
+  if (event.type !== "REMOVE_FILE") return false;
+  return !context.files.filter((f) => f.file?.fileId !== event.fileId).some(usable);
 }
 
 function allIds(ctx: Context): string[] {

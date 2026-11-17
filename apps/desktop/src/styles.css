@@ -17,7 +17,8 @@
   --sunken: #f1efea;
   --ink: #1f1e1c;
   --ink-2: #4a4843;
-  --muted: #77746e;
+  /* 5.5:1 on canvas, 5.2 on sunken, 6.0 on surface (audit U13; styles.test.ts computes it) */
+  --muted: #66635d;
   --line: rgba(31, 30, 28, 0.09);
   --line-strong: rgba(31, 30, 28, 0.18);
   --accent: #1f1e1c;
@@ -58,7 +59,8 @@
   --z-grain: 30;
 
   font-family: var(--font-sans);
-  font-size: 14px;
+  /* rem, so the person's browser font-size setting still applies (audit U25). */
+  font-size: 0.875rem;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -107,8 +109,10 @@
   box-sizing: border-box;
 }
 
-html {
-  scroll-behavior: smooth;
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
 body {
@@ -170,7 +174,7 @@ h2 {
 }
 
 h3 {
-  font-size: 0.8rem;
+  font-size: 0.86rem;
   font-weight: 600;
   margin: 0;
 }
@@ -186,7 +190,7 @@ p {
 }
 
 .small {
-  font-size: 0.8rem;
+  font-size: 0.86rem;
 }
 
 .hint {
@@ -462,7 +466,7 @@ input[type="color"].swatch {
   border-radius: 999px;
   background: var(--ok-bg);
   color: var(--ok);
-  font-size: 0.8rem;
+  font-size: 0.86rem;
   font-weight: 500;
 }
 
@@ -507,7 +511,7 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 0.72rem;
+  font-size: 0.86rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -747,7 +751,7 @@ main {
   border-radius: var(--radius-s);
   background: var(--sunken);
   color: var(--ink-2);
-  font-size: 0.82rem;
+  font-size: 0.86rem;
 }
 
 .tool-names.family-tools {
@@ -757,7 +761,7 @@ main {
 }
 
 .tool-names.family-tools li {
-  font-size: 0.76rem;
+  font-size: 0.86rem;
   padding: 0.15rem 0.5rem;
 }
 
@@ -845,7 +849,7 @@ main {
   padding: 0.05rem 0.4rem;
   border-radius: 4px;
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 0.86rem;
   font-weight: 600;
   letter-spacing: 0.04em;
 }
@@ -923,7 +927,7 @@ main {
   align-items: center;
   gap: 0.4rem;
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.86rem;
   min-width: 0;
 }
 
@@ -979,7 +983,7 @@ main {
 }
 
 .group-label {
-  font-size: 0.72rem;
+  font-size: 0.86rem;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1054,7 +1058,7 @@ main {
 
 .target-note {
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: 0.86rem;
   line-height: 1.35;
 }
 
@@ -1064,7 +1068,7 @@ main {
 }
 
 .tier {
-  font-size: 0.7rem;
+  font-size: 0.86rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--muted);
@@ -1417,7 +1421,7 @@ legend {
   height: 100%;
   display: grid;
   place-items: center;
-  font-size: 0.8rem;
+  font-size: 0.86rem;
 }
 
 .redaction-layout {
@@ -1726,7 +1730,7 @@ legend {
 }
 
 .selftest th {
-  font-size: 0.75rem;
+  font-size: 0.86rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1924,4 +1928,54 @@ legend {
 /* A file row with its findings open keeps the thumbnail and remove button at the top. */
 .file-item:has(.reveals[open]) {
   align-items: start;
+}
+
+.dropzone.drag-over {
+  border-color: var(--focus);
+  background: var(--sunken);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.needs {
+  display: block;
+  color: var(--ink-2);
+}
+
+.check-list {
+  margin: 0.25rem 0;
+  padding-left: 1.2rem;
+}
+
+.selftest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 1rem;
+}
+
+.selftest-list li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.2rem 0;
+}
+
+.selftest-list .engine-state {
+  margin-left: auto;
+}
+
+.copy-diagnostics textarea {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+/* The saved file's location and the install command: text to read and copy. */
+.saved-path {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.install-cmd {
+  user-select: all;
+  font-family: var(--mono, ui-monospace, monospace);
 }

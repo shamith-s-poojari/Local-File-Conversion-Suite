@@ -2,7 +2,7 @@ import type { WidgetProps } from "./types";
 
 /** `fileOrder` widget: reorder files with buttons, so it works by keyboard
  * as well as pointer (spec 12.4). The value is the list of file IDs. */
-export function FileOrder({ id, label, value, onChange, ctx }: WidgetProps<string[]>) {
+export function FileOrder({ id, label, value, onChange, ctx, invalid, errorId }: WidgetProps<string[]>) {
   const all = ctx.files.flatMap((f) => (f.file?.actionable ? [f.file] : []));
   const order = value && value.length === all.length ? value : all.map((f) => f.fileId);
   const name = (fid: string) => all.find((f) => f.fileId === fid)?.displayName ?? fid;
@@ -13,7 +13,7 @@ export function FileOrder({ id, label, value, onChange, ctx }: WidgetProps<strin
     onChange(next);
   };
   return (
-    <fieldset className="field" id={id}>
+    <fieldset className="field" id={id} aria-describedby={invalid ? errorId : undefined}>
       <legend>{label}</legend>
       <ol className="file-order">
         {order.map((fid, i) => (

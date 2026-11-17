@@ -1,11 +1,13 @@
 //! `lfcs`: the converter from a terminal. It reuses `converter-app-core`, so
 //! files take the same router, per-job sandbox and output checks as the app.
 //!
-//! Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable.
+//! Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable,
+//! 130 stopped by Ctrl-C.
 
 mod args;
 mod commands;
-mod files;
+mod signal;
+mod text;
 
 use std::process::ExitCode;
 
@@ -39,14 +41,23 @@ OPTIONS
   --force           Allow replacing an existing --out file
   --json            Machine-readable output on stdout
   -q, --quiet       No progress on stderr
+  --password-stdin  Read a password from the first line of standard input: it
+                    opens encrypted files and is the password a tool such as
+                    pdf-protect sets. LFCS_PASSWORD does the same. There is no
+                    --password: arguments are visible to other programs
   --resources DIR   Folder holding adapters/, engines/ and the Python runtime
-                    (default: the repository around this program)
+                    (an installed app's resources folder)
+  --dev             Use the repository checkout and its .venv as the runtime
+                    (or set LFCS_DEV=1). Without it a checkout is not used
   --data-dir DIR    Working folder for jobs (default: the app's data folder)
   -h, --help        This text
   --version         Version
 
 Nothing is ever overwritten: results get a numeric suffix when a name is taken.
-Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable.
+With --json, a failure is {ok: false, error: {code, reason, message}}.
+Ctrl-C stops the job and removes its files; press it twice to leave at once.
+Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable,
+130 stopped by Ctrl-C.
 ";
 
 fn main() -> ExitCode {
@@ -55,9 +66,11 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some(RUNNER_FLAG) {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
+    // A bad command line still answers `--json` callers in JSON.
+    let wants_json = args.iter().skip(1).any(|a| a == "--json");
     let opts = match args::parse(args.into_iter().skip(1)) {
         Ok(o) => o,
-        Err(e) => return usage(&e),
+        Err(e) => return commands::report(e.into(), wants_json),
     };
     if opts.help {
         print!("{USAGE}");
@@ -67,22 +80,9 @@ fn main() -> ExitCode {
         println!("lfcs {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    signal::install();
     match commands::dispatch(&opts) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            if !e.message.is_empty() {
-                eprintln!("lfcs: {}", e.message);
-            }
-            if e.code == 2 {
-                eprintln!("try `lfcs --help`");
-            }
-            ExitCode::from(e.code)
-        }
+        Err(e) => commands::report(e, opts.json),
     }
-}
-
-fn usage(message: &str) -> ExitCode {
-    eprintln!("lfcs: {message}");
-    eprintln!("try `lfcs --help`");
-    ExitCode::from(2)
 }

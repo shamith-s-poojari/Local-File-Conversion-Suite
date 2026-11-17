@@ -4,6 +4,23 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
+/// A command-line mistake: `reason` is a stable camelCase name for `--json`,
+/// `message` is for people.
+#[derive(Debug, PartialEq)]
+pub struct UsageError {
+    pub reason: &'static str,
+    pub message: String,
+}
+
+pub fn usage(reason: &'static str, message: impl Into<String>) -> UsageError {
+    UsageError {
+        reason,
+        message: message.into(),
+    }
+}
+
+const PASSWORD_ADVICE: &str = "a password on the command line shows up in `ps` and shell history: use --password-stdin (one line on standard input) or the LFCS_PASSWORD environment variable";
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Opts {
     pub command: Option<String>,
@@ -13,6 +30,11 @@ pub struct Opts {
     pub force: bool,
     pub keep_folders: bool,
     pub help: bool,
+    /// Use a repository checkout as the runtime (also `LFCS_DEV=1`).
+    pub dev: bool,
+    /// Read the password for encrypted inputs, and for tools that set one,
+    /// from the first line of standard input.
+    pub password_stdin: bool,
     pub version: bool,
     pub resources: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
@@ -22,8 +44,7 @@ pub struct Opts {
     pub params: Option<String>,
 }
 
-/// `Err` is a usage message.
-pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, String> {
+pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, UsageError> {
     let mut o = Opts::default();
     let mut it = args.into_iter();
     let mut only_positional = false;
@@ -40,11 +61,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, String> {
             Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
             _ => (arg.clone(), None),
         };
-        let mut value = |name: &str| -> Result<String, String> {
+        let mut value = |name: &str| -> Result<String, UsageError> {
             inline
                 .clone()
                 .or_else(|| it.next())
-                .ok_or_else(|| format!("{name} needs a value"))
+                .ok_or_else(|| usage("missingValue", format!("{name} needs a value")))
         };
         match flag.as_str() {
             "-h" | "--help" => o.help = true,
@@ -53,6 +74,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, String> {
             "-q" | "--quiet" => o.quiet = true,
             "--force" => o.force = true,
             "--keep-folders" => o.keep_folders = true,
+            "--dev" => o.dev = true,
+            "--password-stdin" => o.password_stdin = true,
+            // Refused rather than ignored: the value would already be in
+            // argv by the time we look at it. The value is never echoed.
+            "--password" => return Err(usage("passwordInArgv", PASSWORD_ADVICE)),
             "--resources" => o.resources = Some(value("--resources")?.into()),
             "--data-dir" => o.data_dir = Some(value("--data-dir")?.into()),
             "--to" => o.to = Some(value("--to")?),
@@ -62,15 +88,23 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, String> {
                 o.sets.push(v);
             }
             "--params" => o.params = Some(value("--params")?),
-            _ => return Err(format!("unknown option {arg:?}")),
+            _ => return Err(usage("unknownOption", format!("unknown option {arg:?}"))),
         }
         if inline.is_some()
             && matches!(
                 flag.as_str(),
-                "--json" | "-q" | "--quiet" | "--force" | "--keep-folders" | "--help" | "--version"
+                "--json"
+                    | "-q"
+                    | "--quiet"
+                    | "--force"
+                    | "--keep-folders"
+                    | "--dev"
+                    | "--password-stdin"
+                    | "--help"
+                    | "--version"
             )
         {
-            return Err(format!("{flag} takes no value"));
+            return Err(usage("flagTakesNoValue", format!("{flag} takes no value")));
         }
     }
     Ok(o)
@@ -86,25 +120,46 @@ fn push(o: &mut Opts, arg: String) {
 
 /// `--set key=value`: the value is JSON when it parses (numbers, booleans,
 /// arrays, quoted strings), else a plain string.
-pub fn parse_set(s: &str) -> Result<(String, Value), String> {
+pub fn parse_set(s: &str) -> Result<(String, Value), UsageError> {
     let (k, v) = s
         .split_once('=')
         .filter(|(k, _)| !k.is_empty())
-        .ok_or_else(|| format!("--set wants key=value, got {s:?}"))?;
+        .ok_or_else(|| {
+            // Not echoed: a malformed `--set password` could be the secret.
+            usage("badSet", "--set wants key=value")
+        })?;
+    refuse_password_key(k)?;
     let value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()));
     Ok((k.to_string(), value))
 }
 
+/// Passwords travel on standard input or in the environment, never as a
+/// parameter (spec 7.3: they aren't params in the app either).
+fn refuse_password_key(key: &str) -> Result<(), UsageError> {
+    if key.to_ascii_lowercase().contains("password") {
+        Err(usage("passwordInArgv", PASSWORD_ADVICE))
+    } else {
+        Ok(())
+    }
+}
+
 /// `--params` JSON, then each `--set` over it.
-pub fn build_params(params: Option<&str>, sets: &[String]) -> Result<Map<String, Value>, String> {
+pub fn build_params(
+    params: Option<&str>,
+    sets: &[String],
+) -> Result<Map<String, Value>, UsageError> {
     let mut map = match params {
         None => Map::new(),
         Some(text) => match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(m)) => m,
-            Ok(_) => return Err("--params must be a JSON object".into()),
-            Err(e) => return Err(format!("--params isn't valid JSON: {e}")),
+            Ok(_) => return Err(usage("badParams", "--params must be a JSON object")),
+            // The parser's message can quote the text, which may hold a secret.
+            Err(_) => return Err(usage("badParams", "--params isn't valid JSON")),
         },
     };
+    for k in map.keys() {
+        refuse_password_key(k)?;
+    }
     for s in sets {
         let (k, v) = parse_set(s)?;
         map.insert(k, v);
@@ -116,7 +171,7 @@ pub fn build_params(params: Option<&str>, sets: &[String]) -> Result<Map<String,
 mod tests {
     use super::*;
 
-    fn p(a: &[&str]) -> Result<Opts, String> {
+    fn p(a: &[&str]) -> Result<Opts, UsageError> {
         parse(a.iter().map(|s| s.to_string()))
     }
 
@@ -144,6 +199,31 @@ mod tests {
         assert!(p(&["x", "--nope"]).is_err());
         assert!(p(&["x", "--to"]).is_err());
         assert!(p(&["x", "--json=1"]).is_err());
+    }
+
+    #[test]
+    fn passwords_never_come_from_argv() {
+        for bad in [
+            &["run", "pdf-protect", "--password", "hunter2"][..],
+            &["run", "pdf-protect", "--password=hunter2"][..],
+        ] {
+            let e = p(bad).unwrap_err();
+            assert_eq!(e.reason, "passwordInArgv");
+            assert!(!e.message.contains("hunter2"));
+            assert!(e.message.contains("--password-stdin"));
+            assert!(e.message.contains("LFCS_PASSWORD"));
+        }
+        for set in ["userPassword=hunter2", "password=x", "ownerPassword=x"] {
+            let e = parse_set(set).unwrap_err();
+            assert_eq!(e.reason, "passwordInArgv", "{set}");
+            assert!(!e.message.contains("hunter2"));
+        }
+        let e = build_params(Some(r#"{"userPassword":"hunter2"}"#), &[]).unwrap_err();
+        assert_eq!(e.reason, "passwordInArgv");
+        assert!(!e.message.contains("hunter2"));
+        let o = p(&["run", "pdf-protect", "--password-stdin", "--dev"]).unwrap();
+        assert!(o.password_stdin && o.dev);
+        assert!(p(&["x", "--password-stdin=1"]).is_err());
     }
 
     #[test]

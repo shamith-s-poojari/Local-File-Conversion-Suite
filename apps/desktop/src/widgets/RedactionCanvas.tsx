@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { previewUrl, type WordBox } from "../api";
+import { REDACTION_KEYBOARD_HINT } from "../text";
+import { findMatches, SEARCH_PAGE_LIMIT } from "./redactionSearch";
 import type { WidgetProps } from "./types";
 
 /** Normalized 0..1 in displayed orientation, origin top-left (spec 13.8). */
@@ -14,12 +16,11 @@ export interface Box {
 const DPI = 96;
 /** A drag shorter than this (normalized) is a click: snap to the word under it. */
 const CLICK = 0.004;
-const SEARCH_PAGE_LIMIT = 500;
 
 /** `redactionCanvas` widget (spec 12.3): draw, select and remove boxes;
  * word snapping; term search with a results list; undo. Everything except
  * drawing is also reachable by keyboard: whole-page redaction and terms. */
-export function RedactionCanvas({ id, label, value, onChange, ctx, params, setParam }: WidgetProps<Box[]>) {
+export function RedactionCanvas({ id, label, value, onChange, ctx, params, setParam, invalid, errorId }: WidgetProps<Box[]>) {
   const boxes = value ?? [];
   const terms = (params.terms as string[] | undefined) ?? [];
   const [page, setPage] = useState(1);
@@ -31,11 +32,15 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   const [results, setResults] = useState<{ page: number; count: number }[] | null>(null);
   const [searching, setSearching] = useState(false);
   const surface = useRef<HTMLDivElement>(null);
+  const searchControl = useRef<AbortController | null>(null);
   const total = Math.max(ctx.pages, 1);
 
   useEffect(() => {
     let live = true;
     setImg(null);
+    // The previous page's words would snap clicks and draw highlights on this
+    // page until its own arrive (audit U17).
+    setWords(null);
     ctx.api
       .requestPreview(ctx.reference, page, DPI)
       .then((p) => live && setImg({ src: previewUrl(p.path), w: p.widthPx, h: p.heightPx }))
@@ -48,6 +53,9 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
       live = false;
     };
   }, [ctx.api, ctx.reference, page]);
+
+  // A search still running when the widget goes away would set state on nothing.
+  useEffect(() => () => searchControl.current?.abort(), []);
 
   const commit = useCallback(
     (next: Box[]) => {
@@ -113,20 +121,21 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
 
   const search = async () => {
     if (terms.length === 0) return;
+    const control = new AbortController();
+    searchControl.current = control;
     setSearching(true);
-    const found: { page: number; count: number }[] = [];
-    const needles = terms.map((t) => t.toLowerCase().replace(/\s+/g, ""));
-    for (let p = 1; p <= Math.min(total, SEARCH_PAGE_LIMIT); p++) {
-      try {
-        const t = await ctx.api.getPageText(ctx.reference, p);
-        const text = t.words.map((w) => w.text).join("").toLowerCase();
-        const count = needles.reduce((n, needle) => n + text.split(needle).length - 1, 0);
-        if (count) found.push({ page: p, count });
-      } catch {
-        break;
-      }
-    }
+    const found = await findMatches({
+      total,
+      needles: terms,
+      signal: control.signal,
+      getText: (p) => ctx.api.getPageText(ctx.reference, p),
+    });
+    if (control.signal.aborted) return; // stopped: whoever stopped it has already reset the state
     setResults(found);
+    setSearching(false);
+  };
+  const stopSearch = () => {
+    searchControl.current?.abort();
     setSearching(false);
   };
 
@@ -138,7 +147,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   const ratio = img ? `${img.w} / ${img.h}` : words ? `${words.w} / ${words.h}` : "612 / 792";
 
   return (
-    <fieldset className="field redaction" id={id}>
+    <fieldset className="field redaction" id={id} aria-describedby={invalid ? errorId : undefined}>
       <legend>{label}</legend>
       <div className="redaction-layout">
         <div>
@@ -160,6 +169,8 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             onPointerDown={onDown}
             onPointerMove={onMove}
             onPointerUp={onUp}
+            // Another gesture took the pointer (a scroll, a system dialog): drop the half-drawn box.
+            onPointerCancel={() => setDrag(null)}
             role="img"
             aria-label={`Page ${page}. Drag to cover an area, or click a word.`}
           >
@@ -190,6 +201,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               )}
             </svg>
           </div>
+          <p className="hint">{REDACTION_KEYBOARD_HINT}</p>
         </div>
         <div className="redaction-side">
           <div className="row">
@@ -250,9 +262,16 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             ))}
           </ul>
           {terms.length > 0 && (
-            <button type="button" onClick={search} disabled={searching}>
-              {searching ? "Searching…" : "Find matches"}
-            </button>
+            <div className="row">
+              <button type="button" onClick={search} disabled={searching}>
+                {searching ? "Searching…" : "Find matches"}
+              </button>
+              {searching && (
+                <button type="button" className="ghost" onClick={stopSearch}>
+                  Stop
+                </button>
+              )}
+            </div>
           )}
           {results && (
             <div aria-live="polite">

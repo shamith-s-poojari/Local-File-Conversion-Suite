@@ -3,7 +3,7 @@ import type { WidgetProps } from "./types";
 
 /** `password` widget: masked, with a reveal toggle. The value lives only in
  * form state and is dropped from machine context once submitted. */
-export function Password({ id, label, schema, value, onChange }: WidgetProps<string>) {
+export function Password({ id, label, schema, value, onChange, invalid, errorId }: WidgetProps<string>) {
   const [shown, setShown] = useState(false);
   return (
     <div className="field">
@@ -14,6 +14,8 @@ export function Password({ id, label, schema, value, onChange }: WidgetProps<str
           type={shown ? "text" : "password"}
           autoComplete="new-password"
           spellCheck={false}
+          aria-invalid={invalid || undefined}
+          aria-describedby={invalid ? errorId : undefined}
           value={value ?? ""}
           onChange={(e) => onChange(e.target.value || undefined)}
         />

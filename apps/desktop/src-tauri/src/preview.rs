@@ -67,11 +67,20 @@ fn parse_path(path: &str) -> Option<(&str, u32)> {
 }
 
 fn read_png(path: &Path) -> Option<Vec<u8>> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_PREVIEW_BYTES {
+    use std::io::Read;
+    // One no-follow, regular-file-only open; everything is read through the
+    // handle, so a link swapped in after a look can't redirect the read (S11).
+    let file = converter_app_core::open_regular(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_PREVIEW_BYTES {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_PREVIEW_BYTES {
+        return None;
+    }
     bytes.starts_with(PNG_MAGIC).then_some(bytes)
 }
 
@@ -181,6 +190,27 @@ mod tests {
         assert_eq!(revoked.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link in the preview folder is never followed (audit S11): the
+    /// read opens with no-follow, so a link swapped in after any look is
+    /// refused too, which a test can't time; this checks the plain case.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_preview_is_not_served() {
+        let dir = std::env::temp_dir().join(format!("preview-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("real.png");
+        std::fs::write(&target, [PNG_MAGIC, b"rest"].concat()).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("1.png")).unwrap();
+        assert!(read_png(&dir.join("1.png")).is_none());
+        assert!(read_png(&target).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_or_missing_previews_are_not_served() {
+        assert!(read_png(Path::new("/definitely/not/here.png")).is_none());
     }
 
     #[test]
