@@ -668,6 +668,8 @@ fn platform_command(_: &Inner<'_>) -> Result<Vec<OsString>, String> {
 mod tests {
     use super::*;
 
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
     #[test]
     fn framework_installs_use_the_whole_versioned_root() {
         let exe = Path::new(
@@ -692,6 +694,8 @@ mod tests {
         );
     }
 
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
     #[test]
     fn python_org_framework_grants_its_version_not_library() {
         let home = Path::new("/Users/me");
@@ -700,6 +704,8 @@ mod tests {
         assert_eq!(installation_root_in(&exe, base, Some(home)).unwrap(), base);
     }
 
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
     #[test]
     fn an_install_that_is_or_holds_home_is_refused() {
         let home = Path::new("/Users/me");
@@ -719,6 +725,8 @@ mod tests {
         );
     }
 
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
     #[test]
     fn too_broad_names_the_dangerous_roots() {
         let home = Some(Path::new("/Users/me"));

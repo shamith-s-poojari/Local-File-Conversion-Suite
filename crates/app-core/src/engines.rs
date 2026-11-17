@@ -76,15 +76,10 @@ fn bin_dirs(name: &str) -> Vec<PathBuf> {
         dirs.push(scoop.join("apps").join(package).join(r"current\bin"));
         dirs.push(scoop.join("apps").join(package).join("current"));
     }
-    if let Some(data) = var("ProgramData") {
-        let lib = data.join(r"chocolatey\lib");
-        dirs.push(lib.join(package).join("tools").join(package).join("bin"));
-        dirs.push(
-            lib.join(format!("{package}-full"))
-                .join("tools")
-                .join(package)
-                .join("bin"),
-        );
+    if let Some(lib) = choco_root().map(|c| c.join("lib")) {
+        for pkg in [package.to_owned(), format!("{package}-full")] {
+            dirs.extend(choco_tool_dirs(&lib.join(pkg).join("tools"), package));
+        }
     }
     for root in [var("ProgramFiles"), Some(PathBuf::from(r"C:\"))]
         .into_iter()
@@ -93,6 +88,50 @@ fn bin_dirs(name: &str) -> Vec<PathBuf> {
         dirs.push(root.join(package).join("bin"));
     }
     dirs
+}
+
+/// Chocolatey's install folder (`%ChocolateyInstall%`, else the default).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn choco_root() -> Option<PathBuf> {
+    std::env::var_os("ChocolateyInstall")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join("chocolatey")))
+        .filter(|p| p.is_absolute())
+}
+
+/// The `bin` folders in a Chocolatey package's `tools`: the archive unpacks
+/// to a folder named after its version (`ffmpeg-8.0-essentials_build`), so
+/// every folder there is tried, then `tools/<package>/bin`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn choco_tool_dirs(tools: &Path, package: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(tools)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .map(|p| p.join("bin"))
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    let named = tools.join(package).join("bin");
+    if !dirs.contains(&named) {
+        dirs.push(named);
+    }
+    dirs
+}
+
+/// Chocolatey's shims (`<root>\bin\ffprobe.exe`) start the real binary as a
+/// second process from a folder the sandbox doesn't grant, and unlike
+/// Scoop's they don't say where it is. They're skipped; the package's own
+/// folder is found through [`bin_dirs`].
+fn is_choco_shim(path: &Path, choco: Option<&Path>) -> bool {
+    choco.is_some_and(|root| {
+        path.parent().is_some_and(|dir| {
+            dir.as_os_str()
+                .eq_ignore_ascii_case(root.join("bin").as_os_str())
+        })
+    })
 }
 
 /// LibreOffice's own binary, run directly: on Linux the `soffice` script
@@ -307,11 +346,12 @@ fn python_modules_within(python: &Path, timeout: Duration) -> BTreeSet<String> {
 /// launcher, say) can't run in the sandbox and is skipped.
 fn find_bin(name: &str) -> Option<PathBuf> {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let choco = if cfg!(windows) { choco_root() } else { None };
     path_dirs(std::env::var_os("PATH").as_deref())
         .into_iter()
         .chain(bin_dirs(name))
         .map(|d| d.join(&file))
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() && !is_choco_shim(p, choco.as_deref()))
         .filter_map(|p| scoop_shim_target(&p).unwrap_or(p).canonicalize().ok())
         .map(|p| converter_sandbox::plain_path(&p))
         .find(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(name)))
@@ -591,6 +631,40 @@ mod tests {
         assert!(!bin_dirs("soffice")
             .iter()
             .any(|d| d.to_string_lossy().contains("ffmpeg")));
+    }
+
+    #[test]
+    fn chocolatey_versioned_tool_folders_are_searched() {
+        let t = tempfile::tempdir().unwrap();
+        let tools = t.path().join("tools");
+        std::fs::create_dir_all(tools.join("ffmpeg-8.0-essentials_build").join("bin")).unwrap();
+        std::fs::write(tools.join("ffmpeg-8.0-essentials_build.7z"), b"").unwrap();
+        let dirs = choco_tool_dirs(&tools, "ffmpeg");
+        assert_eq!(
+            dirs,
+            [
+                tools.join("ffmpeg-8.0-essentials_build").join("bin"),
+                tools.join("ffmpeg").join("bin"),
+            ]
+        );
+        assert_eq!(
+            choco_tool_dirs(&t.path().join("missing"), "ffmpeg").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn chocolatey_shims_are_skipped() {
+        let root = Path::new("/choco");
+        assert!(is_choco_shim(
+            &root.join("bin").join("ffprobe.exe"),
+            Some(root)
+        ));
+        assert!(!is_choco_shim(
+            &root.join("lib/ffmpeg/tools/x/bin/ffprobe.exe"),
+            Some(root)
+        ));
+        assert!(!is_choco_shim(&root.join("bin").join("ffprobe.exe"), None));
     }
 
     #[test]
