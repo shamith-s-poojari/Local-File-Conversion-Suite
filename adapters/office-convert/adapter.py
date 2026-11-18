@@ -12,6 +12,7 @@ import html
 import io
 import re
 import shutil
+import struct
 import zipfile
 from pathlib import Path
 from typing import Any, ClassVar
@@ -274,8 +275,15 @@ _ODS_SHEET = re.compile(rb"<table:table\b[^>]*?\btable:name=\"([^\"]*)\"")
 
 
 def _workbook_sheets(path: Path) -> list[str]:
-    """Sheet names in workbook order, read from an xlsx or ods; ``[]`` when
-    the file is another kind or can't be read (the caller keeps its order)."""
+    """Sheet names in workbook order, read from an xlsx, ods or xls; ``[]``
+    when the file is another kind or can't be read (the caller keeps its order)."""
+    try:
+        with path.open("rb") as f:
+            is_compound = f.read(8) == _CFB_MAGIC
+    except OSError:
+        return []
+    if is_compound:
+        return _xls_sheets(path)
     try:
         with zipfile.ZipFile(path) as z:
             names = set(z.namelist())
@@ -288,6 +296,123 @@ def _workbook_sheets(path: Path) -> list[str]:
     except (OSError, zipfile.BadZipFile, KeyError):
         return []
     return [html.unescape(n.decode("utf-8", "replace")) for n in found]
+
+
+_CFB_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_CFB_LAST = 0xFFFFFFFA
+"""Sector numbers from here up are markers (end of chain, free), not sectors."""
+
+
+def _cfb_stream(data: bytes, name: str) -> bytes:
+    """One stream of a compound file (the container of an .xls), followed
+    through its sector chain, or through the mini stream for a stream under
+    the cutoff (4096 bytes). Raises ValueError on anything malformed."""
+    if len(data) < 512 or data[:8] != _CFB_MAGIC:
+        raise ValueError("notCompound")
+    shift = struct.unpack_from("<H", data, 0x1E)[0]
+    if shift not in (9, 12):
+        raise ValueError("sectorSize")
+    size = 1 << shift
+    per = size // 4
+    limit = len(data) // size + 1
+    """No chain can be longer than the file has sectors, so a loop stops here."""
+
+    def sector(n: int) -> bytes:
+        off = (n + 1) * size
+        if n >= _CFB_LAST or off + size > len(data):
+            raise ValueError("sector")
+        return data[off : off + size]
+
+    fat_count, dir_start = struct.unpack_from("<II", data, 0x2C)
+    cutoff = struct.unpack_from("<I", data, 0x38)[0]
+    difat = list(struct.unpack_from("<109I", data, 0x4C))
+    nxt = struct.unpack_from("<I", data, 0x44)[0]
+    for _ in range(limit):
+        if nxt >= _CFB_LAST:
+            break
+        entries = struct.unpack(f"<{per}I", sector(nxt))
+        difat += entries[:-1]
+        nxt = entries[-1]
+    else:
+        raise ValueError("difatLoop")
+    if fat_count > len(difat):
+        raise ValueError("fatCount")
+    fat: list[int] = []
+    for n in difat[:fat_count]:
+        fat += struct.unpack(f"<{per}I", sector(n))
+
+    def chain(start: int, table: list[int], read) -> bytes:
+        parts, n = [], start
+        while n < _CFB_LAST:
+            if len(parts) >= len(table) or n >= len(table):
+                raise ValueError("chain")
+            parts.append(read(n))
+            n = table[n]
+        return b"".join(parts)
+
+    directory = chain(dir_start, fat, sector)
+    if len(directory) < 128 or directory[66] != 5:  # 5: the root entry
+        raise ValueError("noRoot")
+    for off in range(0, len(directory) - 127, 128):
+        entry = directory[off : off + 128]
+        name_len = struct.unpack_from("<H", entry, 64)[0]
+        if entry[66] != 2 or not 2 <= name_len <= 64:  # 2: a stream
+            continue
+        if entry[: name_len - 2].decode("utf-16-le", "replace") != name:
+            continue
+        start, length = struct.unpack_from("<II", entry, 116)
+        if length >= cutoff:
+            stream = chain(start, fat, sector)
+        else:
+            stream = _cfb_mini(data, directory, fat, sector, chain)(start)
+        if len(stream) < length:
+            raise ValueError("short")
+        return stream[:length]
+    raise ValueError("noStream")
+
+
+def _cfb_mini(data: bytes, directory: bytes, fat: list[int], sector, chain):
+    """A reader for the mini stream: small streams kept in 64-byte pieces
+    inside the root entry's own stream, chained by the mini FAT."""
+    mini_size = 1 << struct.unpack_from("<H", data, 0x20)[0]
+    minifat_start = struct.unpack_from("<I", data, 0x3C)[0]
+    minifat_raw = chain(minifat_start, fat, sector) if minifat_start < _CFB_LAST else b""
+    minifat = list(struct.unpack(f"<{len(minifat_raw) // 4}I", minifat_raw))
+    container = chain(struct.unpack_from("<I", directory, 116)[0], fat, sector)
+
+    def piece(n: int) -> bytes:
+        if (n + 1) * mini_size > len(container):
+            raise ValueError("miniSector")
+        return container[n * mini_size : (n + 1) * mini_size]
+
+    return lambda start: chain(start, minifat, piece)
+
+
+_BIFF_BOF, _BIFF_EOF, _BIFF_SHEET = 0x0809, 0x000A, 0x0085
+
+
+def _xls_sheets(path: Path) -> list[str]:
+    """Sheet names in order from an Excel 97 (BIFF8) workbook: the sheet
+    records of its first part, which ends at the first EOF record."""
+    try:
+        stream = _cfb_stream(path.read_bytes(), "Workbook")
+        kind, size = struct.unpack_from("<HH", stream, 0)
+        if kind != _BIFF_BOF or size < 2 or struct.unpack_from("<H", stream, 4)[0] != 0x0600:
+            return []
+        names, pos = [], 0
+        while pos + 4 <= len(stream):
+            kind, size = struct.unpack_from("<HH", stream, pos)
+            body = stream[pos + 4 : pos + 4 + size]
+            pos += 4 + size
+            if kind == _BIFF_EOF:
+                return names
+            if kind == _BIFF_SHEET and len(body) >= 8:
+                count, wide = body[6], body[7] & 1
+                chars = body[8 : 8 + count * (2 if wide else 1)]
+                names.append(chars.decode("utf-16-le" if wide else "latin-1"))
+    except (OSError, ValueError, struct.error):
+        return []
+    return []
 
 
 def _in_sheet_order(produced: list[Path], source: Path) -> list[Path]:
