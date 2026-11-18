@@ -1,0 +1,15 @@
+# A stand-in for `file-clean` (Remove hidden details). Like the real one it
+# declares no `recheck`: the app asks for the hidden-details check by the
+# adapter's ID. Its worker claims success whatever it was given.
+id: file-clean
+kind: operation
+title: Remove hidden details
+workerClass: pdf
+inputs: { formats: [pdf], min: 1, max: 500 }
+outputs: { format: same, cardinality: many }
+fidelity: E
+fidelityNotes: []
+limits: { timeoutBaseS: 60, timeoutSPerMb: 2, noProgressS: 120, diskFactor: 6.0 }
+params: ./params.schema.json
+platforms: [windows, macos, linux]
+requires: []

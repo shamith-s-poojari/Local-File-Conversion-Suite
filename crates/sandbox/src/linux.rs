@@ -2,9 +2,10 @@
 //!
 //! `--unshare-all` gives empty network, PID, IPC, UTS and user namespaces;
 //! only the runtime is bound read-only and the job directory read-write.
-//! On Ubuntu 24.04, unprivileged user namespaces are restricted by AppArmor;
-//! the `.deb` ships a profile for bwrap (C7). Elsewhere a failure here must
-//! be reported, never worked around by running unsandboxed.
+//! On Ubuntu 24.04, unprivileged user namespaces are restricted by AppArmor
+//! (CI lifts the restriction; the `.deb` doesn't ship a bwrap profile yet).
+//! A failure here must be reported, never worked around by running
+//! unsandboxed.
 //!
 //! Beyond the namespaces: `--cap-drop ALL`, `--disable-userns` (bwrap 0.8 and
 //! newer; stops a worker creating a nested user namespace, the usual way to
@@ -14,9 +15,9 @@
 //! through `--seccomp`: the runner makes the program's file descriptor (see
 //! [`SECCOMP_FD`]) because it is the one that starts bwrap.
 //!
-//! **Not yet verified on a Linux machine** — the probe tests run on Linux CI
-//! only where bwrap can create namespaces, and skip otherwise. The argument
-//! list is unit-tested on every platform.
+//! Verified on Ubuntu 24.04 in CI (x86-64): the probe, end-to-end jobs with
+//! FFmpeg and LibreOffice, and the seccomp filter. Other distributions are
+//! untested. The argument list is unit-tested on every platform.
 
 // Compiled on every Unix for its tests; only Linux uses it.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]

@@ -6,7 +6,7 @@ id: output-check
 kind: check
 title: Output check
 workerClass: pdf
-inputs: { formats: [pdf, docx, xlsx, pptx, svg, html], min: 1, max: 500 }
+inputs: { formats: [pdf, docx, xlsx, pptx, svg, html, jpg, png, webp, tiff, avif], min: 1, max: 500 }
 outputs: { format: json, cardinality: one }
 fidelity: E
 fidelityNotes: []
@@ -14,4 +14,4 @@ fidelityNotes: []
 limits: { timeoutBaseS: 120, timeoutSPerMb: 3, noProgressS: 180, diskFactor: 2.0, processes: 2 }
 params: ./params.schema.json
 platforms: [windows, macos, linux]
-requires: [pymupdf, pypdfium2, pikepdf, lxml]
+requires: [pymupdf, pypdfium2, pikepdf, lxml, pillow]

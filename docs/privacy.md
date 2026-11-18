@@ -22,8 +22,8 @@
 
 ### How it is tested
 
-- **Canary test** (`crates/app-core/tests/network.rs`): every tool runs on documents whose links, actions, scripts, attachments and metadata all point at a listener on the test machine. The test fails if anything connects to it, or if any engine process holds a network connection. Positive controls make sure the test can see a connection when there is one. It has passed on macOS; CI also runs it on Linux and Windows, where it has not passed yet.
-- **Packet capture** (`tools/network-test/capture.sh`, nightly on macOS and Linux): records every packet during a full run and fails on any packet from the app's processes. It has not run yet; the nightly job is its first run.
+- **Canary test** (`crates/app-core/tests/network.rs`): every tool runs on documents whose links, actions, scripts, attachments and metadata all point at a listener on the test machine. The test fails if anything connects to it, or if any engine process holds a network connection. Positive controls make sure the test can see a connection when there is one. It has passed on macOS and on Linux in CI. On Windows its socket sampler doesn't exist, so the test prints "skipped" and passes without checking anything; no network test covers Windows.
+- **Packet capture** (`tools/network-test/capture.sh`, nightly on macOS and Linux): records every packet during a full run and fails on any packet from the app's processes. It has passed on macOS in the nightly job. The Linux run failed on 2026-11-15 to 17 because its trace file couldn't be written; that is fixed and hasn't run since. There is no Windows capture.
 
 ### The WebView
 
@@ -43,9 +43,9 @@ The app checks this at every start with a self-test (Settings shows the result).
 
 | OS | Sandbox | What is proven |
 |---|---|---|
-| macOS | A separate Seatbelt profile per job | The sandbox, end-to-end and network tests have passed on macOS, and CI runs them there |
-| Linux | Bubblewrap namespaces | CI now installs bubblewrap and runs the same tests, but **they have never passed on Linux yet**. Until the first green run, treat the Linux sandbox as unverified |
-| Windows | AppContainer and a Job Object | CI runs the sandbox tests on Windows. Windows is not proven to confine anything the way macOS is, and its network and file confinement are not measured. See [threat model](threat-model.md) |
+| macOS | A separate Seatbelt profile per job | The sandbox, end-to-end and network tests pass on macOS, in CI |
+| Linux | Bubblewrap namespaces, and a seccomp deny-list on x86-64 and AArch64 | The sandbox, seccomp, end-to-end and network tests pass in CI (2026-11-18, GitHub's Ubuntu 24.04 with user namespaces opened up). Not tried on other distributions or on a real desktop |
+| Windows | AppContainer and a Job Object | The sandbox tests pass on a hosted Windows runner. Windows is not proven to confine anything the way macOS is: it hasn't been tried on real machines, and its network confinement is not measured (the network test doesn't run there). See [threat model](threat-model.md) |
 
 CI runs on GitHub-hosted runners, which are throwaway machines. A pass there is not a security audit. The app's own self-test at every start is what decides, on each computer, whether processing is allowed.
 
@@ -90,6 +90,6 @@ Paste turns a picture, a table or text into a file in the app's data folder; it 
 
 - WebView traffic is not yet measured (spike S4).
 - The Windows sandbox has not been shown to work on real Windows machines. Windows AppContainer permission entries (ACEs) granted on the app's folders are not removed when the app is uninstalled, because there is no installer yet.
-- The Linux sandbox has no system-call filter (seccomp); that is deferred. See the [threat model](threat-model.md).
+- The Linux system-call filter (seccomp) is a short deny-list, not an allow-list, and exists for x86-64 and AArch64 only. See the [threat model](threat-model.md).
 - Running from a checkout needs development mode (`LFCS_DEV=1`); the app never looks for a runtime in the working directory otherwise.
 - Sync-folder detection covers OneDrive, Dropbox, iCloud Drive and Google Drive at their standard locations, and is **best effort**: a sync client installed elsewhere may not be recognised.

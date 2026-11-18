@@ -163,9 +163,10 @@ pub async fn get_targets(core: State<'_, Core>, file_ids: Vec<String>) -> Reply<
 
 /// Manifests and parameter schemas, for generated forms.
 #[tauri::command]
-pub fn get_registry(core: State<'_, Core>) -> Reply<Value> {
+pub async fn get_registry(core: State<'_, Core>) -> Reply<Value> {
     let app = app(&core)?;
-    Ok(serde_json::to_value(app.registry()).unwrap_or(Value::Null))
+    // Serializing every adapter's schema is not instant.
+    blocking(move || Ok(serde_json::to_value(app.registry()).unwrap_or(Value::Null))).await
 }
 
 #[tauri::command]
@@ -472,16 +473,19 @@ fn reveal_command(path: &Path) -> std::process::Command {
 /// The file IDs of a job's staged inputs, in staged order: what a warning's
 /// `detail.inputs` indices refer to.
 #[tauri::command]
-pub fn job_inputs(core: State<'_, Core>, job_id: String) -> Reply<Vec<String>> {
+pub async fn job_inputs(core: State<'_, Core>, job_id: String) -> Reply<Vec<String>> {
     let app = app(&core)?;
-    app.job_input_files(&self::job_id(&job_id)?)
+    let job = self::job_id(&job_id)?;
+    // Reads the job store, whose lock a running job's bookkeeping also takes.
+    blocking(move || app.job_input_files(&job)).await
 }
 
 /// Whether saving this job can keep a dropped folder's layout.
 #[tauri::command]
-pub fn can_keep_layout(core: State<'_, Core>, job_id: String) -> Reply<bool> {
+pub async fn can_keep_layout(core: State<'_, Core>, job_id: String) -> Reply<bool> {
     let app = app(&core)?;
-    Ok(app.can_keep_layout(&self::job_id(&job_id)?))
+    let job = self::job_id(&job_id)?;
+    blocking(move || Ok(app.can_keep_layout(&job))).await
 }
 
 /// Largest output copied as text.
@@ -548,17 +552,21 @@ pub async fn discard_job(
 }
 
 #[tauri::command]
-pub fn get_snapshot(core: State<'_, Core>) -> Reply<Snapshot> {
-    Ok(app(&core)?.get_snapshot())
+pub async fn get_snapshot(core: State<'_, Core>) -> Reply<Snapshot> {
+    let app = app(&core)?;
+    blocking(move || Ok(app.get_snapshot())).await
 }
 
 /// Versions, self-test result and adapters. If the app couldn't start,
 /// says why. Never file names or contents.
 #[tauri::command]
-pub fn get_diagnostics(core: State<'_, Core>) -> Value {
-    match &core.0 {
-        Ok(app) => serde_json::to_value(app.get_diagnostics()).unwrap_or(Value::Null),
-        Err(why) => serde_json::json!({ "startupError": why, "processingEnabled": false }),
+pub async fn get_diagnostics(core: State<'_, Core>) -> Reply<Value> {
+    match core.0.clone() {
+        Ok(app) => {
+            blocking(move || Ok(serde_json::to_value(app.get_diagnostics()).unwrap_or(Value::Null)))
+                .await
+        }
+        Err(why) => Ok(serde_json::json!({ "startupError": why, "processingEnabled": false })),
     }
 }
 
@@ -573,6 +581,30 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect(),
         )
+    }
+
+    /// A sync command runs on the main thread, where the UI lives. Only
+    /// `cancel_save` is allowed to be one: it touches an in-memory map.
+    #[test]
+    fn commands_are_async_so_the_window_never_waits_on_them() {
+        let source = include_str!("commands.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        let lines: Vec<&str> = code.lines().collect();
+        let mut sync = Vec::new();
+        for (i, l) in lines.iter().enumerate() {
+            if l.trim() != "#[tauri::command]" {
+                continue;
+            }
+            let decl = lines[i + 1..]
+                .iter()
+                .find(|l| l.contains("fn "))
+                .expect("a command has a fn");
+            if !decl.contains("async fn") {
+                sync.push(decl.trim().to_owned());
+            }
+        }
+        assert_eq!(sync.len(), 1, "sync commands: {sync:?}");
+        assert!(sync[0].starts_with("pub fn cancel_save("), "{sync:?}");
     }
 
     #[test]

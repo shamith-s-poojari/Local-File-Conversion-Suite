@@ -6,8 +6,8 @@
   "required": ["verifier"],
   "properties": {
     "verifier": {
-      "enum": ["redaction", "activeContent"],
-      "$comment": "Which tool's verifier to run: pdf-redact's or file-disarm's. Never a path."
+      "enum": ["redaction", "activeContent", "hiddenDetails"],
+      "$comment": "Which tool's verifier to run: pdf-redact's, file-disarm's or file-clean's. Never a path."
     },
     "expectedPages": { "type": "integer", "minimum": 1, "maximum": 100000 },
     "fill": {

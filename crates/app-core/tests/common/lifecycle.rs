@@ -136,6 +136,10 @@ pub fn run(python: &Path) {
     symlinked_output_is_refused(python, tmp.path());
     shutdown_waits_for_running_jobs(python, tmp.path());
     pending_self_test_has_its_own_reason(python, tmp.path());
+    hidden_jobs_send_no_events(python, tmp.path());
+    staging_failure_discards_the_job(python, tmp.path());
+    refused_claim_evicts_nobody(python, tmp.path());
+    closing_a_file_worker_kills_its_strays(python, tmp.path());
     println!("folders lifecycle: ok");
 }
 
@@ -353,3 +357,103 @@ fn pending_self_test_has_its_own_reason(python: &Path, tmp: &Path) {
     assert_eq!(err.reason.as_deref(), Some("selfTestPending"));
     app.shutdown();
 }
+
+/// RS-2: a file worker's job (hidden) emits nothing to the renderer, its
+/// `created` event included, and is gone again when the file is closed.
+fn hidden_jobs_send_no_events(python: &Path, tmp: &Path) {
+    let r = rig(python, tmp, "rs2a");
+    let files = tmp.join("rs2a-files");
+    std::fs::create_dir_all(&files).unwrap();
+    let id = add(&r.app, &files, "fast.pdf", FAST);
+    r.app.inspect_file(&id).unwrap();
+    assert_eq!(r.app.live_file_workers(), 1);
+    assert!(
+        r.events.lock().unwrap().is_empty(),
+        "a hidden job's events reached the renderer: {:?}",
+        r.events.lock().unwrap()
+    );
+    r.app.shutdown();
+}
+
+/// RS-2: a job whose inputs can't be staged (the file vanished after it was
+/// added) is discarded, not left in the store.
+fn staging_failure_discards_the_job(python: &Path, tmp: &Path) {
+    let r = rig(python, tmp, "rs2b");
+    let files = tmp.join("rs2b-files");
+    std::fs::create_dir_all(&files).unwrap();
+    let id = add(&r.app, &files, "gone.pdf", FAST);
+    let before = job_dirs(&r.data);
+    std::fs::remove_file(files.join("gone.pdf")).unwrap();
+    let err = r
+        .app
+        .create_job("pdf-redact", std::slice::from_ref(&id), json!({}))
+        .unwrap_err();
+    assert!(!err.code.is_empty());
+    assert_eq!(job_dirs(&r.data), before, "the job directory was left");
+    assert!(
+        r.app.get_snapshot().jobs.is_empty(),
+        "the failed job stays in the snapshot"
+    );
+    r.app.shutdown();
+}
+
+/// RS-3: a call that is refused (this file has no preview adapter) must not
+/// close another file's worker to make room first.
+fn refused_claim_evicts_nobody(python: &Path, tmp: &Path) {
+    let r = rig(python, tmp, "rs3");
+    let files = tmp.join("rs3-files");
+    std::fs::create_dir_all(&files).unwrap();
+    for n in 0..converter_app_core::MAX_LIVE_FILE_WORKERS {
+        let bytes = [FAST, format!("{n}").as_bytes()].concat();
+        let id = add(&r.app, &files, &format!("f{n}.pdf"), &bytes);
+        r.app.inspect_file(&id).unwrap();
+    }
+    assert_eq!(
+        r.app.live_file_workers(),
+        converter_app_core::MAX_LIVE_FILE_WORKERS
+    );
+    let text = add(&r.app, &files, "note.txt", b"just words\n");
+    assert!(r.app.get_page_text(&text, 1).is_err());
+    assert_eq!(
+        r.app.live_file_workers(),
+        converter_app_core::MAX_LIVE_FILE_WORKERS,
+        "a refused call closed another file's worker"
+    );
+    r.app.shutdown();
+}
+
+/// Wave 2: a daemon a file worker double-forked dies with the worker.
+#[cfg(unix)]
+fn closing_a_file_worker_kills_its_strays(python: &Path, tmp: &Path) {
+    let alive = |pid: i32| {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let r = rig(python, tmp, "strays");
+    let files = tmp.join("strays-files");
+    std::fs::create_dir_all(&files).unwrap();
+    let id = add(&r.app, &files, "stray.pdf", b"%PDF-1.4\nSTRAY\n%%EOF\n");
+    r.app.inspect_file(&id).unwrap();
+    // The daemon writes its PID a moment after the worker answers.
+    let read_pid = || -> Option<i32> {
+        std::fs::read_dir(r.data.join("jobs"))
+            .ok()?
+            .flatten()
+            .find_map(|d| std::fs::read_to_string(d.path().join("out/stray.pid")).ok())?
+            .parse()
+            .ok()
+    };
+    wait_for("the stand-in's daemon", Duration::from_secs(10), || {
+        read_pid().is_some()
+    });
+    let pid = read_pid().unwrap();
+    assert!(alive(pid), "the daemon isn't running before the close");
+    r.app.remove_file(&id).unwrap();
+    wait_for("the daemon to be killed", Duration::from_secs(5), || {
+        !alive(pid)
+    });
+    r.app.shutdown();
+}
+
+#[cfg(not(unix))]
+fn closing_a_file_worker_kills_its_strays(_: &Path, _: &Path) {}

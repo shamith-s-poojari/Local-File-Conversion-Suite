@@ -4,7 +4,7 @@
 //! WebView spells this `http://preview.localhost/<token>/<n>.png`). The token
 //! is random and maps to one job's preview directory; `<n>` is digits only,
 //! so a URL can't express a path. Tokens die with the job via [`PreviewRegistry::revoke`].
-//! Only files that really are PNGs are served.
+//! Only files that really are PNGs, of sane dimensions, are served.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -17,6 +17,31 @@ const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const TOKEN_HEX_LEN: usize = 32;
 /// Rendered pages are well under this; anything larger isn't ours.
 const MAX_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Pages are rendered at screen sizes. A header claiming more is a decoding
+/// bomb for the WebView (a few bytes can ask for gigabytes), so it is refused.
+const MAX_SIDE: u32 = 16_384;
+const MAX_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// The size in a PNG's IHDR, which must be the first chunk (13 bytes of data).
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let head = bytes.get(..24)?;
+    if !head.starts_with(PNG_MAGIC)
+        || head[8..12] != 13u32.to_be_bytes()
+        || &head[12..16] != b"IHDR"
+    {
+        return None;
+    }
+    let width = u32::from_be_bytes(head[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(head[20..24].try_into().ok()?);
+    Some((width, height))
+}
+
+fn sane_png(bytes: &[u8]) -> bool {
+    matches!(png_dimensions(bytes), Some((w, h))
+        if w > 0 && h > 0 && w <= MAX_SIDE && h <= MAX_SIDE
+            && u64::from(w) * u64::from(h) <= MAX_PIXELS)
+}
 
 #[derive(Default)]
 pub struct PreviewRegistry {
@@ -81,7 +106,7 @@ fn read_png(path: &Path) -> Option<Vec<u8>> {
     if bytes.len() as u64 > MAX_PREVIEW_BYTES {
         return None;
     }
-    bytes.starts_with(PNG_MAGIC).then_some(bytes)
+    sane_png(&bytes).then_some(bytes)
 }
 
 fn empty(status: StatusCode) -> Response<Cow<'static, [u8]>> {
@@ -119,6 +144,17 @@ pub fn handle(
 mod tests {
     use super::*;
 
+    /// A PNG header with the given size, and no image data.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut b = PNG_MAGIC.to_vec();
+        b.extend(13u32.to_be_bytes());
+        b.extend(b"IHDR");
+        b.extend(width.to_be_bytes());
+        b.extend(height.to_be_bytes());
+        b.extend([8, 2, 0, 0, 0]);
+        b
+    }
+
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     fn get(uri: &str) -> Request<Vec<u8>> {
@@ -153,7 +189,7 @@ mod tests {
     fn serves_registered_pngs_only() {
         let dir = std::env::temp_dir().join(format!("preview-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("1.png"), [PNG_MAGIC, b"rest"].concat()).unwrap();
+        std::fs::write(dir.join("1.png"), png(8, 8)).unwrap();
         std::fs::write(dir.join("2.png"), b"<script>alert(1)</script>").unwrap();
 
         let reg = PreviewRegistry::default();
@@ -201,10 +237,40 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("preview-link-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("real.png");
-        std::fs::write(&target, [PNG_MAGIC, b"rest"].concat()).unwrap();
+        std::fs::write(&target, png(8, 8)).unwrap();
         std::os::unix::fs::symlink(&target, dir.join("1.png")).unwrap();
         assert!(read_png(&dir.join("1.png")).is_none());
         assert!(read_png(&target).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn absurd_dimensions_are_not_served() {
+        let dir = std::env::temp_dir().join(format!("preview-dims-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            read_png(&p)
+        };
+        assert!(write("ok.png", &png(1654, 2339)).is_some());
+        assert!(
+            write("edge.png", &png(MAX_SIDE, 4096)).is_some(),
+            "64 MP exactly"
+        );
+        assert!(write("wide.png", &png(MAX_SIDE + 1, 1)).is_none());
+        assert!(write("tall.png", &png(1, MAX_SIDE + 1)).is_none());
+        assert!(
+            write("huge.png", &png(MAX_SIDE, MAX_SIDE)).is_none(),
+            "over 64 MP"
+        );
+        assert!(write("huge2.png", &png(u32::MAX, u32::MAX)).is_none());
+        assert!(write("zero.png", &png(0, 10)).is_none());
+        // Not an IHDR first, or cut short: not a PNG we can vouch for.
+        let mut other = png(8, 8);
+        other[12..16].copy_from_slice(b"IDAT");
+        assert!(write("idat.png", &other).is_none());
+        assert!(write("short.png", PNG_MAGIC).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -87,6 +87,14 @@ pub fn open_regular(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    // Windows: open a reparse point (symlink, junction) itself, not its
+    // target, so the metadata check below sees the link and refuses it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let f = options.open(path)?;
     if !f.metadata()?.is_file() {
         return Err(std::io::Error::other("not a regular file"));

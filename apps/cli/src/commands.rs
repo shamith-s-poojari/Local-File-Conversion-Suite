@@ -1,7 +1,7 @@
 //! The commands, over `converter-app-core`.
 
 use std::collections::BTreeSet;
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -14,6 +14,7 @@ use converter_router::{Format, Targets};
 use serde_json::{json, Value};
 
 use crate::args::{build_params, Opts, UsageError};
+use crate::secret::{self, Secret};
 use crate::signal;
 use crate::text as words;
 use crate::RUNNER_FLAG;
@@ -196,7 +197,8 @@ fn camel_of_code(code: &str) -> String {
 struct Session {
     app: App,
     /// For encrypted inputs, and as the password a tool sets (pdf-protect).
-    password: Option<String>,
+    /// Wiped when the session ends.
+    password: Option<Secret>,
 }
 
 impl Drop for Session {
@@ -267,26 +269,121 @@ fn home() -> PathBuf {
 }
 
 /// The password from the first line of standard input (`--password-stdin`)
-/// or `LFCS_PASSWORD`, never from an argument (audit U19). The variable is
+/// or `LFCS_PASSWORD`, never from an argument (audit U19). On a terminal,
+/// `--password-stdin` asks for it with the typing hidden. The variable is
 /// removed once read, so nothing started later inherits it.
-fn read_password(o: &Opts) -> Res<Option<String>> {
-    let from_env = std::env::var("LFCS_PASSWORD").ok();
+fn read_password(o: &Opts) -> Res<Option<Secret>> {
+    let from_env = std::env::var("LFCS_PASSWORD").ok().map(Secret::new);
     if from_env.is_some() {
         std::env::remove_var("LFCS_PASSWORD");
     }
     if o.password_stdin {
-        let mut line = String::new();
-        let read = std::io::stdin().lock().read_line(&mut line);
-        let line = line.trim_end_matches(['\n', '\r']);
-        return match read {
-            Ok(n) if n > 0 && !line.is_empty() => Ok(Some(line.to_owned())),
-            _ => Err(CliError::usage(
+        let stdin = std::io::stdin();
+        let line = if stdin.is_terminal() {
+            prompt_hidden()
+        } else {
+            Ok(first_line(stdin.lock()))
+        };
+        return match line {
+            Ok(Some(pw)) => Ok(Some(pw)),
+            Err(PromptError::Interrupted) => Err(CliError::cancelled()),
+            Err(PromptError::Unsupported) => Err(CliError::usage(
+                "noPasswordPrompt",
+                "--password-stdin: this terminal can't hide typing; pipe the password in or set LFCS_PASSWORD",
+            )),
+            Ok(None) | Err(PromptError::Failed) => Err(CliError::usage(
                 "noPassword",
                 "--password-stdin: standard input had no password on its first line",
             )),
         };
     }
-    Ok(from_env.filter(|p| !p.is_empty()))
+    Ok(from_env.filter(|p| !p.expose().is_empty()))
+}
+
+/// The first line of `input` without its line end; `None` if there is none or
+/// it is empty. The raw line is wiped once the trimmed copy is made.
+fn first_line(mut input: impl BufRead) -> Option<Secret> {
+    let mut line = String::new();
+    let read = input.read_line(&mut line);
+    let trimmed = line.trim_end_matches(['\n', '\r']).to_owned();
+    secret::wipe_string(&mut line);
+    match read {
+        Ok(n) if n > 0 && !trimmed.is_empty() => Some(Secret::new(trimmed)),
+        _ => {
+            let mut t = trimmed;
+            secret::wipe_string(&mut t);
+            None
+        }
+    }
+}
+
+// Only the terminal prompt (Unix) raises the first and last.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum PromptError {
+    Interrupted,
+    /// No way to hide typing on this platform.
+    Unsupported,
+    Failed,
+}
+
+/// Asks on the terminal with echo off. Ctrl-C arrives as a character (the
+/// signal is switched off while typing), because the handler only sets a
+/// flag and a blocked read would never see it.
+#[cfg(unix)]
+fn prompt_hidden() -> Result<Option<Secret>, PromptError> {
+    use std::io::Write;
+
+    // Restores the terminal on every way out.
+    struct Restore(libc::termios);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &self.0) };
+        }
+    }
+    let mut old: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut old) } != 0 {
+        return Err(PromptError::Unsupported);
+    }
+    let mut quiet = old;
+    quiet.c_lflag &= !(libc::ECHO | libc::ISIG);
+    let restore = Restore(old);
+    if unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &quiet) } != 0 {
+        return Err(PromptError::Unsupported);
+    }
+    eprint!("Password: ");
+    let _ = std::io::stderr().flush();
+    // Unbuffered reads of fd 0, so no library buffer keeps a copy.
+    let mut bytes = Vec::new();
+    let outcome = loop {
+        let mut b = 0u8;
+        let n = unsafe { libc::read(0, (&mut b as *mut u8).cast(), 1) };
+        match n {
+            1 if b == b'\n' || b == b'\r' => break Ok(()),
+            1 if b == 0x03 => break Err(PromptError::Interrupted),
+            1 => bytes.push(b),
+            0 => break Ok(()),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            _ => break Err(PromptError::Failed),
+        }
+    };
+    drop(restore);
+    eprintln!();
+    let text = String::from_utf8(bytes);
+    outcome?;
+    match text {
+        Ok(t) if !t.is_empty() => Ok(Some(Secret::new(t))),
+        Ok(_) => Ok(None),
+        Err(e) => {
+            let mut raw = e.into_bytes();
+            secret::wipe(&mut raw);
+            Err(PromptError::Failed)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn prompt_hidden() -> Result<Option<Secret>, PromptError> {
+    Err(PromptError::Unsupported)
 }
 
 /// Opens the app and runs the sandbox self-test; processing needs it.
@@ -375,6 +472,8 @@ struct Loaded {
 #[derive(Default)]
 struct Notes {
     skipped: Vec<Value>,
+    /// Files `--skip-same` left out because they were already in the target format.
+    skipped_same: usize,
     /// Folders with more files than fit under the 200-file limit.
     folder_truncated: Vec<Value>,
 }
@@ -432,12 +531,13 @@ fn load(s: &Session, o: &Opts, notes: &mut Notes) -> Res<Vec<Loaded>> {
             };
             let encrypted = serde_json::to_value(d.encryption_hint).ok() == Some(json!("maybe"));
             if let (true, Some(pw)) = (encrypted, &s.password) {
-                if let Err(e) = s.app.submit_password(&d.file_id, pw.clone()) {
-                    if e.code == "E_PASSWORD_WRONG" {
-                        let message = describe(&e.code, e.reason.as_deref(), &[]);
-                        skip(o, notes, false, &name, "passwordWrong", &message);
-                        continue;
-                    }
+                // Any failure leaves the file out with its reason, not only a
+                // wrong password: carrying on would fail later with a vaguer
+                // "password required".
+                if let Err(e) = s.app.submit_password(&d.file_id, pw.expose().to_owned()) {
+                    let (reason, message) = password_failure(&e);
+                    skip(o, notes, false, &name, &reason, &message);
+                    continue;
                 }
             }
             out.push(Loaded {
@@ -450,6 +550,17 @@ fn load(s: &Session, o: &Opts, notes: &mut Notes) -> Res<Vec<Loaded>> {
         }
     }
     Ok(out)
+}
+
+/// Why a stored password couldn't be applied to a file: the `reason` for
+/// `skipped` and text for people. No file contents or the password.
+fn password_failure(e: &CommandError) -> (String, String) {
+    let reason = if e.code == "E_PASSWORD_WRONG" {
+        "passwordWrong".to_owned()
+    } else {
+        e.reason.clone().unwrap_or_else(|| camel_of_code(&e.code))
+    };
+    (reason, describe(&e.code, e.reason.as_deref(), &[]))
 }
 
 /// The files a job can take; others are skipped with a note.
@@ -703,7 +814,7 @@ fn convert(o: &Opts) -> Res<()> {
     check_interrupt()?;
     let ids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
     let t = s.app.get_targets(&ids).map_err(cmd_err)?;
-    let adapters = conversion_adapters(&t, target)?;
+    let adapters = conversion_adapters(&t, target, o.skip_same)?;
 
     // With one adapter its schema defaults apply; with several (a mixed
     // selection) each adapter runs with its own, as in the app.
@@ -719,19 +830,47 @@ fn convert(o: &Opts) -> Res<()> {
         }
         _ => Value::Object(user),
     };
-    let job = s
+    let params = with_skip_same(params, o.skip_same);
+    let (job, skipped_same) = s
         .app
-        .create_conversion(&ids, target.as_str(), params)
+        .create_conversion_counted(&ids, target.as_str(), params)
         .map_err(cmd_err)?;
+    notes.skipped_same = skipped_same;
+    if skipped_same > 0 {
+        note(
+            o,
+            true,
+            &format!(
+                "skipped {skipped_same} file(s) already in {}",
+                target.as_str()
+            ),
+        );
+    }
 
     let dir = o.out.clone().unwrap_or_else(|| PathBuf::from("."));
     finish(&s, o, &job, Dest::Folder(dir), notes)
 }
 
+/// `--skip-same` is the core's `skipSame` parameter, as in the app.
+fn with_skip_same(params: Value, skip_same: bool) -> Value {
+    match params {
+        Value::Object(mut m) if skip_same => {
+            m.insert("skipSame".into(), Value::Bool(true));
+            Value::Object(m)
+        }
+        other => other,
+    }
+}
+
 /// The adapter for each selected format, or why `target` can't be reached.
-fn conversion_adapters(t: &Targets, target: Format) -> Res<Vec<String>> {
+/// With `skip_same`, files already in `target` need no route: the core
+/// leaves them out.
+fn conversion_adapters(t: &Targets, target: Format, skip_same: bool) -> Res<Vec<String>> {
     let mut adapters = BTreeSet::new();
     for g in &t.groups {
+        if skip_same && g.format == target {
+            continue;
+        }
         let Some(c) = g.conversions.iter().find(|c| c.to == target) else {
             return Err(CliError::failed(
                 "E_NO_ROUTE",
@@ -771,6 +910,12 @@ fn run(o: &Opts) -> Res<()> {
     if o.positional.len() < 2 {
         return Err(CliError::usage("noFiles", "run needs at least one file"));
     }
+    if o.skip_same {
+        return Err(CliError::usage(
+            "optionNotForCommand",
+            "--skip-same is for convert; a tool has no target format to compare",
+        ));
+    }
     let user = build_params(o.params.as_deref(), &o.sets)?;
     let files_only = Opts {
         positional: o.positional[1..].to_vec(),
@@ -802,7 +947,7 @@ fn run(o: &Opts) -> Res<()> {
         let unlocking = user.get("mode").and_then(Value::as_str) == Some("unlock");
         if !unlocking && entry.params_schema["properties"]["userPassword"].is_object() {
             user.entry("userPassword")
-                .or_insert_with(|| Value::String(pw.clone()));
+                .or_insert_with(|| Value::String(pw.expose().to_owned()));
         }
     }
     let params = with_defaults(&entry.params_schema, Value::Object(user));
@@ -973,6 +1118,7 @@ fn finish(s: &Session, o: &Opts, job: &JobId, dest: Dest, notes: Notes) -> Res<(
             "ok": !partial, "state": state, "savedCount": shown.len(),
             "saved": shown, "outDir": out_dir.as_ref().map(|d| d.display().to_string()),
             "warnings": warnings_json(&snap), "skipped": notes.skipped,
+            "skippedSameFormat": notes.skipped_same,
             "folderTruncated": notes.folder_truncated,
         });
         if partial {
@@ -1023,11 +1169,16 @@ fn resolve(
             Ok((d, Some(dir)))
         }
         Dest::Auto(path) => {
-            let as_file =
-                outputs == 1 && !path.is_dir() && !path.to_string_lossy().ends_with(['/', '\\']);
+            // Asking to keep folders means --out is a folder, even for one result.
+            let keeping = o.keep_folders && s.app.can_keep_layout(job);
+            let as_file = !keeping
+                && outputs == 1
+                && !path.is_dir()
+                && !path.to_string_lossy().ends_with(['/', '\\']);
             if !as_file {
                 make(&path)?;
-                return Ok((SaveDestination::Folder(path.clone()), Some(path)));
+                let d = s.app.folder_destination(job, path.clone(), o.keep_folders);
+                return Ok((d, Some(path)));
             }
             if path.exists() && !o.force {
                 return Err(CliError::usage(
@@ -1043,5 +1194,43 @@ fn resolve(
             }
             Ok((SaveDestination::File(path), None))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use converter_app_core::Reason;
+
+    #[test]
+    fn any_password_failure_is_reported_with_its_reason() {
+        let wrong = CommandError::with("E_PASSWORD_WRONG", Reason::UnknownFile);
+        assert_eq!(password_failure(&wrong).0, "passwordWrong");
+        // Before, only a wrong password was reported; the rest vanished.
+        let other = CommandError::with("E_INTERNAL", Reason::UnknownFile);
+        let (reason, message) = password_failure(&other);
+        assert_ne!(reason, "passwordWrong");
+        assert!(!reason.is_empty() && !message.is_empty());
+        let office = CommandError::with("E_PASSWORD_REQUIRED", Reason::OfficePassword);
+        assert_eq!(password_failure(&office).0, "officePassword");
+    }
+
+    #[test]
+    fn skip_same_rides_in_the_params_only_when_asked() {
+        let p = json!({"quality": 80});
+        assert_eq!(with_skip_same(p.clone(), false), p);
+        assert_eq!(
+            with_skip_same(p, true),
+            json!({"quality": 80, "skipSame": true})
+        );
+    }
+
+    #[test]
+    fn first_line_strips_the_line_end_and_rejects_empty() {
+        let pw = |s: &str| first_line(s.as_bytes()).map(|p| p.expose().to_owned());
+        assert_eq!(pw("hunter2\r\nmore\n").as_deref(), Some("hunter2"));
+        assert_eq!(pw("no-newline").as_deref(), Some("no-newline"));
+        assert_eq!(pw("\nsecond\n"), None);
+        assert_eq!(pw(""), None);
     }
 }

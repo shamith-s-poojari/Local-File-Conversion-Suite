@@ -18,8 +18,11 @@ jobs:
   fuzz-sniffer:
     name: Fuzz the sniffer (spec section 6)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30 # 10 to 11 minutes so far: 10 of them fuzzing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install nightly and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal
@@ -37,12 +40,15 @@ jobs:
   network-test:
     name: Network test with packet capture (spec 14.5), ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25 # 1 to 2 minutes when it passes, plus the build
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-24.04]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
@@ -63,5 +69,7 @@ jobs:
           brew install ffmpeg-full
           echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
       - run: uv sync --locked
+      - name: Engine versions
+        run: uv run --no-sync python tools/engine-versions.py --require ffmpeg
       - name: Capture and attribute traffic
         run: sudo -E env "PATH=$PATH" tools/network-test/capture.sh

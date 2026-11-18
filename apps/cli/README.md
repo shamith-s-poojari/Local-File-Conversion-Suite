@@ -28,11 +28,13 @@ lfcs targets report.pdf                      # conversions and tools, and why on
 
 lfcs convert photo.png --to jpg              # saves photo.jpg here
 lfcs convert scans/ --to pdf --out out/ --keep-folders
+lfcs convert mixed/ --to jpg --skip-same     # files that are already JPEG are left out
 lfcs convert clip.mp4 --to png --set mode=interval --set every=10
 lfcs convert a.png --to jpg --params '{"quality": 70}'
 
 lfcs run pdf-merge a.pdf b.pdf --out merged.pdf
 lfcs run pdf-split big.pdf --out pieces/
+lfcs run pdf-compress scans/ --out small/ --keep-folders
 lfcs run pdf-merge a.pdf b.pdf --json        # machine-readable result
 ```
 
@@ -54,7 +56,10 @@ LFCS_PASSWORD=... lfcs inspect locked.pdf
 ```
 
 `--password-stdin` reads the first line of standard input (and wins over
-`LFCS_PASSWORD`). The password opens encrypted input files, and for
+`LFCS_PASSWORD`); on a terminal it asks with typing hidden (Unix; elsewhere
+pipe it in). Inside `lfcs` the copies it makes are overwritten after use, as
+far as the standard library allows; the environment block and the copy the
+core holds are not in its reach. The password opens encrypted input files, and for
 `pdf-protect` it is the password to set. One password serves every file in a
 run; files that need different ones are converted separately.
 
@@ -66,7 +71,8 @@ run; files that need different ones are converted separately.
 | `-o, --out PATH` | Where to save (default: the current folder). A folder; for `run` with a single result it may be a file name |
 | `--set KEY=VALUE` | A parameter. VALUE is JSON when it parses (`80`, `true`, `[1,2]`), else text. Repeatable; overrides `--params` |
 | `--params JSON` | Parameters as a JSON object |
-| `--keep-folders` | `convert`: save into the same folder layout as any folder you gave |
+| `--skip-same` | `convert`: leave out files already in the target format (an error if none are left; `--json` reports `skippedSameFormat`) |
+| `--keep-folders` | `convert` and `run`: save into the same folder layout as any folder you gave, under `--out` (which is then a folder) |
 | `--force` | Replace an existing single-file `--out` |
 | `--dev` | Use the repository checkout and its `.venv` as the runtime (same as `LFCS_DEV=1`) |
 | `--password-stdin` | Read a password from the first line of standard input (or use `LFCS_PASSWORD`) |

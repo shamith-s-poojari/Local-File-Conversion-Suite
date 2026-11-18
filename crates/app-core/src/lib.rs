@@ -17,17 +17,19 @@ mod config;
 mod defaults;
 mod dupes;
 mod engines;
+mod events;
 mod files;
 mod intake;
+mod job_parts;
 mod jobs;
 mod output;
 mod recheck;
 mod selection;
 mod workers;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -42,11 +44,11 @@ use serde_json::Value;
 
 pub use config::find_dev_root;
 pub use converter_jobstore::SaveReport;
+pub use converter_scheduler::open_regular;
 pub use defaults::{defaults, with_defaults};
 pub use engines::Engines;
 use files::{FileEntry, OutputSlot};
 pub use files::{InspectInfo, PageText, Preview};
-pub use output::open_regular;
 
 /// Most files in one selection (blueprint section 6.2 default).
 pub const MAX_FILES: usize = 200;
@@ -361,7 +363,7 @@ pub struct App {
     files: Mutex<BTreeMap<String, FileEntry>>,
     files_idle: Condvar,
     /// File-worker jobs: never shown to the renderer.
-    hidden: Arc<Mutex<HashSet<JobId>>>,
+    events: Arc<events::Events>,
     /// Workers for previewing finished jobs' outputs, by job, with the same
     /// take-out-while-in-use rule as `files`.
     output_workers: Mutex<BTreeMap<JobId, OutputSlot>>,
@@ -399,18 +401,10 @@ impl App {
         }
         .map_err(|e| format!("data folder: {e}"))?;
 
-        let hidden: Arc<Mutex<HashSet<JobId>>> = Arc::default();
-        let sink: Arc<RwLock<Sink>> = Arc::new(RwLock::new(on_event));
+        let events = Arc::new(events::Events::new(on_event));
         let filter = {
-            let hidden = hidden.clone();
-            let sink = sink.clone();
-            Arc::new(move |e: &JobEvent| {
-                if lock(&hidden).contains(&e.job_id) {
-                    return;
-                }
-                let f = sink.read().unwrap_or_else(|p| p.into_inner()).clone();
-                f(e);
-            })
+            let events = events.clone();
+            Arc::new(move |e: &JobEvent| events.on_event(e))
         };
         let (store, _sweep) = JobStore::open(
             root,
@@ -457,7 +451,7 @@ impl App {
             engines,
             files: Mutex::default(),
             files_idle: Condvar::new(),
-            hidden,
+            events,
             output_workers: Mutex::default(),
             output_idle: Condvar::new(),
             runners: Mutex::default(),
@@ -599,6 +593,7 @@ pub fn parse_format(s: &str) -> Option<Format> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn reasons_are_unique_camel_case_words() {

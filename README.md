@@ -20,13 +20,16 @@ And, for every file you add ([ADR 0005](docs/adr/0005-safety-privacy-and-conveni
 - **Contact sheets** of photos, PDF pages or a video; **suggestions** for the selection; **folders** in and out with their layout kept; **paste** a picture or a table, and **copy** a result.
 - **`lfcs`**, a command line that runs the same sandboxed tools. See [apps/cli](apps/cli/README.md).
 
-**Status:** On macOS, every conversion and tool runs end to end in a per-job sandbox. CI runs the same tests on Windows and Linux, but the Linux sandbox tests have never passed, and the Windows sandbox is unconfirmed on real machines. See [known limits](docs/known-limits.md#what-ci-proves). Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't. There are no installers yet, so the app runs only from a checkout in development mode (below). See [known limits](docs/known-limits.md).
+**Status:** Every conversion and tool runs in a per-job sandbox, on all three systems. The tests pass in CI on macOS and on Linux, and the Windows tests passed on a hosted Windows runner; the Windows sandbox hasn't been confirmed on a real machine, and Windows has no network test. The Linux sandbox needs user namespaces, which some systems block (the app then turns processing off; see [troubleshooting](docs/troubleshooting.md)). What each system has proven, with dates, is in [known limits](docs/known-limits.md#what-ci-proves). Audio and video use FFmpeg, and Office formats use LibreOffice, if they're installed; the app shows the install command when they aren't ([where they're looked for](docs/engines.md)). There are no installers yet, so the app runs only from a checkout in development mode (below). `tools/bundle-runtime` and the release workflow are the start of installers; they haven't run yet.
 
 - [Architecture blueprint](docs/architecture/blueprint.md)
 - [Phase 1 specification](docs/specs/phase-1.md) (wins wherever it differs from the blueprint)
 - [Architecture decision records](docs/adr/)
 - [Privacy](docs/privacy.md): what "processed on your device" means, and how it's tested
 - [Known limits](docs/known-limits.md)
+- [Troubleshooting](docs/troubleshooting.md): the sandbox self-test, missing engines, Linux user namespaces
+- [Engines](docs/engines.md): where FFmpeg and LibreOffice are looked for
+- [Changelog](CHANGELOG.md)
 - [Threat model](docs/threat-model.md)
 - [Release plan](docs/release-plan.md): what stands between this and a 1.0
 - [Contributing](CONTRIBUTING.md) and [security reports](SECURITY.md)
@@ -68,7 +71,7 @@ pnpm dev
 
 ## Development mode
 
-There is no bundled runtime yet, so the app and `lfcs` use this checkout's `.venv` as the Python runtime. That is opt-in. Set `LFCS_DEV=1`, or pass `lfcs --dev` (coming; not available yet), when running from a checkout:
+There is no installer with a bundled runtime yet, so the app and `lfcs` use this checkout's `.venv` as the Python runtime. That is opt-in. Set `LFCS_DEV=1`, or pass `lfcs --dev`, when running from a checkout:
 
 ```bash
 LFCS_DEV=1 pnpm dev
@@ -78,14 +81,18 @@ LFCS_DEV=1 pnpm dev
 LFCS_DEV=1 cargo run -p lfcs -- doctor
 ```
 
-Without it the core doesn't search the working directory for a runtime, so a hostile folder can't supply one. The core also refuses a development runtime that isn't inside the repository or isn't owned by the current user.
+```bash
+cargo run -p lfcs -- --dev doctor
+```
+
+Without it the core doesn't use a checkout's `.venv` or search the working directory for a runtime, so a hostile folder can't supply one. The core also refuses a development runtime that isn't inside the repository or isn't owned by the current user.
 
 ## Running the full tests
 
-`pnpm check` runs everything that needs no outside program: the generated-code check, type checks, frontend tests, `cargo fmt`, `clippy`, the Rust tests, the adapter registry check, `ruff` and `pytest`. Some tests start programs that aren't part of the repository, and skip when they aren't there. Install them to run the whole suite (CI does, and with `CI=true` those tests fail instead of skipping):
+`pnpm check` runs everything that needs no outside program: the generated-code check, type checks, frontend tests, `cargo fmt`, `clippy`, the Rust tests, the adapter registry check, `ruff` and `pytest`. Some tests start programs that aren't part of the repository, and skip when they aren't there. Install them to run the whole suite. CI installs them on all three systems, and with `CI=true` the sandbox, FFmpeg and end-to-end tests fail instead of skipping, and a run that skips more Python tests than a recorded ceiling fails (`tools/check-skips.py`):
 
 - **FFmpeg**: audio and video tests. `brew install ffmpeg-full` (Homebrew's plain `ffmpeg` can't write Ogg), `sudo apt-get install ffmpeg` or `choco install ffmpeg`.
-- **LibreOffice**: Office conversion tests. `brew install --cask libreoffice` or `sudo apt-get install libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress`. Run its tests one at a time, not alongside other test runs: `uv run pytest adapters/office-convert`, then the end-to-end test alone, with `cargo test -p converter-app-core --test end_to_end`.
+- **LibreOffice**: Office conversion tests. `brew install --cask libreoffice`, `choco install libreoffice-fresh` or `sudo apt-get install libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress`. Run its tests one at a time, not alongside other test runs: `uv run pytest adapters/office-convert`, then the end-to-end test alone, with `cargo test -p converter-app-core --test end_to_end`.
 - **bubblewrap** (Linux only): the sandbox. `sudo apt-get install bubblewrap`. On Ubuntu 24.04 and later, AppArmor blocks unprivileged user namespaces; as a test machine only, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The sandbox, command-line, end-to-end and network tests need it. Without it the app turns processing off.
 - **strace and tcpdump** (Linux, only for `tools/network-test/capture.sh`).
 
@@ -101,7 +108,9 @@ The Rust tests that run the workers need `uv sync` first, and `LFCS_DEV=1` if yo
 | `packages/protocol/` | Worker protocol schema, fixtures and code generator. See its [README](packages/protocol/README.md) |
 | `workers/` | Adapter SDK and conformance kit |
 | `adapters/` | One folder per adapter |
-| `docs/` | Blueprint, specs, ADRs, spike reports |
+| `docs/` | Blueprint, specs, ADRs, spike reports, troubleshooting |
+| `tools/` | CI helpers, the network test, and `bundle-runtime` (the release worker runtime) |
+| `engines/` | The approved-engine catalog |
 
 ## License
 

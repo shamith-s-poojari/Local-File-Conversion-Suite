@@ -3,6 +3,8 @@
 - ``SLOW``: inspect takes 8 s; a conversion runs until cancelled (60 s).
 - ``CRASH``: the worker exits before it says hello (a start failure).
 - ``BREAK``: the first render kills the worker mid-request; later ones work.
+- ``STRAY``: inspect leaves a double-forked daemon behind (its PID is written
+  to ``out/stray.pid``) that sleeps for two minutes.
 - anything else: fast.
 """
 
@@ -35,13 +37,28 @@ from converter_sdk import Adapter, InspectReport, OutputFile, run_main  # noqa: 
 from converter_sdk.adapter import RenderedPage, ResourceEstimate  # noqa: E402
 
 
+def _leave_a_daemon() -> None:
+    """Double fork, so the daemon is nobody's child when the worker ends."""
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        if os.fork() == 0:
+            Path("out/stray.pid").write_text(str(os.getpid()))
+            time.sleep(120)
+        os._exit(0)
+    os.waitpid(child, 0)
+
+
 class StandIn(Adapter):
     adapter_id = "pdf-redact"
     fidelity = "E"
 
     def inspect(self, ctx, input: Path) -> InspectReport:
-        if b"SLOW" in input.read_bytes():
+        data = input.read_bytes()
+        if b"SLOW" in data:
             time.sleep(8)
+        if b"STRAY" in data:
+            _leave_a_daemon()
         return InspectReport(pages=1, encryption="none")
 
     def estimate_memory(self, ctx, params: dict[str, Any], metadata: dict[str, Any]):

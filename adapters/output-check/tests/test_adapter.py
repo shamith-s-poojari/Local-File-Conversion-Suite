@@ -192,6 +192,125 @@ def test_every_file_is_checked_and_one_bad_one_fails_the_run(tmp_path: Path) -> 
     assert report["passed"] is False
 
 
+# --------------------------------------------------------- hidden details
+
+
+def photo_with_details(path: Path) -> Path:
+    from PIL import Image  # noqa: PLC0415
+
+    exif = Image.Exif()
+    exif[0x010F] = "Acme"
+    exif[0x0110] = "Acme X100"
+    exif[0x013B] = "Ada Lovelace"
+    exif.get_ifd(0x8825).update({1: "N", 2: (37.0, 46.0, 29.64), 3: "W", 4: (122.0, 25.0, 9.84)})
+    Image.new("RGB", (16, 16), (200, 30, 30)).save(path, "JPEG", exif=exif.tobytes())
+    return path
+
+
+def pdf_with_details(path: Path) -> Path:
+    import pikepdf  # noqa: PLC0415
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page()
+    pdf.trailer["/Info"] = pdf.make_indirect(
+        pikepdf.Dictionary(Author=pikepdf.String("Ada"), CreationDate=pikepdf.String("D:20240501"))
+    )
+    pdf.save(path)
+    return path
+
+
+def docx_with_details(path: Path) -> Path:
+    ct = "http://schemas.openxmlformats.org/package/2006/content-types"
+    pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    core = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+    parts = {
+        "[Content_Types].xml": (
+            f'<?xml version="1.0"?><Types xmlns="{ct}">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package'
+            '.relationships+xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.'
+            'openxmlformats-package.core-properties+xml"/></Types>'
+        ),
+        "_rels/.rels": (
+            f'<?xml version="1.0"?><Relationships xmlns="{pkg}">'
+            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="word/document.xml"/>'
+            f'<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/'
+            f'relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            "</Relationships>"
+        ),
+        "docProps/core.xml": (
+            f'<?xml version="1.0"?><cp:coreProperties xmlns:cp="{core}" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Ada Lovelace</dc:creator>'
+            "</cp:coreProperties>"
+        ),
+        "word/document.xml": (
+            f'<?xml version="1.0"?><w:document xmlns:w="{w}"><w:body>'
+            "<w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"
+        ),
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return path
+
+
+DETAILS = {"verifier": "hiddenDetails"}
+SOURCES = {"jpg": photo_with_details, "pdf": pdf_with_details, "docx": docx_with_details}
+
+
+def cleaned(tmp_path: Path, fmt: str) -> Path:
+    """A real file-clean output."""
+    run = run_in_process(
+        ADAPTERS / "file-clean",
+        tmp_path / "clean",
+        [SOURCES[fmt](tmp_path / f"source.{fmt}")],
+        {"fileTitles": ["doc"]},
+    )
+    assert run.errors == [], run.errors
+    return run.outputs[0]
+
+
+@pytest.mark.parametrize("fmt", ["jpg", "pdf", "docx"])
+def test_a_real_file_clean_output_passes(tmp_path: Path, fmt: str) -> None:
+    _, report = check(tmp_path, [cleaned(tmp_path, fmt)], DETAILS)
+    assert report["passed"] is True, report
+    assert report["inputs"][0]["checks"] == [{"id": "hiddenDetails", "passed": True, "count": 0}]
+
+
+@pytest.mark.parametrize("fmt", ["jpg", "pdf", "docx"])
+def test_the_uncleaned_file_fails_whatever_the_tool_said(tmp_path: Path, fmt: str) -> None:
+    """A cleaning worker taken over could hand the original back as its output."""
+    _, report = check(tmp_path, [SOURCES[fmt](tmp_path / f"source.{fmt}")], DETAILS)
+    assert report["passed"] is False
+    assert report["failed"] == ["hiddenDetails"]
+    kinds = report["inputs"][0]["checks"][0]["kinds"]
+    assert "author" in kinds or "device" in kinds, kinds
+
+
+def test_a_hidden_details_output_that_cannot_be_read_is_a_failed_check(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"\xff\xd8 not really a picture")
+    _, report = check(tmp_path, [bad], DETAILS)
+    assert report["passed"] is False
+    assert report["inputs"][0]["checks"] == [{"id": "verifierFailed", "passed": False}]
+
+
+def test_a_format_the_verifier_does_not_read_is_never_a_pass(tmp_path: Path) -> None:
+    other = tmp_path / "clip.mp3"
+    other.write_bytes(b"ID3")
+    _, report = check(tmp_path, [other], DETAILS)
+    assert report["passed"] is False
+
+
+def test_hidden_details_reports_only_fixed_words(tmp_path: Path) -> None:
+    sent, report = check(tmp_path, [docx_with_details(tmp_path / "source.docx")], DETAILS)
+    assert "Ada" not in json.dumps(report) + "".join(str(m) for m in sent)
+
+
 # --------------------------------------------------------------- privacy
 
 
@@ -211,9 +330,13 @@ def test_the_report_is_the_same_on_a_repeat_run(tmp_path: Path) -> None:
     assert one == two
 
 
-def test_the_verifier_is_one_of_two_fixed_files_never_a_path() -> None:
+def test_the_verifier_is_one_of_three_fixed_files_never_a_path() -> None:
     schema = json.loads((CHECK / "params.schema.json").read_text("utf-8"))
-    assert schema["properties"]["verifier"]["enum"] == ["redaction", "activeContent"]
+    assert schema["properties"]["verifier"]["enum"] == [
+        "redaction",
+        "activeContent",
+        "hiddenDetails",
+    ]
     assert schema["additionalProperties"] is False
     assert "captured" not in schema["properties"]
 

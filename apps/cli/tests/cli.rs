@@ -628,3 +628,168 @@ fn ctrl_c_cancels_and_cleans_up() {
         .unwrap_or_default();
     assert!(left.is_empty(), "job folders left behind: {left:?}");
 }
+
+/// Every flag the parser takes is in `--help`, and the text says where each applies.
+#[test]
+fn help_lists_every_option() {
+    let t = tempfile::tempdir().unwrap();
+    let o = lfcs(&t.path().join("data"), &["--help"]);
+    let h = stdout(&o);
+    for flag in [
+        "--to",
+        "--out",
+        "--set",
+        "--params",
+        "--skip-same",
+        "--keep-folders",
+        "--force",
+        "--json",
+        "--quiet",
+        "--password-stdin",
+        "--resources",
+        "--dev",
+        "--data-dir",
+        "--version",
+    ] {
+        assert!(h.contains(flag), "{flag} is missing from --help");
+    }
+    // `run` takes --keep-folders too.
+    let run_line = h
+        .split("COMMANDS")
+        .next()
+        .unwrap()
+        .lines()
+        .skip_while(|l| !l.contains("lfcs run"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(run_line.contains("--keep-folders"), "{run_line}");
+    assert!(!h.contains("Nothing is ever overwritten"));
+}
+
+#[test]
+fn skip_same_is_refused_for_run() {
+    let t = tempfile::tempdir().unwrap();
+    let o = lfcs(
+        &t.path().join("data"),
+        &["run", "pdf-merge", "a.pdf", "b.pdf", "--skip-same"],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
+
+fn make_png(python: &Path, path: &Path) {
+    py(
+        python,
+        &format!(
+            "from PIL import Image\nImage.new('RGB', (8, 8), (10, 90, 200)).save('{}')\n",
+            slashed(path)
+        ),
+    );
+}
+
+#[test]
+fn convert_skip_same_leaves_out_files_already_in_the_target_format() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let (png, jpg) = (t.path().join("a.png"), t.path().join("b.jpg"));
+    make_png(&python, &png);
+    py(
+        &python,
+        &format!(
+            "from PIL import Image\nImage.new('RGB', (8, 8)).save('{}')\n",
+            slashed(&jpg)
+        ),
+    );
+    let data = t.path().join("data");
+    let out = t.path().join("out");
+    let args = |extra: &[&'static str]| -> Vec<String> {
+        let mut v: Vec<String> = [
+            "convert",
+            png.to_str().unwrap(),
+            jpg.to_str().unwrap(),
+            "--to",
+            "jpg",
+            "--json",
+            "-q",
+            "--out",
+            out.to_str().unwrap(),
+        ]
+        .map(String::from)
+        .into();
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    // Without the flag a JPEG to JPEG has no route.
+    let plain = args(&[]);
+    let plain: Vec<&str> = plain.iter().map(String::as_str).collect();
+    let o = lfcs(&data, &plain);
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+
+    let with = args(&["--skip-same"]);
+    let with: Vec<&str> = with.iter().map(String::as_str).collect();
+    let o = lfcs(&data, &with);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let v = json(&o);
+    assert_eq!(v["skippedSameFormat"], 1, "{v}");
+    assert_eq!(v["savedCount"], 1, "{v}");
+    assert!(out.join("a.jpg").is_file());
+
+    // Everything skipped: nothing to do, and it says so.
+    let o = lfcs(
+        &data,
+        &[
+            "convert",
+            jpg.to_str().unwrap(),
+            "--to",
+            "jpg",
+            "--skip-same",
+            "--json",
+            "-q",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    assert_error_shape(&json(&o), "E_PARAMS_INVALID");
+}
+
+#[test]
+fn run_keeps_folders_like_convert() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("scans");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    make_png(&python, &root.join("top.png"));
+    make_png(&python, &root.join("sub").join("deep.png"));
+    let out = t.path().join("out");
+    let o = lfcs(
+        &t.path().join("data"),
+        &[
+            "run",
+            "image-compress",
+            root.to_str().unwrap(),
+            "--keep-folders",
+            "-q",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let found: Vec<String> = walk(&out);
+    assert!(
+        found
+            .iter()
+            .any(|p| p.contains("sub") && p.contains("deep")),
+        "the folder layout was not kept: {found:?}"
+    );
+}
+
+fn walk(dir: &Path) -> Vec<String> {
+    let mut all = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            all.extend(walk(&p));
+        } else {
+            all.push(p.to_string_lossy().into_owned());
+        }
+    }
+    all
+}

@@ -3,8 +3,8 @@
 The core starts this in a separate job after a tool that declares
 ``recheck`` has finished (ADR 0006), so the tool's worker can't approve its
 own output. Everything it is told (``params``) comes from the core. It
-loads no code the request names: ``verifier`` picks one of two fixed
-paths in the tool's adapter folder.
+loads no code the request names: ``verifier`` picks one of three fixed
+paths: two in the tools' adapter folders, one beside this file.
 
 The report in ``out/report.json`` holds check IDs, pages and counts only,
 never document text. It is deterministic, so a repeat run is identical.
@@ -36,6 +36,10 @@ ADAPTERS = Path(__file__).resolve().parents[1]
 VERIFIERS = {
     "redaction": ADAPTERS / "pdf-redact" / "verify.py",
     "activeContent": ADAPTERS / "file-disarm" / "verify.py",
+    # The only verifier that lives here: file-clean (Remove hidden details)
+    # declares no `recheck` in its manifest, the core asks for this one by
+    # the adapter's id.
+    "hiddenDetails": Path(__file__).resolve().parent / "verify_details.py",
 }
 VERIFY_TIMEOUT_S = 600
 REDACTION_REQUEST = ("expectedPages", "fill", "terms", "regions")
@@ -71,6 +75,27 @@ def active_content_checks(report: dict[str, Any] | None) -> list[dict[str, Any]]
     if not isinstance(findings, list):
         return [_failed("verifierFailed")]
     return [{"id": "activeContent", "passed": not findings, "count": len(findings)}]
+
+
+HIDDEN_KINDS = {"location", "device", "author", "dates", "externalLinks", "tags", "embeddedFiles"}
+"""The words ``verify_details.py`` may report; anything else is dropped."""
+
+
+def hidden_details_checks(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    kinds = report.get("kinds") if report else None
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        return [_failed("verifierFailed")]
+    left = sorted(set(kinds) & HIDDEN_KINDS)
+    # An unknown word is still something left behind: fail without echoing it.
+    unknown = any(k not in HIDDEN_KINDS for k in kinds)
+    return [
+        {
+            "id": "hiddenDetails",
+            "passed": not left and not unknown,
+            "count": len(kinds),
+            **({"kinds": left} if left else {}),
+        }
+    ]
 
 
 class OutputCheckAdapter(Adapter):
@@ -126,9 +151,12 @@ class OutputCheckAdapter(Adapter):
             ctx.check_cancelled()
             ctx.progress("check", i, n)
             report = run_verifier(ctx, script, path, extra, timeout_s=VERIFY_TIMEOUT_S)
-            checks = (
-                redaction_checks(report) if kind == "redaction" else active_content_checks(report)
-            )
+            if kind == "redaction":
+                checks = redaction_checks(report)
+            elif kind == "hiddenDetails":
+                checks = hidden_details_checks(report)
+            else:
+                checks = active_content_checks(report)
             inputs.append({"input": i, "checks": checks})
         ctx.progress("check", n, n)
 

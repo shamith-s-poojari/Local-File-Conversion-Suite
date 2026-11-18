@@ -27,7 +27,7 @@ const MAKE_PDFS: &str = r#"
 import sys, pymupdf
 from pathlib import Path
 out = Path(sys.argv[1])
-def build(path, leaky):
+def build(path, leaky, author=None):
     doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
     page.insert_text((72, 300), "Visible-Keeper stays readable.", fontsize=12)
@@ -35,10 +35,11 @@ def build(path, leaky):
         page.insert_text((72, 100), "Account Zorblax7731 belongs to the client.", fontsize=12)
     else:
         page.draw_rect(pymupdf.Rect(20, 70, 590, 140), color=(0, 0, 0), fill=(0, 0, 0))
-    doc.set_metadata({})
+    doc.set_metadata({"author": author} if author else {})
     doc.save(path, garbage=4, deflate=True)
 build(out / "leaky.pdf", True)
 build(out / "clean.pdf", False)
+build(out / "author.pdf", False, author="Ada Lovelace")
 "#;
 
 struct Rig {
@@ -185,6 +186,7 @@ pub fn run(python: &Path) {
     unredacted_output_fails_though_its_worker_claimed_success(&r);
     properly_redacted_output_succeeds(&r);
     the_check_adapter_is_not_a_tool(&r);
+    hidden_details_left_by_a_cleaner_fail_the_job(&r);
     r.app.shutdown();
     println!("folders recheck: ok");
 }
@@ -255,4 +257,25 @@ fn the_check_adapter_is_not_a_tool(r: &Rig) {
     assert!(targets.operations.iter().any(|o| o.adapter == "pdf-redact"));
     let json = serde_json::to_string(&targets).unwrap();
     assert!(!json.contains("output-check"));
+}
+
+/// SEC-8: a "Remove hidden details" worker that hands back the author's name
+/// is caught by the check; an output without one passes.
+fn hidden_details_left_by_a_cleaner_fail_the_job(r: &Rig) {
+    let run = |name: &str| {
+        let id = r.add(name);
+        let job = r.app.create_job("file-clean", &[id], json!({})).unwrap();
+        r.wait_done(&job)
+    };
+    let leaky = run("author.pdf");
+    assert_eq!(leaky.state, JobState::Failed, "{leaky:?}");
+    assert_eq!(
+        leaky.error.as_ref().map(|e| e.code.as_str()),
+        Some("E_OUTPUT_INVALID"),
+        "{leaky:?}"
+    );
+    assert!(leaky.outputs.is_empty(), "the failed output is deleted");
+    let clean = run("clean.pdf");
+    assert_eq!(clean.state, JobState::Succeeded, "{clean:?}");
+    assert!(r.leftover_checks().is_empty(), "{:?}", r.leftover_checks());
 }

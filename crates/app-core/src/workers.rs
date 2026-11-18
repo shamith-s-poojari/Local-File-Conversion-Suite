@@ -54,7 +54,7 @@ impl App {
             },
         );
         let _ = self.store.discard(job);
-        lock(&self.hidden).remove(job);
+        self.events.unhide(job);
     }
 
     /// Page count, encryption and warnings, from the file's sandboxed worker.
@@ -184,6 +184,17 @@ impl App {
                 Some(_) => break,
             }
         }
+        // Every refusal comes before any eviction: a call that is going to
+        // fail must not cost another file its worker.
+        let entry = files.get_mut(file_id).expect("checked above");
+        entry.last_used = Instant::now();
+        if !entry.descriptor.actionable {
+            return Err(CommandError::with("E_INTERNAL", Reason::NotActionable));
+        }
+        let format = entry.descriptor.format;
+        let adapter = self
+            .usable_preview_adapter(format)
+            .ok_or_else(|| CommandError::with("E_INTERNAL", Reason::NotPreviewable))?;
         let mut evicted = Vec::new();
         let needs_worker = files.get(file_id).is_some_and(|e| e.worker.is_none());
         if needs_worker {
@@ -208,14 +219,6 @@ impl App {
             }
         }
         let entry = files.get_mut(file_id).expect("checked above");
-        entry.last_used = Instant::now();
-        if !entry.descriptor.actionable {
-            return Err(CommandError::with("E_INTERNAL", Reason::NotActionable));
-        }
-        let format = entry.descriptor.format;
-        let adapter = self
-            .usable_preview_adapter(format)
-            .ok_or_else(|| CommandError::with("E_INTERNAL", Reason::NotPreviewable))?;
         entry.busy = true;
         let claim = Claim {
             worker: entry.worker.take(),
@@ -254,8 +257,10 @@ impl App {
         format: Format,
         size_bytes: u64,
     ) -> CommandResult<FileWorker> {
-        let (job, _) = self.store.create_job().map_err(CommandError::from_job)?;
-        lock(&self.hidden).insert(job.clone());
+        let job = self
+            .events
+            .create_hidden(&self.store)
+            .map_err(CommandError::from_job)?;
         let started = (|| {
             self.store
                 .stage_inputs(

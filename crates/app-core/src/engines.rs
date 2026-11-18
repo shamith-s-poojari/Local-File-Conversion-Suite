@@ -235,8 +235,9 @@ impl Engines {
         }
         let soffice = soffice_candidates()
             .into_iter()
-            .find(|p| p.is_file())
-            .and_then(|p| p.canonicalize().ok());
+            .filter(|p| p.is_file())
+            .filter_map(|p| p.canonicalize().ok())
+            .find(|p| trusted_binary(p));
         if let Some(grant) =
             soffice.and_then(|real| libreoffice_grant(&converter_sandbox::plain_path(&real)))
         {
@@ -354,7 +355,38 @@ fn find_bin(name: &str) -> Option<PathBuf> {
         .filter(|p| p.is_file() && !is_choco_shim(p, choco.as_deref()))
         .filter_map(|p| scoop_shim_target(&p).unwrap_or(p).canonicalize().ok())
         .map(|p| converter_sandbox::plain_path(&p))
-        .find(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(name)))
+        .filter(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(name)))
+        .find(|p| trusted_binary(p))
+}
+
+/// Whether an engine binary may be granted to the sandbox: a regular file
+/// (the path is already canonical, so a link here means something changed),
+/// owned by root or by the user running the app, and writable by nobody
+/// else. A binary another account can replace would run as that account's
+/// choice with the engine's grants.
+///
+/// The folders above it aren't checked: Homebrew's own are group-writable
+/// by design, and the grant covers the install root read-only anyway.
+///
+/// Windows keeps the name-and-location rule only: ownership and ACLs don't
+/// map onto mode bits, and the places searched (Program Files, WinGet, Scoop,
+/// Chocolatey) are per-user or admin-only already.
+#[cfg(unix)]
+fn trusted_binary(path: &Path) -> bool {
+    // SAFETY: plain syscall with no arguments.
+    let uid = unsafe { libc::geteuid() };
+    std::fs::symlink_metadata(path).is_ok_and(|m| trusted_by(&m, uid))
+}
+
+#[cfg(not(unix))]
+fn trusted_binary(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+#[cfg(unix)]
+fn trusted_by(meta: &std::fs::Metadata, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.file_type().is_file() && (meta.uid() == 0 || meta.uid() == uid) && meta.mode() & 0o022 == 0
 }
 
 /// `PATH` entries that name one place. An empty entry or a relative one means
@@ -507,6 +539,54 @@ mod tests {
 
     #[cfg(unix)]
     const HOME: &str = "/Users/me";
+
+    #[cfg(unix)]
+    fn file_with_mode(dir: &Path, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(format!("engine{mode:o}"));
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_others_can_write_is_not_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        for ok in [0o755, 0o700, 0o555] {
+            assert!(trusted_binary(&file_with_mode(t.path(), ok)), "{ok:o}");
+        }
+        for bad in [0o775, 0o757, 0o777, 0o722] {
+            assert!(!trusted_binary(&file_with_mode(t.path(), bad)), "{bad:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_owned_by_someone_else_is_not_trusted() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let p = file_with_mode(t.path(), 0o755);
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        assert!(trusted_by(&meta, meta.uid()));
+        // Owned by neither root nor the "current" user. (Root owning it is
+        // the other accepted case, covered by /usr/bin on any machine.)
+        if meta.uid() != 0 {
+            assert!(!trusted_by(&meta, meta.uid().wrapping_add(1)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_directories_and_missing_files_are_not_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        let real = file_with_mode(t.path(), 0o755);
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!trusted_binary(&link));
+        assert!(!trusted_binary(t.path()));
+        assert!(!trusted_binary(&t.path().join("missing")));
+    }
 
     #[cfg(unix)]
     fn roots(bin: &str) -> Option<Vec<PathBuf>> {

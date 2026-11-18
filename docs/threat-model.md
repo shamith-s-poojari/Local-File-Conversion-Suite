@@ -29,7 +29,7 @@ renderer (web view)  ->  core (Rust)  ->  worker (Python)  ->  engine (FFmpeg, L
 
 - **Renderer to core.** The interface shows only the app's own pages. It has no file, shell, network, dialog or clipboard permission; it calls the core's commands by name, and the core opens native dialogs and handles files. The web view's content security policy allows no remote sources and navigation away is blocked.
 - **Core to worker.** The core never parses a user's file. It sniffs the first and last 64 KB (a fuzzed, memory-safe Rust parser), then starts a worker. Messages cross a typed protocol with size limits; worker output is bounded, and results are re-sniffed before they can be saved.
-- **Worker to engine.** Workers run engines as child processes, and the sandbox grants an adapter only the engines it lists. Giving engines a minimal environment is still in progress.
+- **Worker to engine.** Workers run engines as child processes, and the sandbox grants an adapter only the engines it lists. Engines start with a minimal environment (the job's folder as `HOME` and `TMPDIR`, system folders on `PATH`, and a few Windows variables), not the worker's.
 - **The sandbox** wraps every worker and everything it starts. It can read the runtime and tools, and read and write the job's own folder; nothing else, and no network. If the self-test fails, processing is off.
 
 ## Mitigations
@@ -51,15 +51,16 @@ renderer (web view)  ->  core (Rust)  ->  worker (Python)  ->  engine (FFmpeg, L
 | Redaction or disarm output that is wrong | The core re-checks it in a separate job ([ADR 0006](adr/0006-independent-output-recheck.md)) | `docs/adr/0006-independent-output-recheck.md` |
 | Vulnerable or unlicensed dependencies | `cargo-deny`, `pip-audit`, Dependabot, actions pinned to commit SHAs | `deny.toml`, `.github/` |
 
-The minimal engine environment is not finished yet. This table names where each lives; it does not say each one is verified on every system.
+This table names where each lives; it does not say each one is verified on every system.
 
 ## Known gaps
 
-- **Windows sandbox.** The AppContainer and Job Object sandbox is written, and CI runs its tests, but it has not been confirmed on real machines. It is the least tested of the three.
+- **Windows sandbox.** The AppContainer and Job Object sandbox is written, and its tests pass on a hosted Windows runner, but it has not been confirmed on real machines. It is the least tested of the three, and the network test doesn't run on Windows.
 - **Windows AppContainer ACEs.** The app grants the container access entries on its own folders. They are not removed when the app is uninstalled; that needs an installer.
-- **Linux system-call filter.** Bubblewrap isolates namespaces (it drops all capabilities, blocks nested user namespaces and caps processes), but there is no seccomp filter. Adding one needs a new crate and is deferred. Linux sandbox tests run in CI and have never passed.
+- **Linux system-call filter.** Bubblewrap isolates namespaces (it drops all capabilities, blocks nested user namespaces and caps processes). A hand-written seccomp deny-list refuses ptrace, mounts, namespaces, kernel modules, BPF, keyrings and clocks, and the 32-bit and x32 system-call interfaces; everything else is allowed. It is built for x86-64 and AArch64 only, and the sandbox is the namespaces alone on another architecture. Its tests pass on GitHub's Ubuntu 24.04 runner; it hasn't been tried elsewhere.
 - **WebView traffic is unmeasured.** The operating system's web view may make its own background connections (certificate checks, updates). Spike S4 will list them. The sandbox does not cover the web view.
 - **Engines are not pinned.** FFmpeg and LibreOffice come from the machine; there are no pinned versions or checksums until packaging (see the [release plan](release-plan.md)).
-- **No bundled runtime or installer.** The app runs from a checkout in development mode, which trusts that checkout's `.venv`.
+- **No installer.** The app runs from a checkout in development mode, which trusts that checkout's `.venv`. A script builds the bundled runtime a release would use (`tools/bundle-runtime`), and a workflow builds unsigned installers from it; neither has run yet.
+- **macOS stray processes.** A worker's background process is found by an environment tag. Apple's own binaries hide their environment, so one of those can't be found; Python workers are. The macOS process cap guards against fork bombs on the user's total, not per job.
 - **Deletion is not secure erasure,** and sync-folder detection is best effort.
 - **A sandboxed worker can still be tricked into wrong output.** The checks (verifiers, re-sniffing, size limits) reduce this; they don't make a result a guarantee.

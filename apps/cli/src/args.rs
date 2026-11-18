@@ -29,6 +29,8 @@ pub struct Opts {
     pub quiet: bool,
     pub force: bool,
     pub keep_folders: bool,
+    /// `convert`: leave out files already in the target format.
+    pub skip_same: bool,
     pub help: bool,
     /// Use a repository checkout as the runtime (also `LFCS_DEV=1`).
     pub dev: bool,
@@ -74,6 +76,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, UsageError
             "-q" | "--quiet" => o.quiet = true,
             "--force" => o.force = true,
             "--keep-folders" => o.keep_folders = true,
+            "--skip-same" => o.skip_same = true,
             "--dev" => o.dev = true,
             "--password-stdin" => o.password_stdin = true,
             // Refused rather than ignored: the value would already be in
@@ -98,6 +101,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Opts, UsageError
                     | "--quiet"
                     | "--force"
                     | "--keep-folders"
+                    | "--skip-same"
                     | "--dev"
                     | "--password-stdin"
                     | "--help"
@@ -224,6 +228,16 @@ mod tests {
         let o = p(&["run", "pdf-protect", "--password-stdin", "--dev"]).unwrap();
         assert!(o.password_stdin && o.dev);
         assert!(p(&["x", "--password-stdin=1"]).is_err());
+    }
+
+    #[test]
+    fn skip_same_is_a_plain_flag() {
+        let o = p(&["convert", "a.png", "--to", "jpg", "--skip-same"]).unwrap();
+        assert!(o.skip_same && !o.keep_folders);
+        assert_eq!(
+            p(&["x", "--skip-same=1"]).unwrap_err().reason,
+            "flagTakesNoValue"
+        );
     }
 
     #[test]

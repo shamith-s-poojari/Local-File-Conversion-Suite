@@ -344,8 +344,20 @@ impl FileWorker {
         })
     }
 
+    /// Ends the worker, then anything it left running under the job's tag
+    /// (a double-forked daemon is nobody's child, so the worker's own tree
+    /// kill can't see it).
+    ///
+    /// Sweeping by the job ID is safe because a job has at most one
+    /// `FileWorker` at a time: an opened file gets a hidden job of its own,
+    /// and a finished job's output worker lives in the job's single preview
+    /// slot, which is taken out of the map while in use. A user job's own
+    /// worker is long finished by then (outputs exist only after it ended),
+    /// and the scheduler ran its own sweep.
     pub fn shutdown(self) {
+        let job = self.job;
         self.worker.shutdown();
+        converter_scheduler::kill_job_strays(job.as_str());
     }
 }
 
