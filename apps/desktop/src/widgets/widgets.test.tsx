@@ -139,3 +139,70 @@ describe("RedactionCanvas", () => {
     expect(m).toContain("Redact this whole page");
   });
 });
+
+describe("lines for the keyboard path (A11Y-2)", () => {
+  const w = (text: string, x0: number, y0: number, x1: number, y1: number): WordBox => ({ text, x0, y0, x1, y1 });
+
+  test("words on one row become one line, read left to right, rows top to bottom", async () => {
+    const { groupLines } = await import("./redactionLines");
+    const lines = groupLines([w("world", 60, 100, 100, 112), w("Second", 10, 130, 50, 142), w("Hello", 10, 101, 50, 113)]);
+    expect(lines.map((l) => l.text)).toEqual(["Hello world", "Second"]);
+    expect(lines[0]).toMatchObject({ x0: 10, x1: 100, y0: 100, y1: 113 });
+  });
+
+  test("a wide gap splits columns, and blank or broken words are dropped", async () => {
+    const { groupLines } = await import("./redactionLines");
+    const lines = groupLines([w("left", 10, 10, 40, 22), w("right", 300, 10, 340, 22), w("  ", 50, 10, 60, 22), w("bad", NaN, 10, 5, 22)]);
+    expect(lines.map((l) => l.text)).toEqual(["left", "right"]);
+  });
+
+  test("a line's box is normalized and padded, and coverage is detected", async () => {
+    const { groupLines, isCovered, lineBox } = await import("./redactionLines");
+    const [line] = groupLines([w("secret", 100, 200, 200, 220)]);
+    const box = lineBox(line!, 2, 400, 800);
+    expect(box.page).toBe(2);
+    expect(box.x0).toBeCloseTo(0.25 - 0.002);
+    expect(box.y1).toBeCloseTo(0.275 + 0.002);
+    expect(isCovered([box], box)).toBe(true);
+    expect(isCovered([{ ...box, page: 1 }], box)).toBe(false);
+    expect(isCovered([{ page: 2, x0: 0, y0: 0, x1: 1, y1: 1 }], box)).toBe(true);
+    expect(isCovered([{ ...box, x1: box.x1 - 0.1 }], box)).toBe(false);
+  });
+
+  test("the canvas offers the line list, announces changes, and uses h3 under the form's h2", () => {
+    const m = renderToStaticMarkup(
+      <RedactionCanvas
+        id="r"
+        label="Areas"
+        schema={{}}
+        value={undefined}
+        onChange={() => {}}
+        ctx={{ files: [], pages: 1, reference: "f", api: noApi as Api }}
+        params={{}}
+        setParam={() => {}}
+      />,
+    );
+    expect(m).toContain("Text on this page");
+    expect(m).toContain('role="status"');
+    expect(m).not.toContain("<h4");
+  });
+});
+
+describe("describedBy and lines text", () => {
+  test("joins the IDs that are set, and writes nothing when none is", async () => {
+    const { describedBy } = await import("./describe");
+    expect(describedBy("a-hint", false, "a-error")).toBe("a-hint a-error");
+    expect(describedBy(undefined, null, "")).toBeUndefined();
+  });
+
+  test("typing Enter keeps the newline: the text stands for the list without blank lines (UX-9)", async () => {
+    const { parseLines, sameLines } = await import("./describe");
+    expect(parseLines("a\n")).toEqual(["a"]);
+    expect(parseLines("a\n\nb")).toEqual(["a", "b"]);
+    expect(parseLines("\n")).toBeUndefined();
+    // The box keeps "a\n" while the list is ["a"]; a different list replaces it.
+    expect(sameLines("a\n", ["a"])).toBe(true);
+    expect(sameLines("a\n", ["a", "b"])).toBe(false);
+    expect(sameLines("", undefined)).toBe(true);
+  });
+});

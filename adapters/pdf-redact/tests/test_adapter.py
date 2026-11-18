@@ -395,19 +395,20 @@ def test_invalid_params(tmp_path, fixture, params, reason) -> None:
     assert [e.detail.root["reason"] for e in run.errors] == [reason]
 
 
-def test_raster_fallback_refuses_a_page_too_big_to_burn_in(monkeypatch) -> None:
+def test_raster_fallback_refuses_a_page_too_big_to_burn_in(monkeypatch, tmp_path) -> None:
     """P3: the redaction fallback checks the picture's size before rendering."""
     import pymupdf  # noqa: PLC0415
     from converter_conformance.harness import load_adapter_class  # noqa: PLC0415
     from converter_sdk import AdapterError, limits  # noqa: PLC0415
 
     module = __import__("sys").modules[load_adapter_class(ADAPTER).__module__]
+    ctx, _ = context(tmp_path, [])
     monkeypatch.setattr(limits, "MAX_PIXELS", 1_000_000)
     doc = pymupdf.open()
     doc.new_page(width=612, height=792)  # about 4 million pixels at 200 dpi
     try:
         with pytest.raises(AdapterError) as e:
-            module.rasterize(doc, {0})
+            module.rasterize(doc, {0}, ctx)
         assert e.value.code == "E_LIMIT_EXCEEDED"
     finally:
         doc.close()

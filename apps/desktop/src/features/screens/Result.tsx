@@ -1,18 +1,25 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { Api, Format, JobSnapshot } from "../../api";
 import { familyOf, formatInfo } from "../../formats";
 import { ArrowRight, ShieldIcon, WarningIcon } from "../../icons";
 import type { Context, FileView } from "../../machines/app";
-import { checkName, formatBytes, OVERWRITE_KEEP, skippedText } from "../../text";
+import { CONFIRM, checkName, formatBytes, OVERWRITE_KEEP, skippedText } from "../../text";
 import { Thumbnail } from "../../widgets/Thumbnail";
 import { actionError } from "../actionError";
-import { canPreview, ErrorBox, FamilyGlyph, FormatTag, Warnings, type Send } from "./shared";
+import { canPreview, ConfirmBar, ErrorBox, FamilyGlyph, FormatTag, useReturnFocus, Warnings, type Send } from "./shared";
 
 // ----------------------------------------------------------------- result
 
 export function Result({ api, ctx, send, state }: { api: Api; ctx: Context; send: Send; state: string }) {
   const job = ctx.job;
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Which question is open: throwing the result away, or going back to
+  // change settings (which also throws it away; audit UX-8).
+  const [confirm, setConfirm] = useState<"discard" | "adjust" | null>(null);
+  const confirmDiscard = confirm === "discard";
+  const discardButton = useRef<HTMLButtonElement>(null);
+  const adjustButton = useRef<HTMLButtonElement>(null);
+  useReturnFocus(confirm === "discard", discardButton);
+  useReturnFocus(confirm === "adjust", adjustButton);
   const [layoutPossible, setLayoutPossible] = useState(false);
   const [keepLayout, setKeepLayout] = useState(true);
   const jobId = job?.jobId;
@@ -98,23 +105,30 @@ export function Result({ api, ctx, send, state }: { api: Api; ctx: Context; send
       )}
       {ctx.error && <ErrorBox code={ctx.error.code} reason={ctx.error.reason} load={() => api.getDiagnostics()} />}
       <footer className="action-bar">
-        {confirmDiscard ? (
-          <>
-            <p className="summary">Discard the result? This can't be undone.</p>
-            <button type="button" className="danger" onClick={() => send({ type: "DISCARD_CONFIRMED" })}>
-              Discard
-            </button>
-            <button type="button" onClick={() => setConfirmDiscard(false)}>
-              Keep
-            </button>
-          </>
+        {confirm === "adjust" ? (
+          <ConfirmBar
+            message={CONFIRM.adjust.message}
+            confirm={CONFIRM.adjust.confirm}
+            keep={CONFIRM.adjust.keep}
+            onConfirm={() => send({ type: "ADJUST" })}
+            onKeep={() => setConfirm(null)}
+          />
+        ) : confirmDiscard ? (
+          <ConfirmBar
+            message="Discard the result? This can't be undone."
+            confirm="Discard"
+            keep="Keep"
+            danger
+            onConfirm={() => send({ type: "DISCARD_CONFIRMED" })}
+            onKeep={() => setConfirm(null)}
+          />
         ) : (
           <>
             <p className="summary" />
-            <button type="button" className="ghost" onClick={() => setConfirmDiscard(true)}>
+            <button type="button" ref={discardButton} className="ghost" onClick={() => setConfirm("discard")}>
               Discard
             </button>
-            <button type="button" onClick={() => send({ type: "ADJUST" })}>
+            <button type="button" ref={adjustButton} onClick={() => setConfirm("adjust")}>
               Adjust
             </button>
             {layoutPossible && (
@@ -199,6 +213,9 @@ function OutputCard({
             {copy === "done" ? "Copied" : "Copy"}
           </button>
         )}
+        <span className="visually-hidden" role="status">
+          {copy === "done" ? `Copied ${o.suggestedName}` : ""}
+        </span>
         {copy !== "idle" && copy !== "done" && (
           <span className="hint error" role="alert">
             {copy}

@@ -34,6 +34,8 @@ mod linux;
 mod macos;
 pub mod probe;
 pub mod runner;
+#[cfg(any(target_os = "linux", all(unix, test)))]
+mod seccomp;
 #[cfg(windows)]
 mod windows;
 
@@ -395,6 +397,17 @@ pub fn too_broad(path: &Path, home: Option<&Path>) -> bool {
             .any(|b| names[0].eq_ignore_ascii_case(b))
 }
 
+/// Fails if a runtime folder is one `too_broad` refuses. The interpreter's own
+/// root already passes that check; the rest come from `sys.path` and the
+/// virtualenv, and a stray entry such as `/` or the home folder would be
+/// mounted read-only into every worker (SEC-10).
+fn refuse_broad_runtime(config: &SandboxConfig, home: Option<&Path>) -> Result<(), String> {
+    if config.runtime_read.iter().any(|p| too_broad(p, home)) {
+        return Err("a runtime folder is too broad to share with workers".into());
+    }
+    Ok(())
+}
+
 /// Whether the current user owns the file or folder (`lstat`: a symlink is
 /// judged by itself). Windows has no owner uid to compare here, so the check
 /// holds there; its development checkouts sit in the user's own profile.
@@ -488,6 +501,8 @@ pub fn plain_path(p: &Path) -> PathBuf {
 /// What the runner executes inside the OS sandbox, before platform wrapping.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(crate) struct Inner<'a> {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub job_id: &'a str,
     pub config: &'a SandboxConfig,
     pub job_dir: PathBuf,
     pub argv: Vec<OsString>,
@@ -546,7 +561,9 @@ impl SandboxLauncher {
         grant: Option<&Grant>,
     ) -> Result<Command, String> {
         let job_dir = canonical(job_dir)?;
+        refuse_broad_runtime(&self.config, home_dir().as_deref())?;
         let inner = Inner {
+            job_id,
             config: &self.config,
             job_dir: job_dir.clone(),
             argv,
@@ -561,12 +578,15 @@ impl SandboxLauncher {
             .arg("--job-id")
             .arg(job_id)
             .arg("--max-processes")
-            .arg(processes.to_string())
-            .arg("--")
-            .args(sandboxed);
+            .arg(processes.to_string());
+        #[cfg(target_os = "linux")]
+        if seccomp::host_arch().is_some() {
+            cmd.arg("--seccomp-fd").arg(linux::SECCOMP_FD.to_string());
+        }
+        cmd.arg("--").args(sandboxed);
         cmd.current_dir(&job_dir);
         cmd.env_clear();
-        for (key, value) in worker_env(&job_dir) {
+        for (key, value) in worker_env(job_id, &job_dir) {
             cmd.env(key, value);
         }
         for (key, value) in grant.map(|g| g.env.as_slice()).unwrap_or_default() {
@@ -607,9 +627,14 @@ pub fn base_env() -> Vec<(&'static str, OsString)> {
 }
 
 /// The scrubbed, rebuilt environment (spec 9.2).
-pub(crate) fn worker_env(job_dir: &Path) -> Vec<(&'static str, OsString)> {
+///
+/// `LFCS_JOB` carries the job's id (the one the scheduler launched it with,
+/// also `--job-id`). A worker that double-forks a daemon keeps it, so the
+/// scheduler finds strays after a job by scanning for this tag (SEC-2).
+pub(crate) fn worker_env(job_id: &str, job_dir: &Path) -> Vec<(&'static str, OsString)> {
     let work = job_dir.join("work").into_os_string();
     let mut env = vec![
+        ("LFCS_JOB", OsString::from(job_id)),
         ("LANG", OsString::from("C.UTF-8")),
         ("LC_ALL", OsString::from("C.UTF-8")),
         ("TMPDIR", work.clone()),
@@ -740,6 +765,39 @@ mod tests {
             "/Applications/LibreOffice.app",
         ] {
             assert!(!too_broad(Path::new(p), home), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_worker_environment_is_tagged_with_the_job() {
+        let env = worker_env("j_abc123", Path::new("/data/jobs/j_abc123"));
+        let tag = env
+            .iter()
+            .find(|(k, _)| *k == "LFCS_JOB")
+            .expect("LFCS_JOB");
+        assert_eq!(tag.1, "j_abc123");
+    }
+
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn broad_runtime_folders_are_refused() {
+        let home = Some(Path::new("/Users/me"));
+        let config = |read: &[&str]| SandboxConfig {
+            python_links: Vec::new(),
+            python: "/py/bin/python".into(),
+            runtime_read: read.iter().map(PathBuf::from).collect(),
+            exec_roots: vec![],
+            adapters_dir: "/app/adapters".into(),
+            runner: "/x".into(),
+            runner_args: vec![],
+            interpreter_processes: 0,
+            grants: BTreeMap::new(),
+        };
+        assert!(refuse_broad_runtime(&config(&["/opt/py", "/Users/me/venv"]), home).is_ok());
+        for bad in ["/", "/Users/me", "/Users", "/Library", "rel/dir"] {
+            let c = config(&["/opt/py", bad]);
+            assert!(refuse_broad_runtime(&c, home).is_err(), "{bad}");
         }
     }
 

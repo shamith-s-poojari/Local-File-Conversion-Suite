@@ -54,20 +54,22 @@ def output_format(fmt: str) -> str:
 # ------------------------------------------------------------ verifying
 
 
-def verify(ctx: JobContext, output: Path) -> dict[str, Any]:
+def verify(ctx: JobContext, output: Path, remove_links: bool = False) -> dict[str, Any]:
     """Run ``verify.py`` in a fresh process (``converter_sdk.verify``): it sees
     only the output's job-relative path. A verifier that can't report, or
     reports something that isn't a list of findings, is a failed verification,
     never a pass."""
-    report = run_verifier(ctx, VERIFY, output, timeout_s=VERIFY_TIMEOUT_S)
+    report = run_verifier(
+        ctx, VERIFY, output, {"removeLinks": remove_links}, timeout_s=VERIFY_TIMEOUT_S
+    )
     if report is None or not isinstance(report.get("findings"), list):
         return {"error": "verifierFailed"}
     return report
 
 
-def check_output(ctx: JobContext, output: Path) -> None:
+def check_output(ctx: JobContext, output: Path, remove_links: bool = False) -> None:
     """Fail the job, and delete the output, unless the verifier finds nothing active."""
-    report = verify(ctx, output)
+    report = verify(ctx, output, remove_links)
     if "error" in report:
         output.unlink(missing_ok=True)
         raise AdapterError("E_INTERNAL", {"reason": "verifierFailed"}, retryable=False)
@@ -165,7 +167,7 @@ class FileDisarmAdapter(Adapter):
         ctx.stage("verify", 2, 2)
         for k, output in enumerate(outputs):
             ctx.check_cancelled()
-            check_output(ctx, output.path)
+            check_output(ctx, output.path, remove_links)
             ctx.progress("verify", k + 1, n)
 
         self.warn(ctx, totals, flattened, signed)

@@ -32,11 +32,14 @@ import zipfile
 from bisect import bisect_left
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
+from . import xmlsafe
 from .errors import AdapterError
 from .markup import _strip_declaration, check_zip, read_text
 from .protocol import Finding
+from .urls import CONTROL as _CONTROL
+from .urls import WEB_SCHEMES, is_web_url  # noqa: F401  (re-exported)
+from .urls import scheme as _scheme
 
 OOXML_FORMATS = ("docx", "xlsx", "pptx", "docm", "xlsm", "pptm")
 OOXML_MEMBER_MAX = 256 * 1024 * 1024
@@ -51,9 +54,6 @@ PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 CFB_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-
-WEB_SCHEMES = {"http", "https", "mailto", "tel"}
-_CONTROL = re.compile(r"[\x00-\x20\x7f]")
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -94,21 +94,8 @@ def _is_standard_svg_doctype(data: bytes) -> bool:
 
 
 def parse_xml(data: bytes, *, svg: bool = False) -> Any:
-    """Parse untrusted XML: no entities, DTD or network. A DOCTYPE is refused,
-    except (with ``svg``) the standard SVG 1.0 or 1.1 one."""
-    etree = _etree()
-    parser = etree.XMLParser(
-        resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
-    )
-    try:
-        root = etree.fromstring(data, parser=parser)
-    except etree.XMLSyntaxError:
-        raise AdapterError("E_INPUT_CORRUPT") from None
-    if root is None or b"<!ENTITY" in data[:100_000]:
-        raise AdapterError("E_INPUT_CORRUPT")
-    if root.getroottree().docinfo.doctype and not (svg and _is_standard_svg_doctype(data)):
-        raise AdapterError("E_INPUT_CORRUPT")
-    return root
+    """``xmlsafe.parse_xml``, allowing (with ``svg``) the standard SVG 1.0 or 1.1 DOCTYPE."""
+    return xmlsafe.parse_xml(data, doctype_ok=_is_standard_svg_doctype if svg else None)
 
 
 def _serialize(root: Any) -> bytes:
@@ -140,27 +127,8 @@ def _drop(el: Any) -> None:
 # ------------------------------------------------------------- URLs
 
 
-def _scheme(url: str) -> str:
-    """Lower-case scheme of ``url`` after removing the control characters
-    browsers ignore. ``""`` for relative references; ``"//"`` for network paths
-    and ``"unc"`` for ``\\\\host`` paths."""
-    u = _CONTROL.sub("", url)
-    if u.startswith(("//", "\\\\", "\\/", "/\\")):
-        return "//"
-    try:
-        return urlsplit(u).scheme.lower()
-    except ValueError:
-        return "invalid"
-
-
 def _is_web(url: str) -> bool:
     return _scheme(url) in WEB_SCHEMES
-
-
-def is_web_url(url: str) -> bool:
-    """Whether ``url`` is a plain web or mail link (``http``, ``https``,
-    ``mailto``, ``tel``), the kind of link that is a link and nothing more."""
-    return _is_web(url)
 
 
 # ------------------------------------------------------------- PDF

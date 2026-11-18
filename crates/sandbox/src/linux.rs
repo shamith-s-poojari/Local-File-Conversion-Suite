@@ -10,8 +10,9 @@
 //! newer; stops a worker creating a nested user namespace, the usual way to
 //! regain capabilities), and shells masked with `/dev/null` so a worker can't
 //! start one (the probe's `spawn_shell`). The runner adds a task cap
-//! (`RLIMIT_NPROC`). **Still missing: a seccomp filter** (it needs a crate
-//! that isn't approved), so the syscall surface is the kernel's own.
+//! (`RLIMIT_NPROC`). A small deny-list seccomp filter (`seccomp.rs`) goes in
+//! through `--seccomp`: the runner makes the program's file descriptor (see
+//! [`SECCOMP_FD`]) because it is the one that starts bwrap.
 //!
 //! **Not yet verified on a Linux machine** — the probe tests run on Linux CI
 //! only where bwrap can create namespaces, and skip otherwise. The argument
@@ -25,6 +26,17 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::Inner;
+
+/// The descriptor number bwrap reads its seccomp program from. The runner
+/// (`--seccomp-fd`) puts the program there just before starting bwrap, so the
+/// number is agreed in advance and nothing leaks to the other workers the
+/// scheduler starts. Above the standard streams and the few the runner holds.
+pub(crate) const SECCOMP_FD: i32 = 10;
+
+/// Size of the private `/tmp`. Workers keep their files in the job folder
+/// (`TMPDIR` points there); `/tmp` holds only an engine's sockets and lock
+/// files, and a tmpfs is memory, so a worker mustn't fill it. bwrap 0.9+.
+const TMP_SIZE: u64 = 256 * 1024 * 1024;
 
 const CANDIDATES: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap"];
 
@@ -103,9 +115,13 @@ fn args(
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
-        "--tmpfs".into(),
-        "/tmp".into(),
     ];
+    // `--size` applies to the next tmpfs and is new in bwrap 0.9; older
+    // versions reject it, so there /tmp stays as large as the machine allows.
+    if version.is_some_and(|v| v >= (0, 9)) {
+        argv.extend(["--size".into(), TMP_SIZE.to_string().into()]);
+    }
+    argv.extend(["--tmpfs".into(), "/tmp".into()]);
     for p in SYSTEM_READ {
         if Path::new(p).exists() {
             argv.extend(["--ro-bind".into(), (*p).into(), (*p).into()]);
@@ -154,7 +170,7 @@ fn args(
         job,
     ]);
     // --clearenv wiped the runner's environment; set it again inside.
-    for (key, value) in crate::worker_env(&inner.job_dir) {
+    for (key, value) in crate::worker_env(inner.job_id, &inner.job_dir) {
         argv.extend(["--setenv".into(), key.into(), value]);
     }
     for (key, value) in inner.grant.map(|g| g.env.as_slice()).unwrap_or_default() {
@@ -166,6 +182,9 @@ fn args(
     if version.is_some_and(|v| v >= (0, 8)) {
         argv.push("--unshare-user".into());
         argv.push("--disable-userns".into());
+    }
+    if crate::seccomp::host_arch().is_some() {
+        argv.extend(["--seccomp".into(), SECCOMP_FD.to_string().into()]);
     }
     argv.push("--".into());
     argv.extend(inner.argv.iter().cloned());
@@ -202,6 +221,7 @@ mod tests {
             grants: Default::default(),
         };
         let inner = Inner {
+            job_id: "j1",
             config: &config,
             job_dir: PathBuf::from("/data/jobs/j1"),
             argv: vec!["/py/bin/python".into()],
@@ -240,6 +260,37 @@ mod tests {
             let user = a.iter().position(|x| x == "--unshare-user").unwrap();
             assert!(user < dashes, "{v:?}");
         }
+    }
+
+    #[test]
+    fn tmp_is_size_limited_where_bwrap_can() {
+        for v in [Some((0, 8)), Some((0, 4)), None] {
+            assert!(!argv(v, &[]).contains(&"--size".to_string()), "{v:?}");
+        }
+        for v in [(0, 9), (0, 11), (1, 0)] {
+            let a = argv(Some(v), &[]);
+            let size = a.iter().position(|x| x == "--size").expect("--size");
+            assert_eq!(a[size + 1], TMP_SIZE.to_string());
+            // The flag belongs to the very next tmpfs: /tmp.
+            assert_eq!(&a[size + 2..size + 4], ["--tmpfs", "/tmp"]);
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_seccomp_filter_is_passed_before_the_program() {
+        let a = argv(Some((0, 9)), &[]);
+        let i = a.iter().position(|x| x == "--seccomp").expect("--seccomp");
+        assert_eq!(a[i + 1], SECCOMP_FD.to_string());
+        assert!(i < a.iter().position(|x| x == "--").unwrap());
+    }
+
+    #[test]
+    fn the_worker_environment_carries_the_job_tag() {
+        let a = argv(Some((0, 9)), &[]);
+        let i = a.iter().position(|x| x == "LFCS_JOB").expect("LFCS_JOB");
+        assert_eq!(a[i - 1], "--setenv");
+        assert_eq!(a[i + 1], "j1");
     }
 
     #[test]

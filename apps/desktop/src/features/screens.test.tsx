@@ -14,7 +14,11 @@ import { CHECK_NAMES, ERRORS, REASONS, SELFTEST_NAMES, STARTUP_FAILED, installCo
 import { SchemaForm, missingRequired } from "./SchemaForm";
 import { Configure, Failed, Home, Result, Review, Saved, Settings } from "./screens";
 import { inputNames } from "./screens/Result";
-import { ErrorBox, Warnings } from "./screens/shared";
+import { ConfirmBar, ErrorBox, FormatTag, OpenSettingsContext, Warnings } from "./screens/shared";
+import { ProgressScreen } from "./screens/Progress";
+import { Checking } from "./screens/Checking";
+import { selfTestState } from "./diagnostics";
+import { App } from "../App";
 import { actionError } from "./actionError";
 import { FileRow } from "./screens/Review";
 
@@ -545,5 +549,132 @@ describe("Result: Partly done lists what failed (U8)", () => {
     ]);
     expect(m).toContain("Pages: 2, 5.");
     expect(m).not.toContain("secret");
+  });
+});
+
+describe("Home banner while the self-test runs (UX-5)", () => {
+  const render = (diag: Diagnostics | null) => html(<Home api={noApi} send={send} diag={diag} />);
+  const running: Diagnostics = { ...diagnostics, processingEnabled: false, sandbox: null };
+
+  test("shows a neutral status, not the red alert", () => {
+    const m = render(running);
+    expect(m).toContain("Checking that the sandbox works");
+    expect(m).toContain('role="status"');
+    expect(m).not.toContain('role="alert"');
+    expect(m).not.toContain("banner error");
+    expect(m).not.toContain(esc(ERRORS.E_SANDBOX_UNAVAILABLE!.what));
+  });
+
+  test("the states are told apart", () => {
+    expect(selfTestState(running)).toBe("running");
+    expect(selfTestState({ ...diagnostics, processingEnabled: false })).toBe("failed");
+    expect(selfTestState({ ...diagnostics, processingEnabled: true, sandbox: { passed: true, attempts: [] } })).toBe("passed");
+    expect(selfTestState({ ...running, startupError: "x" })).toBe("startupFailed");
+    expect(selfTestState(null)).toBe("unknown");
+  });
+
+  test("a failed test links to Settings when the app can open it (UX-6)", () => {
+    const failed = { ...diagnostics, processingEnabled: false };
+    expect(render(failed)).not.toContain("Open Settings");
+    const m = html(
+      <OpenSettingsContext.Provider value={() => {}}>
+        <Home api={noApi} send={send} diag={failed} />
+      </OpenSettingsContext.Provider>,
+    );
+    expect(m).toContain("Open Settings");
+  });
+});
+
+describe("Settings link where it's needed (UX-6)", () => {
+  const withSettings = (node: React.ReactNode) => html(<OpenSettingsContext.Provider value={() => {}}>{node}</OpenSettingsContext.Provider>);
+  test("a missing engine's message links to Settings", () => {
+    expect(withSettings(<ErrorBox code="E_INTERNAL" reason="engineMissing" diag={diagnostics} />)).toContain("Open Settings");
+    expect(withSettings(<ErrorBox code="E_SANDBOX_UNAVAILABLE" />)).toContain("Open Settings");
+    expect(withSettings(<ErrorBox code="E_TIMEOUT" />)).not.toContain("Open Settings");
+  });
+});
+
+describe("leaving while it works (UX-7)", () => {
+  test("the checking screen has a Cancel button and a labelled heading", () => {
+    const m = html(<Checking send={send} />);
+    expect(m).toContain("Cancel");
+    expect(m).toMatch(/<h1[^>]*tabindex="-1"/);
+  });
+
+  test("setting up the job can be cancelled", () => {
+    const m = html(<Configure api={noApi} ctx={context({ operation: "pdf-merge" })} send={send} registry={registry} busy />);
+    expect(m).toMatch(/<button[^>]*>Cancel<\/button>/);
+  });
+});
+
+describe("keeping focus on a waiting button (A11Y)", () => {
+  test("Convert that isn't ready is aria-disabled, so it stays reachable", () => {
+    const m = html(<Configure api={noApi} ctx={context({ operation: null })} send={send} registry={registry} />);
+    expect(primary(m, "Start")).toContain('aria-disabled="true"');
+    expect(primary(m, "Start")).not.toMatch(/\sdisabled/);
+  });
+
+  test("Cancel while cancelling is aria-disabled, not removed from the tab order", () => {
+    const m = html(<ProgressScreen ctx={context({ job: job({ state: "running" }) })} send={send} cancelling />);
+    expect(m).toMatch(/<button[^>]*aria-disabled="true"[^>]*>Cancel<\/button>/);
+    expect(m).not.toMatch(/<button[^>]*\sdisabled/);
+  });
+});
+
+describe("confirming before work is lost (UX-8)", () => {
+  test("the question is a dialog with the safe answer first", () => {
+    const m = html(<ConfirmBar message="Sure?" confirm="Yes" keep="No" onConfirm={() => {}} onKeep={() => {}} />);
+    expect(m).toContain('role="alertdialog"');
+    expect(m.indexOf(">No<")).toBeLessThan(m.indexOf(">Yes<"));
+  });
+
+  test("Result asks nothing until Adjust is pressed, and offers it as a button", () => {
+    const m = html(<Result api={noApi} ctx={context({ job: job() })} send={send} state="ready" />);
+    expect(m).not.toContain("alertdialog");
+    expect(m).toContain(">Adjust<");
+  });
+});
+
+describe("tool list failure can be retried (UX-10)", () => {
+  test("shows what happened and a Try again button", () => {
+    const m = html(<Configure api={noApi} ctx={context()} send={send} registry={null} registryFailed onRetryRegistry={() => {}} />);
+    expect(m).toContain("The list of tools couldn");
+    expect(m).toContain("Try again");
+  });
+  test("no message while it simply hasn't loaded yet", () => {
+    const m = html(<Configure api={noApi} ctx={context()} send={send} registry={null} />);
+    expect(m).not.toContain("couldn&#x27;t be loaded");
+  });
+});
+
+describe("small markup fixes (A11Y)", () => {
+  test("an unknown type is spoken, not read as a question mark", () => {
+    expect(html(<FormatTag format="unknown" />)).toContain("Unknown type");
+  });
+
+  test("a field's description and error are both tied to it", () => {
+    const schema = { type: "object", properties: { note: { type: "string", title: "Note", description: "Shown on the stamp." } } };
+    const ctx = { files: [], pages: 0, reference: "", api: noApi };
+    const m = html(<SchemaForm schema={schema} params={{ note: "x" }} onChange={() => {}} ctx={ctx} invalid={["/note"]} />);
+    expect(m).toContain('aria-describedby="param-note-hint param-note-error"');
+    expect(m).toContain('id="param-note-hint"');
+  });
+
+  test("a list field shows its items one per line and says so", () => {
+    const schema = { type: "object", properties: { words: { type: "array", items: { type: "string" }, title: "Words" } } };
+    const ctx = { files: [], pages: 0, reference: "", api: noApi };
+    const m = html(<SchemaForm schema={schema} params={{ words: ["a", "b"] }} onChange={() => {}} ctx={ctx} invalid={[]} />);
+    expect(m).toContain(">a\nb</textarea>");
+    expect(m).toContain("One per line.");
+  });
+
+  test("a required field is marked for assistive technology", () => {
+    const schema = { type: "object", required: ["name"], properties: { name: { type: "string", title: "Name" } } };
+    const ctx = { files: [], pages: 0, reference: "", api: noApi };
+    expect(html(<SchemaForm schema={schema} params={{}} onChange={() => {}} ctx={ctx} invalid={[]} />)).toContain('aria-required="true"');
+  });
+
+  test("the page's main area can take the skip link's focus", () => {
+    expect(html(<App api={noApi} />)).toContain('<main id="main" tabindex="-1">');
   });
 });

@@ -248,3 +248,21 @@ test("Partly done falls back to File N while the order is unknown or a file is g
   expect(partFailure({ code: "E_WORKER", inputs: [0, 1] }, inputNames(null, []))?.names).toBe("File 1, File 2");
   expect(inputNames(["gone"], [])).toEqual([""]);
 });
+
+test("a job that appears after Cancel is cancelled and discarded (UX-7)", async () => {
+  const { startJob } = await import("./App");
+  const calls: string[] = [];
+  const api = {
+    createJob: async () => "j_9",
+    cancelJob: async (id: string) => void calls.push(`cancel ${id}`),
+    discardJob: async (id: string) => void calls.push(`discard ${id}`),
+  } as unknown as Api;
+  const input = { operation: "pdf-merge", to: null, fileIds: ["a"], params: {} };
+  const live = new AbortController();
+  expect(await startJob(api, input, live.signal)).toEqual({ jobId: "j_9", skipped: 0 });
+  expect(calls).toEqual([]);
+  const stopped = new AbortController();
+  stopped.abort();
+  await startJob(api, input, stopped.signal);
+  expect(calls).toEqual(["cancel j_9", "discard j_9"]);
+});

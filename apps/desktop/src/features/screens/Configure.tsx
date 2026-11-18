@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AdapterEntry, Api, ConversionTarget, Diagnostics, Format, OperationTarget, Registry, Targets } from "../../api";
 import { FAMILIES, familyOf, formatInfo, TIER_TEXT, type Family } from "../../formats";
 import { ArrowRight, CheckIcon, CloseIcon, PlusIcon } from "../../icons";
 import type { Context } from "../../machines/app";
-import { fileIds } from "../../machines/app";
+import { fileIds, startOverNeedsConfirm } from "../../machines/app";
 import { isAction, suggest, type Suggestion } from "../../suggestions";
-import { NEEDS, TARGETS_FAILED } from "../../text";
+import { CONFIRM, ENGINES_IN_SETTINGS, NEEDS, REGISTRY_FAILED, STARTING, TARGETS_FAILED, TARGETS_RETRY } from "../../text";
 import { RadioGroup } from "../radio";
 import { usePicker } from "../pickers";
 import { defaults, missingLabels, SchemaForm } from "../SchemaForm";
 import { loadTargets } from "../targets";
-import { ErrorBox, FilePreview, FileProblem, FormatTag, fileMeta, Reveals, type Send } from "./shared";
+import { ConfirmBar, ErrorBox, FilePreview, FileProblem, FormatTag, fileMeta, Reveals, SettingsLink, useReturnFocus, type Send } from "./shared";
 
 const TOOLS: Record<string, string> = {
   "images-to-pdf": "Put the images into one PDF, one image per page.",
@@ -84,6 +84,8 @@ export function Configure({
   registry,
   diag = null,
   busy = false,
+  registryFailed = false,
+  onRetryRegistry,
 }: {
   api: Api;
   ctx: Context;
@@ -93,6 +95,9 @@ export function Configure({
   diag?: Diagnostics | null;
   /** The job is being checked and created (the machine's `preflight`). */
   busy?: boolean;
+  /** The tool list couldn't be loaded: say so and offer to try again (audit UX-10). */
+  registryFailed?: boolean;
+  onRetryRegistry?: () => void;
 }) {
   const ids = fileIds(ctx);
   // One array per set of files, so the effects below run when the files
@@ -102,8 +107,13 @@ export function Configure({
   const [targets, setTargets] = useState<Targets | null>(null);
   const [targetsError, setTargetsError] = useState<string | null>(null);
   const picker = usePicker(api, send);
+  const [attempt, setAttempt] = useState(0);
+  const [confirmingStartOver, setConfirmingStartOver] = useState(false);
+  const startOverButton = useRef<HTMLButtonElement>(null);
+  useReturnFocus(confirmingStartOver, startOverButton);
   useEffect(() => {
     let live = true;
+    setTargetsError(null);
     void loadTargets(api, idList).then((r) => {
       if (!live) return;
       setTargets(r.targets);
@@ -112,7 +122,7 @@ export function Configure({
     return () => {
       live = false;
     };
-  }, [api, idList]);
+  }, [api, idList, attempt]);
   const [duplicates, setDuplicates] = useState(0);
   useEffect(() => {
     let live = true;
@@ -145,6 +155,9 @@ export function Configure({
     if (adapter) needs.push(...missingLabels(adapter.paramsSchema, formParams, widgetCtx.pages));
     else needs.push(ctx.operation ? NEEDS.loading : NEEDS.choice);
   }
+  const engineMissing = [...(targets?.operations ?? []), ...list0(targets)].some(
+    (t) => typeof t.unavailable === "object" && t.unavailable !== null && (t.unavailable as { reason?: string }).reason === "engineMissing",
+  );
   const encrypted = ctx.files.some((f) => f.inspect && f.inspect.encryption !== "none");
   const invalid = ctx.error?.issues?.map((i) => i.path) ?? [];
   const { list, mixed } = conversionChoices(targets);
@@ -291,8 +304,18 @@ export function Configure({
               </div>
             )}
             {targetsError && (
-              <p className="hint error" role="alert">
-                {TARGETS_FAILED} {targetsError}
+              <div role="alert">
+                <p className="hint error">
+                  {TARGETS_FAILED} {targetsError}
+                </p>
+                <button type="button" className="sm" onClick={() => setAttempt((n) => n + 1)}>
+                  {TARGETS_RETRY}
+                </button>
+              </div>
+            )}
+            {engineMissing && (
+              <p className="hint">
+                {ENGINES_IN_SETTINGS} <SettingsLink />
               </p>
             )}
             {targets !== null && !targetsError && conversions.length === 0 && (
@@ -412,6 +435,19 @@ export function Configure({
               />
             </section>
           )}
+          {registryFailed && !registry && (
+            <div className="banner error" role="alert">
+              <div>
+                <strong>{REGISTRY_FAILED.what}</strong>
+                <p>{REGISTRY_FAILED.todo}</p>
+                {onRetryRegistry && (
+                  <button type="button" className="sm" onClick={onRetryRegistry}>
+                    {REGISTRY_FAILED.retry}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           {ctx.error && <ErrorBox code={ctx.error.code} reason={ctx.error.reason} diag={diag} />}
         </div>
       </div>
@@ -429,17 +465,40 @@ export function Configure({
             </span>
           )}
         </p>
-        <button type="button" className="ghost" onClick={() => send({ type: "CLEAR" })} disabled={busy}>
-          Start over
-        </button>
+        {busy ? (
+          <button type="button" onClick={() => send({ type: "CANCEL" })}>
+            {STARTING.cancel}
+          </button>
+        ) : confirmingStartOver ? (
+          <ConfirmBar
+            message={CONFIRM.startOver.message}
+            confirm={CONFIRM.startOver.confirm}
+            keep={CONFIRM.startOver.keep}
+            onConfirm={() => send({ type: "CLEAR" })}
+            onKeep={() => setConfirmingStartOver(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            ref={startOverButton}
+            className="ghost"
+            onClick={() => (startOverNeedsConfirm(ctx) ? setConfirmingStartOver(true) : send({ type: "CLEAR" }))}
+          >
+            Start over
+          </button>
+        )}
+        {/* aria-disabled, not disabled: focus stays on the button while it
+            waits, and a screen reader can reach what it's waiting for. */}
         <button
           type="button"
           className="primary"
-          disabled={needs.length > 0 || busy}
+          aria-disabled={needs.length > 0 || busy || confirmingStartOver || undefined}
           aria-describedby={needs.length > 0 ? "needs-note" : undefined}
-          onClick={() => send({ type: "START" })}
+          onClick={() => {
+            if (needs.length === 0 && !busy && !confirmingStartOver) send({ type: "START" });
+          }}
         >
-          <span>{busy ? "Starting…" : ctx.to ? "Convert" : "Start"}</span>
+          <span>{busy ? STARTING.busy : ctx.to ? "Convert" : "Start"}</span>
           <span className="btn-icon">
             <ArrowRight />
           </span>
@@ -483,6 +542,10 @@ export function TargetTile({
       <span className={`tier tier-${c.tier}`}>{tier.label}</span>
     </button>
   );
+}
+
+function list0(t: Targets | null): ConversionTarget[] {
+  return conversionChoices(t).list;
 }
 
 function unavailableText(u: unknown): string {

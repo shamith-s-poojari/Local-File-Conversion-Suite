@@ -36,10 +36,10 @@ fn pair(table: &'static [(&str, &str)], key: &str) -> Option<&'static str> {
 /// The message for a failure: the text of its reason when the app has one
 /// (as the app's error box does), else the text of its code.
 pub fn message(code: &str, reason: Option<&str>) -> String {
-    if let Some(e) = reason.and_then(|r| find(REASONS, r)) {
+    if let Some(e) = reason.and_then(|r| find(CLI_REASONS, r).or_else(|| find(REASONS, r))) {
         return e.text();
     }
-    match find(ERRORS, code) {
+    match find(CLI_ERRORS, code).or_else(|| find(ERRORS, code)) {
         Some(e) => e.text(),
         None => format!("Something unexpected went wrong ({code})."),
     }
@@ -62,6 +62,68 @@ pub fn folder_truncated(folder: &str, count: usize) -> String {
     let s = if count == 1 { "" } else { "s" };
     format!("{count} more file{s} in {folder} weren't added: up to 200 files at once.")
 }
+
+// ---- the command line's own wording ----
+//
+// The shared tables below are written for the app's windows ("See Settings",
+// "Check the highlighted fields", "reopen the app"). Where that wording means
+// nothing on a command line, the command line says its own. These entries
+// win over the shared ones; text.ts must never carry command-line wording
+// (text.test.ts checks), so a hint like `lfcs doctor` lives only here.
+
+pub const CLI_ERRORS: &[Entry] = &[
+    Entry {
+        code: "E_USAGE",
+        what: "That command isn't complete or isn't right.",
+        why: Some("An option or argument is missing, or isn't one lfcs knows."),
+        todo: Some("Run lfcs --help to see how to use it."),
+    },
+    Entry {
+        code: "E_NO_ROUTE",
+        what: "These files can't be made into that format.",
+        why: None,
+        todo: Some("Run lfcs targets to see what each file can become."),
+    },
+    Entry {
+        code: "E_SANDBOX_UNAVAILABLE",
+        what: "Processing is turned off.",
+        why: Some("The sandbox's self-test didn't pass on this computer, so no file is opened."),
+        todo: Some("Run lfcs doctor to see the self-test result."),
+    },
+    Entry {
+        code: "E_PARAMS_INVALID",
+        what: "Some settings aren't valid.",
+        why: None,
+        todo: Some("Check the values given with --set or --params."),
+    },
+    Entry {
+        code: "E_WRONG_STATE",
+        what: "That can't be done at this step.",
+        why: Some("The job has moved on, or hasn't reached the step that action needs."),
+        todo: Some("Run the command again."),
+    },
+    Entry {
+        code: "E_SAVE_FAILED",
+        what: "The results couldn't be saved.",
+        why: Some("The folder may be read-only, full, or gone."),
+        todo: Some("Give another folder with --out and try again."),
+    },
+];
+
+pub const CLI_REASONS: &[Entry] = &[
+    Entry {
+        code: "engineMissing",
+        what: "A program this needs isn't installed.",
+        why: None,
+        todo: Some("Install it, then run the command again. lfcs doctor lists what was found."),
+    },
+    Entry {
+        code: "allSkipped",
+        what: "Every file is already in that format.",
+        why: None,
+        todo: Some("Choose a different format."),
+    },
+];
 
 // ---- copied from apps/desktop/src/text.ts (checked by the test below) ----
 
@@ -86,9 +148,9 @@ pub const ERRORS: &[Entry] = &[
     Entry { code: "E_BUSY", what: "This job is busy. Try again in a moment.", why: None, todo: None },
     Entry { code: "E_WRONG_STATE", what: "That can't be done at this step.", why: Some("The job has moved on, or hasn't reached the step that action needs."), todo: Some("Go back and try again.") },
     Entry { code: "E_UNKNOWN_JOB", what: "This job no longer exists.", why: None, todo: None },
-    Entry { code: "E_USAGE", what: "That command isn't complete or isn't right.", why: Some("An option or argument is missing, or isn't one lfcs knows."), todo: Some("Run lfcs --help to see how to use it.") },
+    Entry { code: "E_USAGE", what: "That request isn't complete or isn't right.", why: Some("Something it needs is missing, or isn't recognised."), todo: Some("Check your choices and try again.") },
     Entry { code: "E_NO_USABLE_FILES", what: "None of these files can be used.", why: Some("They're missing, of a type the app doesn't handle, or couldn't be read."), todo: Some("Check the files and try again.") },
-    Entry { code: "E_NO_ROUTE", what: "These files can't be made into that format.", why: None, todo: Some("Run lfcs targets to see what each file can become.") },
+    Entry { code: "E_NO_ROUTE", what: "These files can't be made into that format.", why: None, todo: Some("Choose a different format. The choices shown are what these files can become.") },
     Entry { code: "E_PARTIAL", what: "Some files couldn't be done. The others are ready.", why: None, todo: Some("The notes say which files failed and why.") },
     Entry { code: "E_SAVE_FAILED", what: "The results couldn't be saved.", why: Some("The folder may be read-only, full, or gone."), todo: Some("Choose another folder and try again.") },
     Entry { code: "E_UNKNOWN_FILE", what: "This file was removed.", why: None, todo: None },
@@ -436,6 +498,54 @@ mod tests {
     #[test]
     fn file_errors_match_text_ts() {
         check_pairs("SNIFF_ERRORS", SNIFF_ERRORS);
+    }
+
+    #[test]
+    fn command_line_wording_overrides_only_known_entries() {
+        for e in CLI_ERRORS {
+            assert!(
+                find(ERRORS, e.code).is_some(),
+                "{} has no shared entry to override",
+                e.code
+            );
+        }
+        for e in CLI_REASONS {
+            assert!(
+                find(REASONS, e.code).is_some(),
+                "{} has no shared entry to override",
+                e.code
+            );
+        }
+    }
+
+    #[test]
+    fn the_shared_tables_carry_no_command_line_hints() {
+        // The shared text is the app's too: no program name, flag or command.
+        let shared = |e: &Entry| {
+            [Some(e.what), e.why, e.todo]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for e in ERRORS.iter().chain(REASONS) {
+            let t = shared(e);
+            assert!(
+                !t.contains("lfcs") && !t.contains(" --"),
+                "{} has command-line wording: {t}",
+                e.code
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_line_says_its_own_words() {
+        assert!(message("E_USAGE", None).contains("lfcs --help"));
+        assert!(message("E_NO_ROUTE", None).contains("lfcs targets"));
+        let off = message("E_SANDBOX_UNAVAILABLE", None);
+        assert!(off.contains("lfcs doctor") && !off.contains("Settings"));
+        assert!(!message("E_PARAMS_INVALID", None).contains("highlighted"));
+        assert!(!message("E_INTERNAL", Some("engineMissing")).contains("reopen"));
     }
 
     #[test]

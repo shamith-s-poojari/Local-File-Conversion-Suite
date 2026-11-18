@@ -371,7 +371,7 @@ def test_docx_properties_comments_and_order(tmp_path: Path) -> None:
         assert b"Ada" not in core
         assert b"Bob" not in core
         assert b"2024" not in core
-        assert b"Plans" in core
+        assert b"Plans" not in core  # the title is free text about the document too
         app = z.read("docProps/app.xml")
         for gone in (b"Acme", b"Eve", b"Normal.dotm", b"TotalTime", b"16.0"):
             assert gone not in app
@@ -555,7 +555,7 @@ def test_an_unclean_part_fails_the_job_instead_of_going_out(
     module = sys.modules[cls.__module__]
     for attr, replacement in (
         ("_blank_tracked", lambda data: data),
-        ("_clean_picture", lambda data: None),
+        ("_clean_picture", lambda data, tick: None),
     ):
         monkeypatch.setattr(module, attr, replacement)
         job, rel = make_job_dir(tmp_path / attr, [audit_docx(tmp_path / f"{attr}.docx")])

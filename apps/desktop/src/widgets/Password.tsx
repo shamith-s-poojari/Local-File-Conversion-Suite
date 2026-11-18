@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { describedBy } from "./describe";
 import type { WidgetProps } from "./types";
 
 /** `password` widget: masked, with a reveal toggle. The value lives only in
@@ -15,7 +16,7 @@ export function Password({ id, label, schema, value, onChange, invalid, errorId 
           autoComplete="new-password"
           spellCheck={false}
           aria-invalid={invalid || undefined}
-          aria-describedby={invalid ? errorId : undefined}
+          aria-describedby={describedBy(schema.description && `${id}-hint`, invalid && errorId)}
           value={value ?? ""}
           onChange={(e) => onChange(e.target.value || undefined)}
         />
@@ -23,7 +24,11 @@ export function Password({ id, label, schema, value, onChange, invalid, errorId 
           {shown ? "Hide" : "Show"}
         </button>
       </div>
-      {schema.description && <p className="hint">{schema.description}</p>}
+      {schema.description && (
+        <p id={`${id}-hint`} className="hint">
+          {schema.description}
+        </p>
+      )}
     </div>
   );
 }

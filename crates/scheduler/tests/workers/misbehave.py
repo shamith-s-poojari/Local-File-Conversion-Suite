@@ -45,6 +45,12 @@ if mode == "no_hello":
 version = 99 if mode == "bad_version" else 1
 send({"type": "hello", "adapterId": adapter_id, "protocolVersion": version, "pid": os.getpid()})
 
+if mode == "never_reads":
+    # Says hello, then never touches stdin: a core that writes to it with a
+    # blocking call hangs as soon as the pipe is full.
+    while True:
+        time.sleep(1)
+
 for raw in sys.stdin.buffer:
     req = json.loads(raw)
     kind = req["type"]
@@ -118,6 +124,17 @@ for raw in sys.stdin.buffer:
             f.write(b"\0" * 3_000_000)
         while True:
             time.sleep(1)
+    elif mode == "fill_root":
+        # Outside out/ and work/: the job folder itself.
+        with open("big", "wb") as f:
+            f.write(b"\0" * 3_000_000)
+        while True:
+            time.sleep(1)
+    elif mode == "fill_then_answer":
+        # Writes and answers at once, before any periodic check.
+        with open("big", "wb") as f:
+            f.write(b"\0" * 3_000_000)
+        send({"type": "executeResult", "outputs": [write_output("o.pdf", PDF)], "fidelity": "E"})
     elif mode == "write_then_fail":
         # Half an output and some scratch, then an ordinary failure.
         write_output("0.pdf", PDF)

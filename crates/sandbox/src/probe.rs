@@ -15,7 +15,7 @@ use std::process::Stdio;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::SandboxLauncher;
+use crate::{Grant, SandboxLauncher};
 
 /// Embedded so the probe can't go missing or be swapped on disk.
 const PROBE: &str = include_str!("../probe/probe.py");
@@ -63,6 +63,12 @@ const DENIED: &[&str] = &[
     "symlink_out",
     #[cfg(unix)]
     "unix_socket",
+    // The seccomp filter (Linux, on the architectures it has a table for).
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    "seccomp_ptrace",
 ];
 /// Blocked, or (Linux) readable but holding only the scrubbed variables.
 #[cfg(target_os = "linux")]
@@ -189,6 +195,7 @@ pub fn self_test(
         &job,
         ACCESS_LIMIT,
         vec!["access".into(), config.to_string().into()],
+        None,
     )?;
     drop(listener);
     #[cfg(unix)]
@@ -263,7 +270,9 @@ pub fn self_test(
         passed: !other.join("written.txt").exists(),
     });
 
-    let alloc = run(launcher, &id, &job, ALLOC_LIMIT, vec!["alloc".into()])?;
+    engine_attempts(launcher, &id, &job, &mut attempts)?;
+
+    let alloc = run(launcher, &id, &job, ALLOC_LIMIT, vec!["alloc".into()], None)?;
     let reported = String::from_utf8_lossy(&alloc.stdout)
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -284,12 +293,68 @@ pub fn self_test(
     Ok(ProbeReport { attempts, passed })
 }
 
+/// SEC-9: what the engines are granted (read-only installs) is probed too,
+/// from a worker given every grant at once: each existing folder must be
+/// readable and must refuse a write. Nothing to probe without engines.
+fn engine_attempts(
+    launcher: &SandboxLauncher,
+    id: &str,
+    job: &Path,
+    attempts: &mut Vec<Attempt>,
+) -> Result<(), String> {
+    let dirs: Vec<PathBuf> = launcher
+        .config()
+        .engine_roots()
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .map(canonical)
+        .collect();
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    let mut grant = Grant::default();
+    for g in launcher.config().grants.values() {
+        grant.merge(g);
+    }
+    let config = serde_json::json!({ "dirs": dirs });
+    let out = run(
+        launcher,
+        id,
+        job,
+        ACCESS_LIMIT,
+        vec!["engine".into(), config.to_string().into()],
+        Some(&grant),
+    )?;
+    let report: BTreeMap<String, Value> = serde_json::from_slice(&out.stdout)
+        .map_err(|_| format!("the engine probe produced no report ({})", failure(&out)))?;
+    for (i, dir) in dirs.iter().enumerate() {
+        for (key, label, expected) in [
+            ("engine_read", "engine_read", "allowed"),
+            ("engine_write", "engine_write", "blocked"),
+        ] {
+            let outcome = report
+                .get(&format!("{key}_{i}"))
+                .and_then(|v| v["outcome"].as_str())
+                .unwrap_or("missing")
+                .to_owned();
+            attempts.push(Attempt {
+                name: format!("{label} {}", dir.display()),
+                expected,
+                passed: outcome == expected,
+                outcome,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn run(
     launcher: &SandboxLauncher,
     id: &str,
     job: &Path,
     limit: u64,
     args: Vec<OsString>,
+    grant: Option<&Grant>,
 ) -> Result<std::process::Output, String> {
     let mut argv = vec![
         launcher.config().python.clone().into_os_string(),
@@ -297,7 +362,7 @@ fn run(
         canonical(job).join("probe.py").into_os_string(),
     ];
     argv.extend(args);
-    let mut cmd = launcher.wrap(id, job, limit, argv)?;
+    let mut cmd = launcher.wrap_with(id, job, limit, argv, grant)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

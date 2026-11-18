@@ -1,5 +1,15 @@
 import type { Diagnostics } from "../api";
 
+/** Where the sandbox self-test stands, for the Home banner. While it runs the
+ * core reports no result (`sandbox` is null) and processing is off, which is
+ * not a failure and must not look like one (audit UX-5). */
+export function selfTestState(diag: Diagnostics | null | undefined): "unknown" | "running" | "passed" | "failed" | "startupFailed" {
+  if (!diag) return "unknown";
+  if (diag.startupError) return "startupFailed";
+  if (!diag.sandbox) return diag.processingEnabled ? "passed" : "running";
+  return diag.processingEnabled ? "passed" : "failed";
+}
+
 /** The engines the app looks for that this computer doesn't have. */
 export function missingEngines(diag: Diagnostics | null | undefined): ("ffmpeg" | "libreoffice")[] {
   if (!diag?.engines) return [];

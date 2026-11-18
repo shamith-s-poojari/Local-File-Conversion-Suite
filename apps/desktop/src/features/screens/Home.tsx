@@ -1,10 +1,10 @@
 import type { Api, Diagnostics } from "../../api";
 import { FAMILIES, type Family } from "../../formats";
 import { ArrowRight, ShieldIcon, ToolIcon, UploadIcon, WarningIcon } from "../../icons";
-import { STARTUP_FAILED, errorMessage, installHint } from "../../text";
-import { missingEngines } from "../diagnostics";
+import { SELF_TEST_RUNNING, STARTUP_FAILED, errorMessage, installHint } from "../../text";
+import { missingEngines, selfTestState } from "../diagnostics";
 import { usePicker } from "../pickers";
-import { FamilyGlyph, type Send } from "./shared";
+import { FamilyGlyph, SettingsLink, type Send } from "./shared";
 
 const FAMILY_TOOLS: Partial<Record<Family, string[]>> = {
   document: ["Make safe to open", "Remove hidden details"],
@@ -43,6 +43,8 @@ export function Home({
 }) {
   const { busy, error, choose } = usePicker(api, send);
   const disabled = diag !== null && !diag.processingEnabled;
+  // Still running is not failed: no error colour, no alert (audit UX-5).
+  const checking = selfTestState(diag) === "running";
   const missing = missingEngines(diag);
   return (
     <section className="screen home" aria-labelledby="home-title">
@@ -56,7 +58,15 @@ export function Home({
           uploaded anywhere.
         </p>
       </header>
-      {disabled && (
+      {checking && (
+        <div className="banner" role="status">
+          <div>
+            <strong>{SELF_TEST_RUNNING.what}</strong>
+            <p>{SELF_TEST_RUNNING.why}</p>
+          </div>
+        </div>
+      )}
+      {disabled && !checking && (
         <div className="banner error" role="alert">
           <WarningIcon />
           {diag?.startupError ? (
@@ -67,17 +77,20 @@ export function Home({
                 <summary>{STARTUP_FAILED.details}</summary>
                 <p>{diag.startupError}</p>
               </details>
+              <SettingsLink />
             </div>
           ) : (
             <div>
               <strong>{errorMessage("E_SANDBOX_UNAVAILABLE").what}</strong>
               <p>{errorMessage("E_SANDBOX_UNAVAILABLE").why}</p>
+              <p>{errorMessage("E_SANDBOX_UNAVAILABLE").todo}</p>
+              <SettingsLink />
             </div>
           )}
         </div>
       )}
       <div className="bezel reveal">
-        <div className={`dropzone${dragging ? " drag-over" : ""}`} aria-describedby="drop-help">
+        <div className={`dropzone${dragging ? " drag-over" : ""}`}>
           <span className="drop-icon">
             <UploadIcon />
           </span>
@@ -86,7 +99,7 @@ export function Home({
             Up to 200 at once. Mixed types are fine. You can also paste a picture or a table.
           </p>
           <div className="drop-actions">
-            <button type="button" className="primary lg" onClick={() => choose("files")} disabled={busy || disabled}>
+            <button type="button" className="primary lg" onClick={() => choose("files")} disabled={busy || disabled} aria-describedby="drop-help">
               <span>{busy ? "Opening…" : "Choose files"}</span>
               <span className="btn-icon">
                 <ArrowRight />

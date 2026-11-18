@@ -476,3 +476,38 @@ describe("conversions (ADR 0003)", () => {
     expect(inputs[0]).toMatchObject({ operation: "pdf-to-image", to: "jpg", fileIds: ["a"] });
   });
 });
+
+describe("leaving while it works (UX-7)", () => {
+  test("Cancel while files are being checked goes home and releases the files", async () => {
+    const { actor, effects } = start({ inspect: () => new Promise(() => {}) });
+    actor.send({ type: "FILES_ADDED", results: [pdf("a"), pdf("b")] });
+    expect(actor.getSnapshot().value).toBe("inspecting");
+    actor.send({ type: "CANCEL" });
+    expect(actor.getSnapshot().value).toBe("idle");
+    expect(effects.clearFiles).toHaveBeenCalledWith(["a", "b"]);
+  });
+
+  test("Cancel while the job is being set up goes back to the form, files and choices kept", async () => {
+    const { actor } = start({ createJob: () => new Promise(() => {}) });
+    actor.send({ type: "FILES_ADDED", results: [pdf("a")] });
+    await waitFor(actor, (s) => s.matches("configuring"));
+    actor.send({ type: "SELECT_OPERATION", operation: "pdf-compress", params: { level: 2 } });
+    actor.send({ type: "START" });
+    expect(actor.getSnapshot().value).toBe("preflight");
+    actor.send({ type: "CANCEL" });
+    const s = actor.getSnapshot();
+    expect(s.value).toBe("configuring");
+    expect(s.context.operation).toBe("pdf-compress");
+    expect(s.context.files).toHaveLength(1);
+  });
+});
+
+describe("Start over asks first only when work would be lost (UX-8)", () => {
+  test("choices or several files need a question; one fresh file doesn't", async () => {
+    const { startOverNeedsConfirm } = await import("./app");
+    const { context } = await import("../fixtures");
+    expect(startOverNeedsConfirm(context({ operation: "pdf-merge" }))).toBe(true);
+    expect(startOverNeedsConfirm(context({ files: [context().files[0]!, context().files[0]!] }))).toBe(true);
+    expect(startOverNeedsConfirm(context())).toBe(false);
+  });
+});

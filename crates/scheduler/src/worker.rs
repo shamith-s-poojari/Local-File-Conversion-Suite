@@ -39,7 +39,7 @@ const QUEUE_LINES: usize = 64;
 /// is the watchdog's disk limit; this stops one runaway write between checks.
 pub const MAX_WORKER_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-/// How often the watchdog measures `out/` and `work/`.
+/// How often the watchdog measures the job folder.
 const DISK_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// Walking more entries than this counts as over the limit: a tree of
@@ -96,9 +96,12 @@ pub struct Watchdog {
     pub total: Duration,
     /// `noProgressS`: longest silence allowed.
     pub silence: Duration,
-    /// Most bytes `out/` and `work/` may hold together while the request
-    /// runs; over it the worker is killed with `E_RESOURCE_DISK`. `None`
-    /// turns the check off.
+    /// Most bytes the whole job folder (`in/`, `work/`, `out/` and anything
+    /// else the worker can write there) may hold; over it the worker is
+    /// killed with `E_RESOURCE_DISK`. Measured before the request is sent,
+    /// every second while it runs, and when its result arrives, so a worker
+    /// that writes while idle, or just before it answers, is caught too.
+    /// `None` turns the check off.
     pub disk_limit: Option<u64>,
 }
 
@@ -247,7 +250,11 @@ impl Stop {
 /// A running worker. Dropping it kills the process tree.
 pub struct Worker {
     child: Child,
-    stdin: Option<ChildStdin>,
+    /// Lines for the writer thread. A thread, because a worker that never
+    /// reads would block a direct write for ever, and with it the watchdog.
+    stdin: Option<mpsc::Sender<Zeroizing<Vec<u8>>>>,
+    /// Set by the writer thread when a write failed.
+    write_failed: Arc<AtomicBool>,
     tree: ProcessTree,
     lines: Receiver<Incoming>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
@@ -299,10 +306,17 @@ impl Worker {
         let sink = stderr.clone();
         thread::spawn(move || drain_stderr(err_pipe, sink));
 
-        let stdin = child.stdin.take();
+        let write_failed = Arc::new(AtomicBool::new(false));
+        let stdin = child.stdin.take().map(|pipe| {
+            let (tx, rx) = mpsc::channel();
+            let failed = write_failed.clone();
+            thread::spawn(move || write_lines(pipe, rx, failed));
+            tx
+        });
         let mut worker = Worker {
             child,
             stdin,
+            write_failed,
             tree,
             lines,
             stderr,
@@ -360,30 +374,35 @@ impl Worker {
         token: &CancelToken,
         on_event: &mut dyn FnMut(WorkerEvent),
     ) -> Result<Value, JobFailure> {
+        // A worker is idle between requests, but a process it left behind
+        // isn't: what it wrote since the last request counts now.
+        if self.over_disk_limit(watchdog.disk_limit) {
+            return Err(self.kill_with("E_RESOURCE_DISK"));
+        }
         let line = encode(kind.wire(), &self.job_id, body, secrets);
         debug_assert!(
             self.codec.validate(Direction::Core, &line).is_ok(),
             "the core built an invalid {} message",
             kind.wire()
         );
-        if self.send(&line).is_err() {
+        if self.send(line).is_err() {
             return Err(self.kill_with("E_INTERNAL"));
         }
-        drop(line);
 
         let start = Instant::now();
         let mut last_message = start;
         let mut last_disk_check = start;
         let mut stop: Option<(Stop, Instant)> = None;
         loop {
+            if self.write_failed.load(Ordering::SeqCst) {
+                // The pipe broke while the worker lives on.
+                return Err(self.kill_with(stop.map_or("E_INTERNAL", |(why, _)| why.code())));
+            }
             let now = Instant::now();
-            if let Some(limit) = watchdog.disk_limit {
-                if now.duration_since(last_disk_check) >= DISK_CHECK_EVERY {
-                    last_disk_check = now;
-                    let dirs = [self.job_dir.join("out"), self.job_dir.join("work")];
-                    if over_disk_limit(&dirs, limit) {
-                        return Err(self.kill_with("E_RESOURCE_DISK"));
-                    }
+            if now.duration_since(last_disk_check) >= DISK_CHECK_EVERY {
+                last_disk_check = now;
+                if self.over_disk_limit(watchdog.disk_limit) {
+                    return Err(self.kill_with("E_RESOURCE_DISK"));
                 }
             }
             if stop.is_none() {
@@ -397,7 +416,7 @@ impl Worker {
                     None
                 };
                 if let Some(why) = why {
-                    let _ = self.send(&encode("cancel", &self.job_id, Value::Null, None));
+                    let _ = self.send(encode("cancel", &self.job_id, Value::Null, None));
                     stop = Some((why, now + self.timing.cancel_grace));
                 }
             }
@@ -470,6 +489,11 @@ impl Worker {
                     if let Some((why, _)) = stop {
                         return Err(self.kill_with(why.code()));
                     }
+                    // Between two periodic checks a worker can fill the disk
+                    // and answer at once.
+                    if self.over_disk_limit(watchdog.disk_limit) {
+                        return Err(self.kill_with("E_RESOURCE_DISK"));
+                    }
                     return Ok(msg);
                 }
                 // A second hello, or the wrong kind of result.
@@ -508,13 +532,18 @@ impl Worker {
         self.child.id()
     }
 
-    fn send(&mut self, line: &[u8]) -> std::io::Result<()> {
-        let stdin = self
+    /// Queues a line for the writer thread; never blocks.
+    fn send(&mut self, line: Zeroizing<Vec<u8>>) -> std::io::Result<()> {
+        let tx = self
             .stdin
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| std::io::Error::other("stdin closed"))?;
-        stdin.write_all(line)?;
-        stdin.flush()
+        tx.send(line)
+            .map_err(|_| std::io::Error::other("stdin closed"))
+    }
+
+    fn over_disk_limit(&self, limit: Option<u64>) -> bool {
+        limit.is_some_and(|l| over_disk_limit(std::slice::from_ref(&self.job_dir), l))
     }
 
     /// Whether the worker ended by the file size limit. Under the sandbox
@@ -556,6 +585,19 @@ impl Drop for Worker {
         self.tree.kill();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Writes queued lines to the worker's stdin until the queue is closed or a
+/// write fails. Ends by dropping the pipe, which closes the worker's stdin.
+/// It can sit in a write for as long as the worker doesn't read; the
+/// supervisor doesn't wait for it, and killing the worker frees it.
+fn write_lines(mut pipe: ChildStdin, lines: Receiver<Zeroizing<Vec<u8>>>, failed: Arc<AtomicBool>) {
+    for line in lines {
+        if pipe.write_all(&line).and_then(|()| pipe.flush()).is_err() {
+            failed.store(true, Ordering::SeqCst);
+            return;
+        }
     }
 }
 
@@ -744,10 +786,25 @@ mod tests {
             served: served.clone(),
         };
         let reader = thread::spawn(move || read_lines(source, tx));
-        thread::sleep(Duration::from_millis(500));
+        // Wait until the reader stops taking bytes (it's blocked on the full
+        // queue), however long that takes; a reader that never stops fails at
+        // the deadline instead of passing by luck.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut last = usize::MAX;
+        let taken = loop {
+            thread::sleep(Duration::from_millis(200));
+            let now = served.load(Ordering::SeqCst);
+            if now == last {
+                break now;
+            }
+            assert!(
+                now < 200 * 1024 * 1024 && Instant::now() < deadline,
+                "{now} bytes read with no consumer, and still reading"
+            );
+            last = now;
+        };
         // A full queue plus the line in hand and the buffer: nowhere near
-        // the hundreds of MB an unbounded queue would take in that time.
-        let taken = served.load(Ordering::SeqCst);
+        // what an unbounded queue would take.
         assert!(
             taken < 20 * 1024 * 1024,
             "{taken} bytes read with no consumer"

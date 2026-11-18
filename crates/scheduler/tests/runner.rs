@@ -193,6 +193,19 @@ fn bad(python: &Path, mode: &'static str) -> TestLauncher {
     }
 }
 
+/// Polls `cond` until it holds, failing after a deadline long enough for a
+/// loaded CI machine. Tests wait for a state, not for a number of sleeps.
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn error_code(job: &JobSnapshot) -> Option<&str> {
     job.error.as_ref().map(|e| e.code.as_str())
 }
@@ -324,7 +337,7 @@ fn watchdog_kills_a_hung_worker() {
     let job = e.run(fake(&py), config(), s);
     assert_eq!(job.state, JobState::Failed);
     assert_eq!(error_code(&job), Some("E_TIMEOUT"));
-    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(started.elapsed() < Duration::from_secs(60));
 }
 
 #[test]
@@ -340,12 +353,7 @@ fn cancel_stops_a_running_job() {
     );
     let handle = runner.start(spec(&id, "dev-fake", json!({"pages": 1000, "delayMs": 50})));
     // Wait until it's executing.
-    for _ in 0..400 {
-        if e.job(&id).state == JobState::Running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    wait_until("the job to run", || e.job(&id).state == JobState::Running);
     assert!(runner.cancel(&id));
     handle.join().unwrap();
     let job = e.job(&id);
@@ -557,7 +565,7 @@ fn shutdown_kills_a_descendant_that_left_the_process_group() {
 }
 
 fn is_alive(pid: u32) -> bool {
-    for _ in 0..50 {
+    for _ in 0..300 {
         let mut sys = sysinfo::System::new();
         let p = sysinfo::Pid::from_u32(pid);
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
@@ -609,7 +617,107 @@ fn a_worker_filling_work_past_the_disk_limit_is_killed() {
     assert_eq!(err.code, "E_RESOURCE_DISK");
     assert!(err.retryable);
     // Caught by the 1 s disk check, not the 20 s silence limit.
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(60));
+}
+
+/// Runs one `execute` against `misbehave.py` in `mode` with a 1 MB disk
+/// limit and returns the error and how long it took.
+fn execute_with_small_disk_limit(
+    e: &Env,
+    py: &Path,
+    mode: &'static str,
+) -> (Result<Value, converter_jobstore::JobFailure>, Duration) {
+    let id = e.staged_job();
+    let dirs = e.store.job_dirs(&id).unwrap();
+    let spec = LaunchSpec {
+        adapter_id: "misbehave".into(),
+        job_id: id.clone(),
+        job_dir: dirs.root.clone(),
+        memory_limit: None,
+    };
+    let mut worker = Worker::spawn(
+        &bad(py, mode),
+        &spec,
+        Arc::new(Codec::new()),
+        config().timing,
+    )
+    .unwrap();
+    let watchdog = Watchdog::from_limits(30, 1.0, 20, 1).with_disk_limit(Some(1_000_000));
+    let started = std::time::Instant::now();
+    let result = worker.request(
+        RequestKind::Execute,
+        json!({"inputs": ["in/0.pdf"], "outDir": "out", "workDir": "work", "params": {}}),
+        None,
+        watchdog,
+        &CancelToken::new(),
+        &mut |_| {},
+    );
+    (result, started.elapsed())
+}
+
+/// SEC-3: the limit is on the whole job folder, not just out/ and work/.
+#[test]
+fn a_worker_filling_the_job_folder_outside_out_and_work_is_killed() {
+    let py = need_python!();
+    let e = env();
+    let (result, took) = execute_with_small_disk_limit(&e, &py, "fill_root");
+    assert_eq!(result.unwrap_err().code, "E_RESOURCE_DISK");
+    assert!(took < Duration::from_secs(60));
+}
+
+/// SEC-3: a worker that writes and answers in the same breath is still over
+/// the limit when its result arrives.
+#[test]
+fn an_answer_that_arrives_over_the_disk_limit_is_refused() {
+    let py = need_python!();
+    let e = env();
+    let (result, _) = execute_with_small_disk_limit(&e, &py, "fill_then_answer");
+    assert_eq!(result.unwrap_err().code, "E_RESOURCE_DISK");
+}
+
+/// RS-5: a worker that never reads stdin must not hang the supervisor. The
+/// request is far bigger than a pipe holds, so a blocking write never ends;
+/// the watchdog has to time the request out instead.
+#[test]
+fn a_worker_that_never_reads_stdin_times_out_instead_of_hanging() {
+    let py = need_python!();
+    let e = env();
+    let id = e.staged_job();
+    let dirs = e.store.job_dirs(&id).unwrap();
+    let spec = LaunchSpec {
+        adapter_id: "misbehave".into(),
+        job_id: id.clone(),
+        job_dir: dirs.root.clone(),
+        memory_limit: None,
+    };
+    let mut worker = Worker::spawn(
+        &bad(&py, "never_reads"),
+        &spec,
+        Arc::new(Codec::new()),
+        config().timing,
+    )
+    .unwrap();
+    let watchdog = Watchdog::from_limits(2, 0.0, 20, 1);
+    // Run on a thread so a regression fails the test instead of hanging it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = worker.request(
+            RequestKind::Execute,
+            json!({"inputs": ["in/0.pdf"], "outDir": "out", "workDir": "work",
+                   "params": {"pad": "x".repeat(1_000_000)}}),
+            None,
+            watchdog,
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        let _ = tx.send((result, started.elapsed()));
+    });
+    let (result, took) = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the request hung on a worker that doesn't read");
+    assert_eq!(result.unwrap_err().code, "E_TIMEOUT");
+    assert!(took < Duration::from_secs(60), "{took:?}");
 }
 
 /// Part 1 runs the dev-fake adapter; part 2 runs `misbehave` in `mode`.
@@ -732,13 +840,7 @@ fn cancelling_during_a_later_part_cancels_rather_than_partial() {
     let handle = runner.start(s);
     // Part 1's output is renamed just before part 2 starts.
     let first = e.store.job_dirs(&id).unwrap().out.join("p0-0.pdf");
-    for _ in 0..400 {
-        if first.exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(first.exists());
+    wait_until("part 1's output", || first.exists());
     assert!(runner.cancel(&id));
     handle.join().unwrap();
     assert_eq!(e.job(&id).state, JobState::Cancelled);

@@ -103,8 +103,20 @@ fn probe_passes() {
     // 8 refusals every platform has, a hard link, and (Unix) a symlink and a
     // Unix socket; 2 allowed; nothing written outside; the memory limit; and
     // on Linux /proc/1/environ.
-    let expected =
-        8 + 1 + 2 * usize::from(cfg!(unix)) + 2 + 1 + 1 + usize::from(cfg!(target_os = "linux"));
+    // Linux adds the seccomp ptrace check (x86-64 and AArch64). This virtualenv
+    // grants no engine, so there are no engine checks.
+    let seccomp = usize::from(cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )));
+    let expected = 8
+        + 1
+        + 2 * usize::from(cfg!(unix))
+        + 2
+        + 1
+        + 1
+        + usize::from(cfg!(target_os = "linux"))
+        + seccomp;
     assert_eq!(report.attempts.len(), expected);
     // Every refusal must be the sandbox's own error, not an accident.
     for a in &report.attempts {
@@ -258,4 +270,42 @@ fn probe_passes_with_a_long_scratch_path() {
     let failed: Vec<_> = report.attempts.iter().filter(|a| !a.passed).collect();
     assert!(report.passed, "probe failures: {failed:#?}");
     assert!(report.attempts.iter().any(|a| a.name == "unix_socket"));
+}
+
+/// SEC-9: an engine's granted folder must read but not write from inside.
+#[test]
+fn the_probe_checks_what_engines_are_granted() {
+    let Some(mut l) = launcher() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    if !available(&l, tmp.path()) {
+        return;
+    }
+    let engine = tempfile::tempdir().unwrap();
+    std::fs::write(engine.path().join("bin"), b"engine").unwrap();
+    let mut config = l.config().clone();
+    config.grants.insert(
+        "x-engine".into(),
+        converter_sandbox::Grant {
+            read: vec![engine.path().canonicalize().unwrap()],
+            ..Default::default()
+        },
+    );
+    l = SandboxLauncher::new(config);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap();
+    let report = probe::self_test(&l, tmp.path(), &home).unwrap();
+    let engine_checks: Vec<_> = report
+        .attempts
+        .iter()
+        .filter(|a| a.name.starts_with("engine_"))
+        .collect();
+    assert_eq!(engine_checks.len(), 2, "{engine_checks:#?}");
+    assert!(engine_checks.iter().all(|a| a.passed), "{engine_checks:#?}");
+    assert!(report.passed, "{report:#?}");
+    assert!(
+        !engine.path().join(".lfcs-probe").exists(),
+        "the probe left a file in the engine folder"
+    );
 }

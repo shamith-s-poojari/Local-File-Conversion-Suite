@@ -1,8 +1,10 @@
 import { useMachine } from "@xstate/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fromPromise } from "xstate";
 import { api as realApi, events, isCommandError, type Api, type Diagnostics, type Format, type Registry } from "./api";
 import { usePaste } from "./features/paste";
+import { Checking } from "./features/screens/Checking";
+import { OpenSettingsContext } from "./features/screens/shared";
 import { Cancelled, Configure, Failed, Home, ProgressScreen, Result, Review, Saved, Settings } from "./features/screens";
 import { GearIcon, WarningIcon } from "./icons";
 import { FINISH_FIRST } from "./text";
@@ -57,6 +59,27 @@ export async function inspectAll(api: Api, files: FileView[]): Promise<FileView[
   return out;
 }
 
+export interface StartInput {
+  operation: string;
+  to: Format | null;
+  fileIds: string[];
+  params: Record<string, unknown>;
+}
+
+/** Creates the job. If the person cancelled while it was being created
+ * (`signal` aborted), the job that appears is cancelled and discarded here:
+ * the machine has already moved on and would never hear of it (audit UX-7). */
+export async function startJob(api: Api, input: StartInput, signal: AbortSignal): Promise<{ jobId: string; skipped: number }> {
+  const started = input.to
+    ? await api.createConversionSkipping(input.fileIds, input.to, input.params)
+    : { jobId: await api.createJob(input.operation, input.fileIds, input.params), skipped: 0 };
+  if (signal.aborted) {
+    await api.cancelJob(started.jobId).catch(() => {});
+    await api.discardJob(started.jobId).catch(() => {});
+  }
+  return started;
+}
+
 export { looksTabular, readPaste } from "./features/paste";
 
 /** Which screen a machine state shows. Related states share one, so focus
@@ -85,12 +108,7 @@ export function App({ api = realApi }: { api?: Api }) {
       appMachine.provide({
         actors: {
           inspectAll: fromPromise(({ input }: { input: { files: FileView[] } }) => inspectAll(api, input.files)),
-          createJob: fromPromise(
-            async ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) =>
-              input.to
-                ? api.createConversionSkipping(input.fileIds, input.to, input.params)
-                : { jobId: await api.createJob(input.operation, input.fileIds, input.params), skipped: 0 },
-          ),
+          createJob: fromPromise(({ input, signal }: { input: StartInput; signal: AbortSignal }) => startJob(api, input, signal)),
           save: fromPromise(
             ({ input }: { input: { jobId: string; confirm: boolean; keepLayout?: boolean; token?: string } }) =>
               input.confirm
@@ -115,6 +133,14 @@ export function App({ api = realApi }: { api?: Api }) {
   const [state, send] = useMachine(machine);
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
+  const [registryFailed, setRegistryFailed] = useState(false);
+  const loadRegistry = useCallback(() => {
+    setRegistryFailed(false);
+    api
+      .getRegistry()
+      .then(setRegistry)
+      .catch(() => setRegistryFailed(true));
+  }, [api]);
   const [settings, setSettings] = useState(false);
   const [dragging, setDragging] = useState(false);
   const acceptsPaste = !settings && (state.matches("idle") || state.matches("configuring"));
@@ -132,7 +158,7 @@ export function App({ api = realApi }: { api?: Api }) {
       events.onSelfTest(() => void api.getDiagnostics().then(setDiag)),
     ];
     api.getDiagnostics().then(setDiag).catch(() => {});
-    api.getRegistry().then(setRegistry).catch(() => {});
+    loadRegistry();
     // Reload recovery (spec 11.2): Rust's job store is authoritative.
     api
       .getSnapshot()
@@ -144,7 +170,7 @@ export function App({ api = realApi }: { api?: Api }) {
     return () => {
       unlisten.forEach((p) => void p.then((f) => f()));
     };
-  }, [api, send]);
+  }, [api, send, loadRegistry]);
 
   const ctx = state.context;
   const name = typeof state.value === "string" ? state.value : Object.keys(state.value)[0]!;
@@ -166,16 +192,12 @@ export function App({ api = realApi }: { api?: Api }) {
     screen = <Home api={api} send={send} diag={diag} dragging={dragging} />;
   } else if (state.matches("inspecting")) {
     screen = (
-      <section className="screen narrow state-screen" aria-live="polite">
-        <span className="state-icon spinning" aria-hidden="true" />
-        <h1 tabIndex={-1}>Checking files…</h1>
-        <p className="lede">Each file is opened in its own sandbox to read its size, pages or length.</p>
-      </section>
+      <Checking send={send} />
     );
   } else if (state.matches("needsInput") || state.matches("rejected")) {
     screen = <Review api={api} ctx={ctx} send={send} rejected={state.matches("rejected")} />;
   } else if (state.matches("configuring") || state.matches("preflight")) {
-    screen = <Configure api={api} ctx={ctx} send={send} registry={registry} diag={diag} busy={state.matches("preflight")} />;
+    screen = <Configure api={api} ctx={ctx} send={send} registry={registry} diag={diag} busy={state.matches("preflight")} registryFailed={registryFailed} onRetryRegistry={loadRegistry} />;
   } else if (state.matches("queued") || state.matches("processing") || state.matches("cancelling")) {
     screen = <ProgressScreen ctx={ctx} send={send} cancelling={state.matches("cancelling")} />;
   } else if (state.matches("preview")) {
@@ -190,6 +212,7 @@ export function App({ api = realApi }: { api?: Api }) {
   }
 
   return (
+    <OpenSettingsContext.Provider value={() => setSettings(true)}>
     <div className="app">
       <a className="skip-link" href="#main">
         Skip to content
@@ -231,7 +254,10 @@ export function App({ api = realApi }: { api?: Api }) {
           </button>
         </div>
       )}
-      <main id="main">{screen}</main>
+      <main id="main" tabIndex={-1}>
+        {screen}
+      </main>
     </div>
+    </OpenSettingsContext.Provider>
   );
 }

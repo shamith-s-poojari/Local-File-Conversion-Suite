@@ -120,7 +120,9 @@ def test_a_real_redaction_output_passes(tmp_path: Path) -> None:
     assert report["passed"] is True, report
     assert report["failed"] == []
     ids = [c["id"] for c in report["inputs"][0]["checks"]]
-    assert ids == [f"V{n}" for n in range(1, 9)]
+    # V9 (text under boxes found elsewhere) is a warning, not a check; V10
+    # looks for redacted text copied into tags, bookmarks and labels.
+    assert ids == [*(f"V{n}" for n in range(1, 9)), "V10"]
 
 
 def test_a_pdf_that_still_has_the_term_fails(tmp_path: Path) -> None:

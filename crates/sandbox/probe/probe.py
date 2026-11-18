@@ -1,8 +1,9 @@
 """Sandbox probe (spec section 9.3). Not an adapter: it never ships in a registry.
 
 Run inside the sandbox as ``python -I probe.py access CONFIG_JSON`` or
-``python -I probe.py alloc``. In ``access`` mode it tries everything the
-sandbox must refuse, plus two things it must allow (so a probe that can't do
+``python -I probe.py alloc`` or ``python -I probe.py engine CONFIG_JSON`` (run
+with an engine grant: its folders must be readable and not writable). In
+``access`` mode it tries everything the sandbox must refuse, plus two things it must allow (so a probe that can't do
 anything doesn't pass by accident), and prints a JSON report. In ``alloc``
 mode it allocates until something stops it.
 """
@@ -115,6 +116,47 @@ def list_home(cfg, expected):
     return {"outcome": "allowed" if seen & set(real) else "skeleton"}
 
 
+def ptrace_refused():
+    """Linux: the seccomp filter answers ptrace with EPERM. The target pid
+    doesn't exist, so an unfiltered kernel says ESRCH and nothing is traced."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.ptrace.restype = ctypes.c_long
+    libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+    PTRACE_PEEKDATA = 2
+    ctypes.set_errno(0)
+    libc.ptrace(PTRACE_PEEKDATA, 0x3FFFFFFF, None, None)
+    code = ctypes.get_errno()
+    if code == errno.EPERM:
+        return {"outcome": "blocked", "errno": code}
+    if code == errno.ESRCH:
+        return {"outcome": "allowed", "errno": code}
+    return {"outcome": "inconclusive", "errno": code}
+
+
+def engine(cfg):
+    """Each folder an engine is granted must be readable and not writable."""
+    report = {}
+    for i, d in enumerate(cfg["dirs"]):
+        report[f"engine_read_{i}"] = attempt(lambda d=d: os.listdir(d), set())
+        probe_file = os.path.join(d, ".lfcs-probe")
+
+        def write(path=probe_file):
+            with open(path, "w") as f:
+                f.write("probe")
+
+        # Read-only mounts answer EROFS, Seatbelt and AppContainers EPERM/EACCES.
+        result = attempt(write, DENIED | codes("EROFS"))
+        if result["outcome"] == "allowed":
+            try:  # leave the engine folder as found
+                os.remove(probe_file)
+            except OSError:
+                pass
+        report[f"engine_write_{i}"] = result
+    sys.stdout.write(json.dumps(report))
+
+
 def access(cfg):
     def read(path):
         with open(path, "rb") as f:
@@ -159,6 +201,7 @@ def access(cfg):
         report["unix_socket"] = attempt(lambda: connect_unix(cfg["socket"]), fs)
     if sys.platform.startswith("linux"):
         report["proc_environ"] = proc_environ(fs)
+        report["seccomp_ptrace"] = ptrace_refused()
     sys.stdout.write(json.dumps(report))
 
 
@@ -176,5 +219,7 @@ def alloc():
 if __name__ == "__main__":
     if sys.argv[1] == "access":
         access(json.loads(sys.argv[2]))
+    elif sys.argv[1] == "engine":
+        engine(json.loads(sys.argv[2]))
     else:
         alloc()

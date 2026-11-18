@@ -1,17 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { previewUrl, type WordBox } from "../api";
-import { REDACTION_KEYBOARD_HINT } from "../text";
+import { REDACTION_KEYBOARD_HINT, REDACTION_LINES, redactionSurfaceLabel } from "../text";
+import { groupLines, isCovered, lineBox, MAX_LINES, pad, type Box } from "./redactionLines";
 import { findMatches, SEARCH_PAGE_LIMIT } from "./redactionSearch";
 import type { WidgetProps } from "./types";
 
-/** Normalized 0..1 in displayed orientation, origin top-left (spec 13.8). */
-export interface Box {
-  page: number;
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
+export type { Box };
 
 const DPI = 96;
 /** A drag shorter than this (normalized) is a click: snap to the word under it. */
@@ -31,6 +25,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   const [term, setTerm] = useState("");
   const [results, setResults] = useState<{ page: number; count: number }[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [status, setStatus] = useState("");
   const surface = useRef<HTMLDivElement>(null);
   const searchControl = useRef<AbortController | null>(null);
   const total = Math.max(ctx.pages, 1);
@@ -58,12 +53,23 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   useEffect(() => () => searchControl.current?.abort(), []);
 
   const commit = useCallback(
-    (next: Box[]) => {
+    (next: Box[], message?: string) => {
       setHistory((h) => [...h.slice(-49), boxes]);
       onChange(next);
+      setStatus(message ?? (next.length > boxes.length ? REDACTION_LINES.added(next[next.length - 1]!.page, next.length) : REDACTION_LINES.removed(next.length)));
     },
     [boxes, onChange],
   );
+  const lines = useMemo(() => (words ? groupLines(words.words) : []), [words]);
+  const coverLine = (line: ReturnType<typeof groupLines>[number]) => {
+    if (!words) return;
+    const box = lineBox(line, page, words.w, words.h);
+    if (isCovered(boxes, box)) {
+      setStatus(REDACTION_LINES.alreadyCovered);
+      return;
+    }
+    commit([...boxes, box]);
+  };
 
   const point = (e: PointerEvent) => {
     const r = surface.current!.getBoundingClientRect();
@@ -172,7 +178,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             // Another gesture took the pointer (a scroll, a system dialog): drop the half-drawn box.
             onPointerCancel={() => setDrag(null)}
             role="img"
-            aria-label={`Page ${page}. Drag to cover an area, or click a word.`}
+            aria-label={redactionSurfaceLabel(page)}
           >
             {img ? <img src={img.src} alt="" draggable={false} /> : <div className="loading">Rendering page…</div>}
             <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
@@ -202,6 +208,41 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             </svg>
           </div>
           <p className="hint">{REDACTION_KEYBOARD_HINT}</p>
+          <h3>{REDACTION_LINES.heading}</h3>
+          <p className="hint" id={`${id}-lines-help`}>
+            {REDACTION_LINES.help}
+          </p>
+          {words === null ? (
+            <p className="hint">{REDACTION_LINES.loading}</p>
+          ) : lines.length === 0 ? (
+            <p className="hint">{REDACTION_LINES.none}</p>
+          ) : (
+            <>
+              <ul className="line-list" aria-describedby={`${id}-lines-help`}>
+                {lines.slice(0, MAX_LINES).map((line, i) => {
+                  const done = isCovered(boxes, lineBox(line, page, words.w, words.h));
+                  return (
+                    <li key={i}>
+                      <span className="line-text">{line.text}</span>
+                      <button
+                        type="button"
+                        className="sm"
+                        aria-disabled={done || undefined}
+                        aria-label={done ? REDACTION_LINES.coveredLabel(line.text) : REDACTION_LINES.coverLabel(line.text)}
+                        onClick={() => coverLine(line)}
+                      >
+                        {done ? REDACTION_LINES.covered : REDACTION_LINES.cover}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+              {lines.length > MAX_LINES && <p className="hint">{REDACTION_LINES.more(MAX_LINES, lines.length)}</p>}
+            </>
+          )}
+          <p className="visually-hidden" role="status">
+            {status}
+          </p>
         </div>
         <div className="redaction-side">
           <div className="row">
@@ -212,14 +253,14 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               Undo
             </button>
           </div>
-          <h4>Areas ({boxes.length})</h4>
+          <h3>Areas ({boxes.length})</h3>
           {boxes.length === 0 ? (
             <p className="hint">Drag on the page to cover an area, or click a word.</p>
           ) : (
             <ul className="box-list">
               {boxes.map((b, i) => (
                 <li key={i}>
-                  <button type="button" className="link" onClick={() => setPage(b.page)}>
+                  <button type="button" className="link" onClick={() => setPage(b.page)} aria-label={`Page ${b.page}${b.x0 === 0 && b.y0 === 0 && b.x1 === 1 && b.y1 === 1 ? " (whole page)" : ""}, area ${i + 1}`}>
                     Page {b.page}
                     {b.x0 === 0 && b.y0 === 0 && b.x1 === 1 && b.y1 === 1 ? " (whole page)" : ""}
                   </button>
@@ -230,7 +271,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               ))}
             </ul>
           )}
-          <h4>Search terms</h4>
+          <h3>Search terms</h3>
           <div className="row">
             <label htmlFor={`${id}-term`} className="visually-hidden">
               Term to redact everywhere
@@ -300,7 +341,3 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   );
 }
 
-function pad(b: Box): Box {
-  const d = 0.002;
-  return { page: b.page, x0: Math.max(0, b.x0 - d), y0: Math.max(0, b.y0 - d), x1: Math.min(1, b.x1 + d), y1: Math.min(1, b.y1 + d) };
-}

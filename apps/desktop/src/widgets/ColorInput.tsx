@@ -1,3 +1,4 @@
+import { describedBy } from "./describe";
 import type { WidgetProps } from "./types";
 
 export const HEX = /^#[0-9A-Fa-f]{6}$/;
@@ -14,7 +15,7 @@ export function ColorInput({ id, label, schema, value, onChange, invalid, errorI
           type="color"
           className="swatch"
           aria-invalid={invalid || undefined}
-          aria-describedby={invalid ? errorId : undefined}
+          aria-describedby={describedBy(schema.description && `${id}-hint`, invalid && errorId)}
           value={HEX.test(current) ? current : "#000000"}
           onChange={(e) => onChange(e.target.value.toUpperCase())}
         />
@@ -24,11 +25,15 @@ export function ColorInput({ id, label, schema, value, onChange, invalid, errorI
           value={current}
           maxLength={7}
           aria-invalid={invalid || undefined}
-          aria-describedby={invalid ? errorId : undefined}
+          aria-describedby={describedBy(schema.description && `${id}-hint`, invalid && errorId)}
           onChange={(e) => onChange(e.target.value)}
         />
       </div>
-      {schema.description && <p className="hint">{schema.description}</p>}
+      {schema.description && (
+        <p id={`${id}-hint`} className="hint">
+          {schema.description}
+        </p>
+      )}
     </div>
   );
 }

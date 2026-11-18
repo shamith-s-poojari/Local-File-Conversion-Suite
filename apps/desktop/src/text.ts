@@ -91,9 +91,9 @@ export const ERRORS: Record<string, Message> = {
   },
   E_UNKNOWN_JOB: { what: "This job no longer exists." },
   E_USAGE: {
-    what: "That command isn't complete or isn't right.",
-    why: "An option or argument is missing, or isn't one lfcs knows.",
-    todo: "Run lfcs --help to see how to use it.",
+    what: "That request isn't complete or isn't right.",
+    why: "Something it needs is missing, or isn't recognised.",
+    todo: "Check your choices and try again.",
   },
   E_NO_USABLE_FILES: {
     what: "None of these files can be used.",
@@ -102,7 +102,7 @@ export const ERRORS: Record<string, Message> = {
   },
   E_NO_ROUTE: {
     what: "These files can't be made into that format.",
-    todo: "Run lfcs targets to see what each file can become.",
+    todo: "Choose a different format. The choices shown are what these files can become.",
   },
   E_PARTIAL: {
     what: "Some files couldn't be done. The others are ready.",
@@ -379,7 +379,11 @@ export const TARGETS_FAILED = "Couldn't work out what these files can become.";
 
 /** The redaction canvas: drawing needs a pointer, but nothing else does. */
 export const REDACTION_KEYBOARD_HINT =
-  "From the keyboard: use “Redact this whole page”, or add search terms below, which are removed from the whole document.";
+  "Without a pointer: cover lines from “Text on this page”, use “Redact this whole page”, or add search terms, which are removed from the whole document.";
+
+/** What a screen reader says for the page image. */
+export const redactionSurfaceLabel = (page: number) =>
+  `Page ${page}. Drag to cover an area, or click a word. Without a pointer, use the list of text lines.`;
 
 export const PAGE_ORGANIZER = {
   moved: (page: number, position: number, total: number) => `Page ${page} moved to position ${position} of ${total}.`,
@@ -435,3 +439,68 @@ export const STARTUP_FAILED = {
   todo: "Reinstall the app. If it keeps happening, please report it with the details below.",
   details: "Details",
 };
+
+/** Home, while the sandbox self-test is still running. Not an error: the
+ * result isn't in yet, so nothing is shown in the error colour. */
+export const SELF_TEST_RUNNING = {
+  what: "Checking that the sandbox works…",
+  why: "This takes a few seconds. You can add files as soon as it's done.",
+};
+
+/** The link to Settings, wherever a message sends people there. */
+export const OPEN_SETTINGS = "Open Settings";
+
+/** Where some formats are missing because a program isn't installed. */
+export const ENGINES_IN_SETTINGS = "Some choices need programs that aren't installed. Settings shows which ones.";
+
+/** Checking files (while each file is opened in its sandbox). */
+export const CHECKING = {
+  title: "Checking files…",
+  lede: "Each file is opened in its own sandbox to read its size, pages or length.",
+  cancel: "Cancel",
+};
+
+/** Cancelling while the job is being set up. */
+export const STARTING = { busy: "Starting…", cancel: "Cancel" };
+
+/** Asking first, when going on would lose work (audit UX-8). */
+export const CONFIRM = {
+  startOver: {
+    message: "Start over? The files and choices here will be cleared. Your original files aren't touched.",
+    confirm: "Start over",
+    keep: "Keep working",
+  },
+  adjust: {
+    message: "Change the settings? The result you have now will be thrown away and made again when you convert.",
+    confirm: "Change settings",
+    keep: "Keep this result",
+  },
+};
+
+/** The list of tools couldn't be loaded, so nothing can be configured. */
+export const REGISTRY_FAILED = {
+  what: "The list of tools couldn't be loaded.",
+  todo: "Without it nothing can be set up. Try again, and if it keeps failing, restart the app.",
+  retry: "Try again",
+};
+
+export const TARGETS_RETRY = "Try again";
+
+/** The redaction page's text lines: the way to cover text without a pointer. */
+export const REDACTION_LINES = {
+  heading: "Text on this page",
+  help: "Each line has a button that covers it. This works from the keyboard.",
+  none: "No text was found on this page. Use “Redact this whole page”, or draw an area with a pointer.",
+  loading: "Reading the page's text…",
+  cover: "Cover",
+  covered: "Covered",
+  coverLabel: (text: string) => `Cover this line: ${text}`,
+  coveredLabel: (text: string) => `Already covered: ${text}`,
+  added: (page: number, count: number) => `Area added on page ${page}. ${count} area${count === 1 ? "" : "s"} in all.`,
+  alreadyCovered: "That line is already covered.",
+  removed: (count: number) => `Area removed. ${count} area${count === 1 ? "" : "s"} left.`,
+  more: (shown: number, total: number) => `Showing the first ${shown} of ${total} lines on this page.`,
+};
+
+/** Page text a person can use as a label for something the app made. */
+export const UNKNOWN_TYPE = "Unknown type";

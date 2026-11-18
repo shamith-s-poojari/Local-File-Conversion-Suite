@@ -6,6 +6,7 @@ use converter_jobstore::{JobFailure, JobId};
 use serde_json::{json, Value};
 
 use super::{check, Recheck, Runner, SlotGuard};
+use crate::verify::copy_verified;
 use crate::worker::{failure, CancelToken, LaunchSpec, RequestKind, Watchdog, Worker};
 
 /// A report is a few check IDs and counts; anything bigger isn't one.
@@ -45,7 +46,8 @@ impl Drop for CheckDir {
 }
 
 impl Runner {
-    /// Runs `rc` over copies of `files` (path, format) and returns `Ok` only
+    /// Runs `rc` over copies of `files` (path, format, SHA-256 recorded at
+    /// verification) and returns `Ok` only
     /// if its report says every check passed.
     ///
     /// The check job has its own folder and its own worker, and sees nothing
@@ -59,7 +61,7 @@ impl Runner {
         pool: &str,
         estimate: u64,
         rc: &Recheck,
-        files: &[(PathBuf, &str)],
+        files: &[(PathBuf, &str, &str)],
         token: &CancelToken,
     ) -> Result<(), JobFailure> {
         check(token)?;
@@ -71,12 +73,11 @@ impl Runner {
         let dir = CheckDir::create(root, &id).map_err(|_| fail())?;
         let mut inputs = Vec::with_capacity(files.len());
         let mut bytes = 0u64;
-        for (n, (source, ext)) in files.iter().enumerate() {
-            // Outputs were checked as regular files before this; a link here
-            // means something changed them since.
-            let regular = std::fs::symlink_metadata(source).is_ok_and(|m| m.is_file());
+        for (n, (source, ext, sha256)) in files.iter().enumerate() {
+            // The copy is hashed as it is made: a link, or a file that changed
+            // since verification, is refused rather than checked.
             let name = format!("in/{n}.{ext}");
-            if !regular || std::fs::copy(source, dir.0.join(&name)).is_err() {
+            if copy_verified(source, &dir.0.join(&name), sha256).is_err() {
                 return Err(fail());
             }
             bytes += std::fs::metadata(dir.0.join(&name)).map_or(0, |m| m.len());

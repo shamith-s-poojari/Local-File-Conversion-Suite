@@ -23,10 +23,12 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from . import xmlsafe
 from .context import JobContext
 from .convert import source_format
 from .errors import AdapterError
 from .protocol import Finding
+from .strip import PNG_KEEP
 
 MAX_FINDINGS = 64
 MAX_DETAIL = 200
@@ -270,8 +272,13 @@ def _picture_findings(img: Any, png_chunks: Any) -> list[Finding]:
                 out.append(_finding("comments", "Embedded comment"))
             elif low not in _NOT_TEXT and not low.startswith("xml:"):
                 out.append(_finding("tags", f"Text note: {key}"))
-        if b"tIME" in png_chunks():
+        chunks = png_chunks()
+        if b"tIME" in chunks:
             out.append(_finding("dates", "Last modified time"))
+        # Text and EXIF chunks are reported above; anything else off the list of
+        # chunks a decoder needs is private data some program added.
+        if chunks - PNG_KEEP - {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}:
+            out.append(_finding("tags", "Private data chunks"))
     return out
 
 
@@ -392,17 +399,27 @@ def pdf_findings(pdf: Any) -> list[Finding]:
     if "/Metadata" in pdf.Root:
         out.append(_finding("tags", "XMP metadata"))
     out += _pdf_picture_findings(pdf)
-    notes = 0
+    notes, dated, signed = 0, False, False
     for index, page in enumerate(pdf.pages):
         if index >= 5000:
             break
+        with contextlib.suppress(Exception):
+            dated |= "/LastModified" in page.obj
         annots = page.obj.get("/Annots")
         if annots is None:
             continue
         for a in annots:
             with contextlib.suppress(Exception):
-                if str(a.get("/Subtype")) not in ("/Link", "/Widget", "/Popup"):
+                kind = str(a.get("/Subtype"))
+                dated |= "/M" in a
+                # A form field's /T is its name, not a person's.
+                signed |= "/T" in a and kind != "/Widget"
+                if kind not in ("/Link", "/Widget", "/Popup"):
                     notes += 1
+    if dated:
+        out.append(_finding("dates", "Modification dates of pages or notes"))
+    if signed:
+        out.append(_finding("author", "Names on annotations"))
     if notes:
         out.append(_finding("comments", f"{notes} annotation{'s' if notes != 1 else ''}"))
     try:
@@ -427,22 +444,8 @@ _VANISH = re.compile(rb'<w:vanish(?:\s+w:val="(?:1|true|on)")?\s*/>')
 _PRESENTATION_HIDDEN = re.compile(rb'<p:sld\b[^>]*\sshow="(?:0|false)"')
 
 
-def secure_parser() -> Any:
-    from lxml import etree  # noqa: PLC0415
-
-    return etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
-
-
-def parse_xml(data: bytes) -> Any:
-    """Parse untrusted XML; a DOCTYPE or malformed markup is corrupt input."""
-    from lxml import etree  # noqa: PLC0415
-
-    if b"<!DOCTYPE" in data[:4096].upper() or b"<!ENTITY" in data[:4096].upper():
-        raise AdapterError("E_INPUT_CORRUPT")
-    try:
-        return etree.fromstring(data, secure_parser())
-    except etree.XMLSyntaxError:
-        raise AdapterError("E_INPUT_CORRUPT") from None
+parse_xml = xmlsafe.parse_xml
+"""Kept under this name for callers that have always used it from here."""
 
 
 def _local(tag: Any) -> str:
@@ -496,8 +499,11 @@ def _count_matches(
     return _stream_search(z, name, pattern, budget)
 
 
-def _has(z: zipfile.ZipFile, name: str, pattern: re.Pattern[bytes], budget: list[int]) -> bool:
-    """Whether ``pattern`` occurs anywhere in a part (chunked, with overlap)."""
+def _has(
+    z: zipfile.ZipFile, name: str, pattern: re.Pattern[bytes], budget: list[int], carry: int = 256
+) -> bool:
+    """Whether ``pattern`` occurs anywhere in a part (chunked, with ``carry``
+    bytes of overlap, which must cover the longest match)."""
     tail = b""
     with z.open(name) as fh:
         while chunk := fh.read(CHUNK):
@@ -507,7 +513,7 @@ def _has(z: zipfile.ZipFile, name: str, pattern: re.Pattern[bytes], budget: list
             data = tail + chunk
             if pattern.search(data):
                 return True
-            tail = data[-256:]
+            tail = data[-carry:]
     return False
 
 
@@ -534,12 +540,42 @@ TRACKED_ATTR = re.compile(
 )
 TRACKED_CARRY = 16 * 1024
 
+CORE_IDENTITY = ("title", "subject", "keywords", "description", "category", "contentStatus",
+                 "identifier", "version")  # fmt: skip
+"""Core properties the cleaning tool removes besides the author and the dates:
+free text a person typed about the document."""
+
+_ATTRS_ONE = rb"""\s+[^\s=<>/"']+\s*=\s*(?:"[^"<]*"|'[^'<]*')"""
+ATTR = re.compile(_ATTRS_ONE)
+_VALUE = rb"""(?:"[^"<]*"|'[^'<]*')"""
+RSID_TAG = re.compile(
+    rb"<w:[\w.-]+(?:" + _ATTRS_ONE + rb")*?\s+w:rsid\w*\s*=\s*" + _VALUE
+    + rb"(?:" + _ATTRS_ONE + rb")*\s*/?>"
+)  # fmt: skip
+"""A Word start tag with a revision-save ID (``w:rsidR`` and its kin) among its
+attributes. They say which editing session wrote each run and so tie copies of a
+document together. Matched as a whole tag: an attribute-like string in the text
+between tags must not be touched."""
+RSID_ELEMENT = re.compile(
+    rb"<w:rsids\b[^>]*?/>|<w:rsids\b[^>]*>.*?</w:rsids>|<w:rsid\b[^>]*/>", re.S
+)
+RSID_ANY = re.compile(RSID_TAG.pattern + rb"|<w:rsids?\b")
+RSID_CARRY = 4096
+PERM_ED_TAG = re.compile(
+    rb"<w:permStart(?:" + _ATTRS_ONE + rb")*?\s+w:ed\s*=\s*" + _VALUE
+    + rb"(?:" + _ATTRS_ONE + rb")*\s*/?>"
+)  # fmt: skip
+"""A permission range that names the person allowed to edit it (``w:ed``).
+``w:edGrp`` is one of a few fixed group names and stays."""
+DOCVARS = re.compile(rb"<w:docVars\b[^>]*?/>|<w:docVars\b[^>]*>.*?</w:docVars>", re.S)
+_DOCVAR = re.compile(rb"<w:docVar\s")
+
 
 def ooxml_findings(path: Path, *, external: bool = True) -> list[Finding]:
     """Properties, comments, tracked changes, hidden parts, pictures, package
     dates and outside links of a docx, xlsx or pptx. Reads the ZIP without
-    unpacking it. ``external`` is False when the caller gets outside links
-    from ``converter_sdk.active``."""
+    unpacking it. ``external`` is False when the caller gets outside links,
+    embedded files and custom XML from ``converter_sdk.active``."""
     from .markup import check_zip  # noqa: PLC0415
 
     fmt = source_format(path)
@@ -556,6 +592,8 @@ def ooxml_findings(path: Path, *, external: bool = True) -> list[Finding]:
             out += _ooxml_changes(z, names, fmt, budget)
             out += _ooxml_pictures(z, infos, budget)
             out += _ooxml_package(infos)
+            out += _ooxml_parts(names, external)
+            out += _ooxml_identity(z, names, fmt, budget)
             if external:
                 out += _ooxml_outside_links(z, names)
     except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError, RuntimeError):
@@ -600,6 +638,60 @@ def _ooxml_package(infos: list[zipfile.ZipInfo]) -> list[Finding]:
     return []
 
 
+_PARTS_KIND = {
+    "customXml": re.compile(r"customXml/.+"),
+    "printer": re.compile(r"(?:word|xl|ppt)/printerSettings/.+"),
+    "embedded": re.compile(r"(?:word|xl|ppt)/embeddings/.+"),
+}
+
+
+def _ooxml_parts(names: list[str], external: bool) -> list[Finding]:
+    """Parts that carry someone else's data: custom XML (SharePoint properties,
+    citation sources), printer settings (printer and user names) and embedded
+    files (whole documents with properties of their own). The active-content
+    reader reports the first and last itself, so ``external`` (set when the
+    caller doesn't have it) says whether to."""
+    out: list[Finding] = []
+    n = sum(1 for x in names if _PARTS_KIND["embedded"].fullmatch(x) and not x.endswith(".rels"))
+    if external and n:
+        out.append(_finding("embeddedFiles", _plural(n, "embedded file")))
+    if external and any(_PARTS_KIND["customXml"].fullmatch(x) for x in names):
+        out.append(_finding("tags", "Custom XML data"))
+    if any(_PARTS_KIND["printer"].fullmatch(x) for x in names):
+        out.append(_finding("device", "Printer settings"))
+    return out
+
+
+def _ooxml_identity(
+    z: zipfile.ZipFile, names: list[str], fmt: str, budget: list[int]
+) -> list[Finding]:
+    """Who and where, apart from the properties: the folder a workbook was
+    saved from, the user name in its sharing settings, the editor list of a
+    Word file, editing-session IDs, document variables and the people named in
+    permission ranges."""
+    out: list[Finding] = []
+    if fmt == "xlsx" and (data := read_part(z, "xl/workbook.xml")):
+        for el in parse_xml(data).iter():
+            if _local(el.tag) == "absPath" and el.get("url"):
+                out.append(_finding("author", "Path of the folder the file was saved in"))
+            elif _local(el.tag) == "fileSharing" and (
+                el.get("userName") or el.get("reservationPassword")
+            ):
+                out.append(_finding("author", "User name in the file sharing settings"))
+    if fmt != "docx":
+        return out
+    if "word/people.xml" in names:
+        out.append(_finding("author", "List of the people who edited the file"))
+    parts = [n for n in names if re.fullmatch(r"word/[^/]+\.xml", n)]
+    if any(_has(z, n, RSID_ANY, budget, RSID_CARRY) for n in parts):
+        out.append(_finding("tags", "Editing session IDs"))
+    if any(_has(z, n, PERM_ED_TAG, budget, RSID_CARRY) for n in parts):
+        out.append(_finding("author", "People named in permission ranges"))
+    if (data := read_part(z, "word/settings.xml")) and _DOCVAR.search(data):
+        out.append(_finding("tags", "Document variables"))
+    return out
+
+
 def _ooxml_outside_links(z: zipfile.ZipFile, names: list[str]) -> list[Finding]:
     """Relationships that point outside the file other than plain web links: a
     template, a linked picture or file. Their targets are paths and addresses
@@ -634,9 +726,13 @@ def _ooxml_properties(z: zipfile.ZipFile, names: list[str]) -> list[Finding]:
         for key in _CORE_AUTHORS:
             if core.get(key):
                 out.append(_finding("author", core[key]))
-        for key in ("created", "modified"):
+        for key in ("created", "modified", "lastPrinted"):
             if core.get(key):
                 out.append(_finding("dates", core[key]))
+        # Which properties are filled in, never what they say.
+        typed = [k.capitalize() for k in CORE_IDENTITY if core.get(k)]
+        if typed:
+            out.append(_finding("tags", "Properties: " + ", ".join(typed)))
     if data := read_part(z, "docProps/app.xml"):
         app = _children(parse_xml(data))
         software = " ".join(p for p in (app.get("Application"), app.get("AppVersion")) if p)

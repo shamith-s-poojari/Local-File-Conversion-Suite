@@ -1,7 +1,8 @@
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import type { JsonSchema } from "../api";
 import { CONFIRM_SUFFIX } from "../machines/app";
 import { CONFIRM_LABEL, FIELD_ERRORS, NEEDS } from "../text";
+import { describedBy, parseLines, sameLines } from "../widgets/describe";
 import { FileOrder } from "../widgets/FileOrder";
 import { PageOrganizer } from "../widgets/PageOrganizer";
 import { parsePageRanges, RANGE_TEXT } from "../widgets/pageRanges";
@@ -211,7 +212,16 @@ export function SchemaForm({
           );
         } else {
           field = (
-            <Plain id={id} label={label} schema={s} value={params[key]} onChange={(v) => setParam(key, v)} invalid={error} errorId={errorId} />
+            <Plain
+              id={id}
+              label={label}
+              schema={s}
+              value={params[key]}
+              onChange={(v) => setParam(key, v)}
+              invalid={error}
+              errorId={errorId}
+              required={schema.required?.includes(key)}
+            />
           );
         }
         return (
@@ -258,6 +268,7 @@ function Plain({
   onChange,
   invalid = false,
   errorId,
+  required = false,
 }: {
   id: string;
   label: string;
@@ -266,11 +277,22 @@ function Plain({
   onChange: (v: unknown) => void;
   invalid?: boolean;
   errorId?: string;
+  required?: boolean;
 }) {
   // What makes a field's problem reach a screen reader (audit U27).
-  const a11y = { "aria-invalid": invalid || undefined, "aria-describedby": invalid ? errorId : undefined };
+  // The hint and the error are both read with the field.
+  const hintId = `${id}-hint`;
+  const a11y = {
+    "aria-invalid": invalid || undefined,
+    "aria-describedby": describedBy(schema.description && hintId, invalid && errorId),
+    "aria-required": required || undefined,
+  };
   const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-  const hint = schema.description ? <p className="hint">{schema.description}</p> : null;
+  const hint = schema.description ? (
+    <p id={hintId} className="hint">
+      {schema.description}
+    </p>
+  ) : null;
   if (schema.enum) {
     return (
       <div className="field">
@@ -337,23 +359,7 @@ function Plain({
     );
   }
   if (type === "array" && schema.items?.type === "string") {
-    const list = (value as string[] | undefined) ?? [];
-    return (
-      <div className="field">
-        <label htmlFor={id}>{label}</label>
-        <textarea
-          id={id}
-          {...a11y}
-          rows={3}
-          value={list.join("\n")}
-          onChange={(e) => {
-            const items = e.target.value.split("\n").filter((x) => x.trim() !== "");
-            onChange(items.length ? items : undefined);
-          }}
-        />
-        <p className="hint">One per line.</p>
-      </div>
-    );
+    return <LinesField id={id} label={label} value={value as string[] | undefined} onChange={onChange} a11y={a11y} />;
   }
   return (
     <div className="field">
@@ -366,6 +372,47 @@ function Plain({
         onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
       />
       {hint}
+    </div>
+  );
+}
+
+/** A list of text, one item per line. The box keeps exactly what is typed
+ * (so Enter makes a new line, and a blank line stays while you type the next
+ * one); the list it stands for leaves out blank lines. Before this the box was
+ * rebuilt from the list on every key, which swallowed each Enter. */
+function LinesField({
+  id,
+  label,
+  value,
+  onChange,
+  a11y,
+}: {
+  id: string;
+  label: string;
+  value: string[] | undefined;
+  onChange: (v: unknown) => void;
+  a11y: Record<string, unknown>;
+}) {
+  const [typed, setTyped] = useState(() => (value ?? []).join("\n"));
+  // The list changed from outside (a reset, another tool): show it.
+  const text = sameLines(typed, value) ? typed : (value ?? []).join("\n");
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      <textarea
+        id={id}
+        {...a11y}
+        aria-describedby={describedBy(a11y["aria-describedby"] as string | undefined, `${id}-lines-hint`)}
+        rows={3}
+        value={text}
+        onChange={(e) => {
+          setTyped(e.target.value);
+          onChange(parseLines(e.target.value));
+        }}
+      />
+      <p id={`${id}-lines-hint`} className="hint">
+        One per line.
+      </p>
     </div>
   );
 }

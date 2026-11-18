@@ -103,3 +103,18 @@ describe("text catalog", () => {
     expect(JSON.stringify(ERRORS.E_LIMIT_EXCEEDED)).not.toContain("Settings");
   });
 });
+
+describe("no command-line wording in the app's text (UX-11)", () => {
+  test("no string in text.ts names a program, a flag or an environment variable", () => {
+    const all = JSON.stringify(Object.values(text).filter((v) => typeof v !== "function"));
+    expect(all).not.toMatch(/lfcs|LFCS_|--dev|\s--[a-z]/i);
+    // The functions' output too.
+    const fns = [text.installHint("ffmpeg", "macos"), text.folderTruncatedText(2), text.skippedText(1, "PDF"), text.REDACTION_LINES.added(1, 2)];
+    expect(fns.join(" ")).not.toMatch(/lfcs|LFCS_|\s--[a-z]/i);
+  });
+
+  test("the codes the command line used to hint at now speak for the app", () => {
+    expect(text.errorMessage("E_USAGE").todo).not.toContain("lfcs");
+    expect(text.errorMessage("E_NO_ROUTE").todo).not.toContain("lfcs");
+  });
+});

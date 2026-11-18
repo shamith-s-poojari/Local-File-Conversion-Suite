@@ -28,7 +28,7 @@ export function Settings({ diag, onClose, registry }: { diag: Diagnostics | null
         </h1>
       </header>
       {!diag ? (
-        <p>Loading…</p>
+        <p role="status">Loading…</p>
       ) : (
         <>
           {diag.startupError && <ErrorBox code="E_INSTALL_CORRUPT" detail={diag.startupError} />}
@@ -69,7 +69,7 @@ export function Settings({ diag, onClose, registry }: { diag: Diagnostics | null
               </ul>
             </>
           ) : (
-            <p>Running…</p>
+            <p role="status">Running…</p>
           )}
           <details className="technical">
             <summary>Technical details</summary>

@@ -235,7 +235,7 @@ def test_docx_properties_and_comments(tmp_path: Path) -> None:
         "Save times of the parts",  # the fixture is written today, not on 1980-01-01
     }
     assert details(found, "software") == ["Word 16.0"]
-    assert details(found, "tags") == ["Template", "1 custom property"]
+    assert details(found, "tags") == ["Properties: Title", "Template", "1 custom property"]
     assert details(found, "comments") == ["1 comment"]
     dump = json.dumps([f.model_dump() for f in found])
     assert "Secret plans" not in dump

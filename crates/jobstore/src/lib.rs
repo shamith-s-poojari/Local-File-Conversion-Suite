@@ -35,6 +35,6 @@ pub use save::{FolderLayout, SaveCheck, SaveDestination, SaveOptions, SaveReport
 pub use store::{
     InputSource, JobDirs, JobEvent, JobFailure, JobSnapshot, JobState, JobStore, OutputFile,
     Progress, ShutdownReport, Snapshot, StoreConfig, SweepReport, Warning, MAX_WARNINGS_PER_JOB,
-    WARNINGS_TRUNCATED,
+    WARNINGS_TRUNCATED, WARN_LARGE_JOB, WARN_PART_FAILED, WARN_UNKNOWN,
 };
 pub use sync::{SyncEnv, SyncOs, SyncProvider, SyncRoots};

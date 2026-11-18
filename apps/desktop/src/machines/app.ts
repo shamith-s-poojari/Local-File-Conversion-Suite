@@ -255,6 +255,12 @@ export const appMachine = setup({
     },
     inspecting: {
       on: {
+        // Leaving while files are opened: the inspection's result is ignored
+        // and the files are released (audit UX-7).
+        CANCEL: {
+          target: "idle",
+          actions: { type: "clearFiles", params: ({ context }) => ({ fileIds: allIds(context) }) },
+        },
         // Start again with everything: files already inspected are skipped.
         FILES_ADDED: {
           target: "inspecting",
@@ -384,6 +390,11 @@ export const appMachine = setup({
       },
     },
     preflight: {
+      on: {
+        // Back to the form. If the core finishes creating the job anyway,
+        // `createJob` (App.tsx) sees its signal aborted and cancels that job.
+        CANCEL: { target: "configuring", actions: assign({ error: null }) },
+      },
       invoke: {
         src: "createJob",
         input: ({ context }) => ({
@@ -613,6 +624,13 @@ function usable(f: FileView): boolean {
 function nothingLeftAfterRemoving({ context, event }: { context: Context; event: Event }): boolean {
   if (event.type !== "REMOVE_FILE") return false;
   return !context.files.filter((f) => f.file?.fileId !== event.fileId).some(usable);
+}
+
+/** Whether "Start over" would throw away work worth a question: choices made
+ * on the Configure screen, or more than one file picked (audit UX-8). The
+ * original files are never touched either way. */
+export function startOverNeedsConfirm(ctx: Context): boolean {
+  return ctx.operation !== null || ctx.files.length > 1;
 }
 
 function allIds(ctx: Context): string[] {

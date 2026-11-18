@@ -14,6 +14,7 @@ import base64
 import io
 import posixpath
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import unquote, urlsplit
@@ -117,7 +118,7 @@ class MarkupConvertAdapter(ConversionAdapter):
                     book.close()
                     pages = self._epub_pdf(ctx, path, out, size)
                     return OutputFile(out, pages=pages)
-                body, dropped = book.body(embed_images=to == "html")
+                body, dropped = book.body(embed_images=to == "html", check=ctx.check_cancelled)
             finally:
                 book.close()
             if dropped:
@@ -330,14 +331,18 @@ class Epub:
         )
         return etree.fromstring(self.zip.read(name), parser=parser)
 
-    def body(self, embed_images: bool) -> tuple[str, bool]:
-        """Every chapter's body as one HTML fragment, and whether images were left out."""
+    def body(self, embed_images: bool, check: Callable[[], None] | None = None) -> tuple[str, bool]:
+        """Every chapter's body as one HTML fragment, and whether images were left out.
+        ``check`` runs before each chapter (pass ``ctx.check_cancelled``): a book can
+        have thousands."""
         from lxml import html as lxml_html  # noqa: PLC0415
 
         parts = []
         dropped = False
         budget = EPUB_MAX_IMAGES
         for chapter in self.spine:
+            if check is not None:
+                check()
             tree = lxml_html.document_fromstring(
                 self.zip.read(chapter) or b"<p></p>", parser=_parser()
             )

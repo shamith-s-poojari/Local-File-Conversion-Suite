@@ -95,6 +95,8 @@ export function FileRow({ api, f, send }: { api: Api; f: FileView; send: Send })
             ctx={{ files: [], pages: 0, reference: id, api }}
             params={{}}
             setParam={() => {}}
+            invalid={problem !== null}
+            errorId={`pw-${id}-problem`}
           />
           <button type="submit" className="primary" disabled={!password}>
             Open
@@ -120,7 +122,7 @@ export function FileRow({ api, f, send }: { api: Api; f: FileView; send: Send })
         </div>
       )}
       {problem && (
-        <div role="alert">
+        <div role="alert" id={`pw-${id}-problem`}>
           <p className="hint error">{problem.what}</p>
           {problem.why && <p className="hint">{problem.why}</p>}
           {problem.todo && <p className="hint">{problem.todo}</p>}

@@ -20,7 +20,10 @@
   /* 5.5:1 on canvas, 5.2 on sunken, 6.0 on surface (audit U13; styles.test.ts computes it) */
   --muted: #66635d;
   --line: rgba(31, 30, 28, 0.09);
-  --line-strong: rgba(31, 30, 28, 0.18);
+  /* A control's border (button, field, dropzone): 3.3:1 on canvas, 3.8 on
+     surface, 3.3 on sunken, over the 3:1 WCAG 1.4.11 asks of a UI component's
+     boundary. The old translucent value was 1.4:1. styles.test.ts computes it. */
+  --line-strong: #85827b;
   --accent: #1f1e1c;
   --accent-hover: #3a3834;
   --accent-ink: #ffffff;
@@ -75,7 +78,8 @@
     --ink-2: #cbc7bf;
     --muted: #9c988f;
     --line: rgba(237, 235, 230, 0.08);
-    --line-strong: rgba(237, 235, 230, 0.18);
+    /* 4.3:1 on canvas, 4.1 on surface, 3.8 on sunken */
+    --line-strong: #7d7a73;
     --accent: #edebe6;
     --accent-hover: #ffffff;
     --accent-ink: #141311;
@@ -113,6 +117,13 @@
   html {
     scroll-behavior: smooth;
   }
+}
+
+/* A focused control scrolls clear of the sticky top bar and action bar
+   (WCAG 2.4.11 Focus Not Obscured). */
+html {
+  scroll-padding-top: 4rem;
+  scroll-padding-bottom: 6rem;
 }
 
 body {
@@ -265,15 +276,18 @@ button {
     box-shadow 200ms var(--ease);
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled, [aria-disabled="true"]) {
   border-color: var(--ink-2);
 }
 
-button:active:not(:disabled) {
+button:active:not(:disabled, [aria-disabled="true"]) {
   transform: scale(0.98);
 }
 
-button:disabled {
+/* aria-disabled is for a button that stays in the tab order, so focus isn't
+   lost when it is pressed (Cancel, Convert while it waits). */
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.45;
   cursor: default;
 }
@@ -284,7 +298,7 @@ button.primary {
   color: var(--accent-ink);
 }
 
-button.primary:hover:not(:disabled) {
+button.primary:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
 }
@@ -300,7 +314,7 @@ button.primary .btn-icon {
   transition: transform 260ms var(--ease);
 }
 
-button.primary:hover:not(:disabled) .btn-icon {
+button.primary:hover:not(:disabled, [aria-disabled="true"]) .btn-icon {
   transform: translateX(2px);
 }
 
@@ -316,7 +330,7 @@ button.ghost {
   color: var(--ink-2);
 }
 
-button.ghost:hover:not(:disabled) {
+button.ghost:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--sunken);
   border-color: transparent;
 }
@@ -335,6 +349,7 @@ button.link {
   background: none;
   border: none;
   padding: 0;
+  min-height: 24px; /* WCAG 2.5.8 target size */
   color: var(--focus);
   text-decoration: underline;
 }
@@ -374,11 +389,18 @@ input[type="radio"] {
   min-width: 0;
   margin: 0;
   accent-color: var(--accent);
-  width: 1rem;
-  height: 1rem;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+/* The label is part of the target, so a checkbox row is at least 24 px tall. */
+.toggle,
+.field.check {
+  min-height: 24px;
 }
 
 input[type="range"] {
+  min-height: 24px;
   min-width: 0;
   width: 100%;
   padding: 0;
@@ -607,13 +629,42 @@ main {
   }
 }
 
+/* Less motion: every animation runs once and ends on its final frame, so
+   nothing loops. The spinner and the moving bar are replaced by still ones;
+   the heading and the "Working" text still say something is in progress. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
+  }
+
+  .state-icon.spinning,
+  .skeleton {
+    animation: none;
+  }
+
+  /* A stripe that doesn't move: progress with no percentage to show. */
+  .bar.indeterminate::after {
+    animation: none;
+    width: 100%;
+    background: repeating-linear-gradient(90deg, var(--ink) 0 10px, transparent 10px 20px);
+  }
+}
+
+/* Blurred, see-through bars become solid for people who turn transparency off. */
+@media (prefers-reduced-transparency: reduce) {
+  .topbar,
+  .action-bar {
+    background: var(--canvas);
+    backdrop-filter: none;
+  }
+
+  body::after {
+    display: none;
   }
 }
 
@@ -1370,6 +1421,8 @@ legend {
 
 .organizer .tools button {
   padding: 0.1rem 0.4rem;
+  min-width: 24px;
+  min-height: 24px;
 }
 
 .row {
@@ -1978,4 +2031,57 @@ legend {
 .install-cmd {
   user-select: all;
   font-family: var(--mono, ui-monospace, monospace);
+}
+
+/* Windows high contrast and similar: what colour alone shows gets a border. */
+@media (forced-colors: active) {
+  .bar {
+    border: 1px solid CanvasText;
+  }
+
+  .dot {
+    border: 1px solid CanvasText;
+  }
+
+  .chip.checked,
+  .target.checked,
+  .tool-row.checked {
+    border-width: 3px;
+  }
+}
+
+/* The redaction page's lines: a scrolling list, so a long page stays usable. */
+.line-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 14rem;
+  overflow: auto;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.line-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.line-list .line-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.confirm-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-right: auto;
+}
+
+.settings-link {
+  display: inline-flex;
+  margin-top: 0.3rem;
 }

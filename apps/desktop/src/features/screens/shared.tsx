@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Api, Diagnostics, Format, Warning } from "../../api";
 import { describeMedia, familyOf, type Family } from "../../formats";
 import { FAMILY_ICONS, WarningIcon } from "../../icons";
@@ -12,8 +12,10 @@ import {
   folderTruncatedText,
   formatBytes,
   installCommand,
+  OPEN_SETTINGS,
   reasonMessage,
   SNIFF_ERRORS,
+  UNKNOWN_TYPE,
   unnamedFile,
   warningDetailText,
   warningText,
@@ -22,6 +24,72 @@ import { Thumbnail } from "../../widgets/Thumbnail";
 import { copyToClipboard, diagnosticsText, missingEngines } from "../diagnostics";
 
 export type Send = (e: Event) => void;
+
+/** Opens Settings. App provides it; a screen rendered alone has none, and the
+ * link is left out. */
+export const OpenSettingsContext = createContext<(() => void) | null>(null);
+
+/** A link to Settings, for text that sends people there (audit UX-6). */
+export function SettingsLink() {
+  const open = useContext(OpenSettingsContext);
+  if (!open) return null;
+  return (
+    <button type="button" className="link settings-link" onClick={open}>
+      {OPEN_SETTINGS}
+    </button>
+  );
+}
+
+/** Ask before going on, inline: the question is announced, focus goes to the
+ * safe answer, Escape means keep, and `onKeep` is where the caller puts focus
+ * back on the button that asked. */
+export function ConfirmBar({
+  message,
+  confirm,
+  keep,
+  onConfirm,
+  onKeep,
+  danger = false,
+}: {
+  message: ReactNode;
+  confirm: string;
+  keep: string;
+  onConfirm: () => void;
+  onKeep: () => void;
+  danger?: boolean;
+}) {
+  const safe = useRef<HTMLButtonElement>(null);
+  useEffect(() => safe.current?.focus(), []);
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onKeep();
+    }
+  };
+  return (
+    <div className="confirm-bar" role="alertdialog" aria-label={confirm} aria-describedby="confirm-message" onKeyDown={onKeyDown}>
+      <p id="confirm-message" className="summary">
+        {message}
+      </p>
+      <button type="button" ref={safe} onClick={onKeep}>
+        {keep}
+      </button>
+      <button type="button" className={danger ? "danger" : undefined} onClick={onConfirm}>
+        {confirm}
+      </button>
+    </div>
+  );
+}
+
+/** Focus goes back to `ref` when `open` turns from true to false, so a
+ * keyboard user lands where they were after a confirmation closes. */
+export function useReturnFocus(open: boolean, ref: { current: HTMLElement | null }) {
+  const was = useRef(open);
+  useEffect(() => {
+    if (was.current && !open) ref.current?.focus();
+    was.current = open;
+  }, [open, ref]);
+}
 
 export const PREVIEWABLE: Family[] = ["image", "audio", "video"];
 
@@ -32,7 +100,15 @@ export function canPreview(format: Format): boolean {
 // ------------------------------------------------------------------ parts
 
 export function FormatTag({ format }: { format: Format }) {
-  return <span className={`tag fam-${familyOf(format)}`}>{format === "unknown" ? "?" : format.toUpperCase()}</span>;
+  if (format === "unknown") {
+    return (
+      <span className={`tag fam-${familyOf(format)}`}>
+        <span aria-hidden="true">?</span>
+        <span className="visually-hidden">{UNKNOWN_TYPE}</span>
+      </span>
+    );
+  }
+  return <span className={`tag fam-${familyOf(format)}`}>{format.toUpperCase()}</span>;
 }
 
 export function FamilyGlyph({ family, size = "m" }: { family: Family; size?: "s" | "m" | "l" }) {
@@ -107,6 +183,7 @@ export function ErrorBox({
             </p>
           );
         })}
+        {(code === "E_SANDBOX_UNAVAILABLE" || reason === "engineMissing" || reason === "selfTestPending") && <SettingsLink />}
         {m.report && load && <CopyDiagnostics load={load} />}
       </div>
     </div>
@@ -132,6 +209,9 @@ export function CopyDiagnostics({ load }: { load: () => Promise<Diagnostics> }) 
       <button type="button" className="ghost sm" onClick={copy}>
         {state === "copied" ? DIAGNOSTICS.copied : DIAGNOSTICS.copy}
       </button>
+      <span className="visually-hidden" role="status">
+        {state === "copied" ? DIAGNOSTICS.copied : ""}
+      </span>
       <span className="hint">{DIAGNOSTICS.note}</span>
       {state === "failed" && (
         <>

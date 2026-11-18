@@ -63,7 +63,8 @@ export function ProgressScreen({ ctx, send, cancelling }: { ctx: Context; send: 
       )}
       <Warnings warnings={job?.warnings ?? []} />
       <div className="actions">
-        <button type="button" onClick={() => send({ type: "CANCEL" })} disabled={cancelling}>
+        {/* aria-disabled keeps focus here once it's pressed. */}
+        <button type="button" onClick={() => !cancelling && send({ type: "CANCEL" })} aria-disabled={cancelling || undefined}>
           Cancel
         </button>
       </div>

@@ -95,6 +95,7 @@ impl Fixture {
                         extension: "pdf".into(),
                         size_bytes: bytes.len() as u64,
                         source: None,
+                        sha256: None,
                     })
                     .collect(),
             )
@@ -147,6 +148,7 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
                 extension: "pdf".into(),
                 size_bytes: 8,
                 source: None,
+                sha256: None,
             }],
         )
         .unwrap();
@@ -332,6 +334,7 @@ fn record_outputs_distrusts_the_worker() {
         extension: "pdf".into(),
         size_bytes: size,
         source: None,
+        sha256: None,
     };
     for bad in [
         out("../escape.pdf", 1),
@@ -369,6 +372,7 @@ fn record_outputs_refuses_device_names_and_non_regular_files() {
         extension: "pdf".into(),
         size_bytes: 1,
         source: None,
+        sha256: None,
     };
     // The names are valid files on Unix, so only the name rule stops them.
     for name in [
@@ -500,6 +504,7 @@ fn a_partial_job_can_be_saved() {
                 extension: "pdf".into(),
                 size_bytes: 6,
                 source: None,
+                sha256: None,
             }],
         )
         .unwrap();
@@ -769,4 +774,152 @@ fn seq_is_shared_across_jobs() {
         [1, 2, 3, 4],
         "one counter for the whole app"
     );
+}
+
+/// SEC-1: the output was verified with its hash; the same number of bytes,
+/// but different ones, must not reach the user's folder.
+#[test]
+fn an_output_changed_after_its_hash_was_recorded_is_not_saved() {
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    let original = b"%PDF-1 original";
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "a.pdf", original)]);
+    let hash: String = Sha256::digest(original)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    f.store
+        .record_outputs(
+            &id,
+            vec![OutputFile {
+                path: "0.pdf".into(),
+                suggested_name: "a.pdf".into(),
+                extension: "pdf".into(),
+                size_bytes: original.len() as u64,
+                source: None,
+                sha256: Some(hash),
+            }],
+        )
+        .unwrap();
+    f.store.transition(&id, JobState::Succeeded).unwrap();
+    // Same length, different bytes.
+    let dirs = f.store.job_dirs(&id).unwrap();
+    std::fs::write(dirs.out.join("0.pdf"), b"%PDF-1 tampered").unwrap();
+    assert_eq!(b"%PDF-1 tampered".len(), original.len());
+
+    let dest_dir = f.tmp.path().join("saves");
+    std::fs::create_dir(&dest_dir).unwrap();
+    for dest in [
+        SaveDestination::File(dest_dir.join("x.pdf")),
+        SaveDestination::Folder(dest_dir.clone()),
+    ] {
+        let err = f
+            .store
+            .save_outputs(&id, &dest, SaveOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, JobError::InvalidOutput(_)), "{err}");
+        assert_eq!(std::fs::read_dir(&dest_dir).unwrap().count(), 0);
+    }
+    // The job stays, so the user can try again.
+    assert_eq!(f.store.snapshot().jobs.len(), 1);
+}
+
+/// RS-6: if `out/` can't be emptied for the retry, the retry must not start
+/// on it. The transition reports the failure, and failing the job then
+/// removes what was left.
+#[cfg(unix)]
+#[test]
+fn a_retry_whose_out_folder_cannot_be_emptied_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let input = f.user_file("r.pdf", b"%PDF");
+    let (id, _) = f.store.create_job().unwrap();
+    f.store
+        .stage_inputs(
+            &id,
+            &[InputSource {
+                path: input,
+                extension: "pdf".into(),
+            }],
+            0.0,
+        )
+        .unwrap();
+    for s in [JobState::Validating, JobState::Queued, JobState::Running] {
+        f.store.transition(&id, s).unwrap();
+    }
+    let dirs = f.store.job_dirs(&id).unwrap();
+    let locked = dirs.out.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("stale.pdf"), b"stale").unwrap();
+    // A folder that can't be written to can't have its files unlinked.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // Root ignores permissions, so the cleanup would succeed there.
+    let can_block = std::fs::write(locked.join("probe"), b"").is_err();
+
+    let result = f.store.transition(&id, JobState::Queued);
+    if can_block {
+        assert!(result.is_err(), "the retry started on a stale out/");
+        assert!(locked.join("stale.pdf").exists());
+    } else {
+        result.unwrap();
+        assert_eq!(std::fs::read_dir(&dirs.out).unwrap().count(), 0);
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// RS-11: a listener may read the store. With events delivered under the
+/// store's lock this deadlocked, so the test runs on a thread with a deadline.
+#[test]
+fn an_event_listener_may_call_back_into_the_store() {
+    use std::sync::OnceLock;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = DataRoot::open(&tmp.path().join("data"), &SyncRoots::none()).unwrap();
+    let store: Arc<OnceLock<Arc<JobStore>>> = Arc::new(OnceLock::new());
+    let seen: Arc<Mutex<Vec<(u64, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (s2, seen2) = (store.clone(), seen.clone());
+    let config = StoreConfig {
+        on_event: Some(Arc::new(move |e: &JobEvent| {
+            // Reads, and also makes a change, from inside the listener.
+            let jobs = s2.get().map_or(0, |s| s.snapshot().jobs.len());
+            if e.seq == 1 {
+                if let Some(s) = s2.get() {
+                    let _ = s.set_stage(&e.job_id, "from-listener");
+                }
+            }
+            seen2.lock().unwrap().push((e.seq, jobs));
+        })),
+        ..StoreConfig::default()
+    };
+    let (opened, _) = JobStore::open(root, SyncRoots::none(), config).unwrap();
+    let opened = Arc::new(opened);
+    store.set(opened.clone()).ok().unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = opened.create_job().map(|_| ());
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(Duration::from_secs(60))
+        .expect("the store deadlocked on a listener that calls it")
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    // Created, then the listener's own change, in order and not nested.
+    assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(seen[0].1, 1, "the job is visible to the listener");
+}
+
+/// SEC-15: every job folder is private to the user.
+#[cfg(unix)]
+#[test]
+fn job_folders_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    let dirs = f.store.job_dirs(&id).unwrap();
+    for d in [&dirs.root, &dirs.input_dir, &dirs.work, &dirs.out] {
+        let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{d:?}");
+    }
+    let lease = std::fs::metadata(dirs.root.join(".lease")).unwrap();
+    assert_eq!(lease.permissions().mode() & 0o077, 0);
 }

@@ -59,3 +59,62 @@ describe("reading comfort (U25)", () => {
     expect(small.map((s) => s.text)).toEqual([]);
   });
 });
+
+describe("control borders (A11Y: WCAG 1.4.11)", () => {
+  // The old translucent --line-strong was 1.44:1; a control's boundary needs 3:1.
+  for (const [name, theme] of [["light", light], ["dark", dark]] as const) {
+    for (const bg of ["--canvas", "--sunken", "--surface"]) {
+      test(`${name}: --line-strong on ${bg} is at least 3:1`, () => {
+        expect(theme["--line-strong"]).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(contrast(theme["--line-strong"]!, theme[bg]!)).toBeGreaterThanOrEqual(3);
+      });
+    }
+  }
+});
+
+describe("text on its tinted background (A11Y: WCAG 1.4.3)", () => {
+  const pairs = [
+    ["--doc-ink", "--doc-bg"],
+    ["--img-ink", "--img-bg"],
+    ["--aud-ink", "--aud-bg"],
+    ["--vid-ink", "--vid-bg"],
+    ["--dat-ink", "--dat-bg"],
+    ["--error", "--error-bg"],
+    ["--warn", "--warn-bg"],
+    ["--ok", "--ok-bg"],
+  ];
+  for (const [fg, bg] of pairs) {
+    test(`light: ${fg} on ${bg} is at least 4.5:1`, () => {
+      expect(contrast(light[fg!]!, light[bg!]!)).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+  test("light: the focus colour, used for links, reads on every background", () => {
+    for (const bg of ["--canvas", "--sunken", "--surface"]) expect(contrast(light["--focus"]!, light[bg]!)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("motion and transparency preferences (A11Y-1)", () => {
+  const reduce = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  const block = reduce.slice(0, reduce.indexOf("\n}\n"));
+
+  test("under reduced motion nothing loops: animations run once", () => {
+    expect(block).toMatch(/animation-iteration-count:\s*1\s*!important/);
+    expect(block).toContain("animation-duration: 1ms");
+  });
+
+  test("the spinner and skeleton stop, and the moving bar becomes a still stripe", () => {
+    expect(block).toMatch(/\.state-icon\.spinning,\s*\.skeleton\s*\{\s*animation:\s*none/);
+    expect(block).toMatch(/\.bar\.indeterminate::after\s*\{[^}]*animation:\s*none[^}]*width:\s*100%/);
+  });
+
+  test("blur and see-through bars are solid when transparency is reduced", () => {
+    const t = css.slice(css.indexOf("@media (prefers-reduced-transparency: reduce)"));
+    const b = t.slice(0, t.indexOf("\n}\n"));
+    expect(b).toContain("backdrop-filter: none");
+    expect(b).toContain(".action-bar");
+  });
+
+  test("a disabled-looking button that keeps focus is styled like a disabled one", () => {
+    expect(css).toMatch(/button\[aria-disabled="true"\]\s*\{\s*opacity: 0\.45/);
+  });
+});
