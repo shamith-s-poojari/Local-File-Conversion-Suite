@@ -35,6 +35,10 @@ const SYSTEM_READ: &[&str] = &[
     "/lib64",
     "/etc/ld.so.cache",
     "/etc/localtime",
+    // Debian and Ubuntu reach some libraries through alternatives links
+    // (`libblas.so.3` -> /etc/alternatives/… -> /usr/lib/…/blas/…), and
+    // FFmpeg needs them. The folder holds only symlinks.
+    "/etc/alternatives",
 ];
 
 /// Shells a worker has no business starting. Each is bound over with
