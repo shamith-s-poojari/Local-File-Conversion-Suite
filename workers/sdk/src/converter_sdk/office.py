@@ -17,6 +17,9 @@ from .engines import binary, run
 from .errors import AdapterError
 
 TIMEOUT_S = 300
+RESTART_REQUESTED = 81
+"""soffice.bin's exit code after it creates a user profile: start it again.
+The `soffice` script (oosplash) does that for its callers."""
 """One document. A long novel converts in seconds; a hang is killed."""
 
 # LibreOffice export filters by target extension and document family.
@@ -120,6 +123,10 @@ def soffice_convert(
     work = str(ctx.work_dir)
     env = {"HOME": work, "TMPDIR": work, "TEMP": work, "TMP": work}
     code, _err = run(ctx, argv, env=env, timeout_s=TIMEOUT_S)
+    if code == RESTART_REQUESTED:
+        # A new profile was just made; LibreOffice's launcher would start it
+        # again, but the sandbox runs soffice.bin directly, so do it here.
+        code, _err = run(ctx, argv, env=env, timeout_s=TIMEOUT_S)
     produced = sorted(
         (p for p in outdir.iterdir() if p.is_file()), key=lambda p: (p.stat().st_mtime_ns, p.name)
     )

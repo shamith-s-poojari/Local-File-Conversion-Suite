@@ -92,7 +92,7 @@ fn ffprobe_reads_a_tone_inside_the_sandbox() {
 }
 
 /// What the fake adapter below runs: LibreOffice as `converter_sdk.office`
-/// starts it, printing its exit code, stderr and what it wrote.
+/// starts it (again after exit 81), printing its exit code, stderr and what it wrote.
 const OFFICE_SCRIPT: &str = r#"
 import os, pathlib, subprocess, sys
 work = pathlib.Path("work").resolve()
@@ -101,13 +101,18 @@ src.write_text("<p>Hello</p>")
 out = work / "lo-out"
 out.mkdir()
 env = {"HOME": str(work), "TMPDIR": str(work), "TEMP": str(work), "TMP": str(work)}
-p = subprocess.run(
-    [os.environ["LFCS_BIN_SOFFICE"], "-env:UserInstallation=" + (work / "lo-profile").as_uri(),
+argv = [os.environ["LFCS_BIN_SOFFICE"], "-env:UserInstallation=" + (work / "lo-profile").as_uri(),
      "--headless", "--invisible", "--nologo", "--norestore", "--nodefault",
      "--nolockcheck", "--nofirststartwizard",
-     "--convert-to", "pdf", "--outdir", str(out), str(src)],
-    stdin=subprocess.DEVNULL, capture_output=True, env=env, cwd=work, timeout=240,
-)
+     "--convert-to", "pdf", "--outdir", str(out), str(src)]
+def once():
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                          env=env, cwd=work, timeout=240)
+p = once()
+# 81: a new profile was made and soffice.bin wants a restart, as
+# converter_sdk.office does.
+if p.returncode == 81:
+    p = once()
 print("EXIT", p.returncode)
 print("STDOUT", p.stdout.decode(errors="replace")[-4000:])
 print("STDERR", p.stderr.decode(errors="replace")[-4000:])
