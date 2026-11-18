@@ -150,6 +150,7 @@ class ConversionAdapter(Adapter):
 
 
 _RUN_SPECIFIC_XMP = (
+    "dc:date",  # LibreOffice 25+ stamps the export time here
     "xmp:CreateDate",
     "xmp:ModifyDate",
     "xmp:MetadataDate",

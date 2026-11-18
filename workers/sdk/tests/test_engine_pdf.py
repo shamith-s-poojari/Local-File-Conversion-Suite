@@ -35,6 +35,7 @@ def engine_pdf() -> bytes:
         meta["xmpMM:DocumentID"] = f"uuid:{uuid.uuid4()}"
         meta["xmpMM:InstanceID"] = f"uuid:{uuid.uuid4()}"
         meta["xmp:CreateDate"] = "2026-11-18T08:00:00Z"
+        meta["dc:date"] = [f"2026-11-18T08:{uuid.uuid4().int % 60:02d}:00Z"]
     buf = io.BytesIO()
     pdf.save(buf, static_id=False)
     return buf.getvalue()
