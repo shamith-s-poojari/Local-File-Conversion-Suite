@@ -3,9 +3,10 @@
 Run inside the sandbox as ``python -I probe.py access CONFIG_JSON`` or
 ``python -I probe.py alloc`` or ``python -I probe.py engine CONFIG_JSON`` (run
 with an engine grant: its folders must be readable and not writable). In
-``access`` mode it tries everything the sandbox must refuse, plus two things it must allow (so a probe that can't do
-anything doesn't pass by accident), and prints a JSON report. In ``alloc``
-mode it allocates until something stops it.
+``access`` mode it tries everything the sandbox must refuse, plus two things
+it must allow (so a probe that can't do anything doesn't pass by accident),
+and prints a JSON report. In ``alloc`` mode it allocates until something
+stops it.
 """
 
 import errno
