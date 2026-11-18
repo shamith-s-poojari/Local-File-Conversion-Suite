@@ -195,7 +195,30 @@ def test_image_options_are_used(tmp_path: Path, sources) -> None:
 def test_pdf_output_repeats_exactly(tmp_path: Path, sources) -> None:
     a = convert(tmp_path / "a", sources["docx"], "pdf").outputs[0].read_bytes()
     b = convert(tmp_path / "b", sources["docx"], "pdf").outputs[0].read_bytes()
-    assert a == b
+    assert a == b, _pdf_differences(a, b)
+
+
+def _pdf_differences(a: bytes, b: bytes) -> str:
+    """Which parts of two PDFs differ, so a failure says what LibreOffice
+    stamped differently (the fixture holds no private text)."""
+    import io
+
+    import pikepdf
+
+    out = []
+    with pikepdf.open(io.BytesIO(a)) as pa, pikepdf.open(io.BytesIO(b)) as pb:
+        for key in ("/ID", "/Info"):
+            if repr(pa.trailer.get(key)) != repr(pb.trailer.get(key)):
+                out.append(f"trailer {key}")
+        ma, mb = pa.Root.get("/Metadata"), pb.Root.get("/Metadata")
+        if (ma is None) != (mb is None) or (ma is not None and ma.read_bytes() != mb.read_bytes()):
+            out.append("XMP: " + repr(ma.read_bytes()[:2000] if ma is not None else None))
+        for n, (x, y) in enumerate(zip(pa.objects, pb.objects, strict=False)):
+            if repr(x) != repr(y):
+                out.append(f"object {n}: {repr(x)[:300]} != {repr(y)[:300]}")
+                if len(out) > 8:
+                    break
+    return "; ".join(out) or "same objects; byte layout differs"
 
 
 @pytest.mark.parametrize(

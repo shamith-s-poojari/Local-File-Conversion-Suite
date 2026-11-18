@@ -423,7 +423,12 @@ fn refused_claim_evicts_nobody(python: &Path, tmp: &Path) {
 }
 
 /// Wave 2: a daemon a file worker double-forked dies with the worker.
-#[cfg(unix)]
+///
+/// macOS only. On Linux the worker runs in bubblewrap's own PID namespace,
+/// which ends every process in it when the worker exits, and the PID the
+/// daemon records is its number inside the namespace, not one this test can
+/// check. Windows: the Job Object holds every descendant.
+#[cfg(all(unix, not(target_os = "linux")))]
 fn closing_a_file_worker_kills_its_strays(python: &Path, tmp: &Path) {
     let alive = |pid: i32| {
         // SAFETY: signal 0 only checks that the process exists.
@@ -455,5 +460,5 @@ fn closing_a_file_worker_kills_its_strays(python: &Path, tmp: &Path) {
     r.app.shutdown();
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "linux"))]
 fn closing_a_file_worker_kills_its_strays(_: &Path, _: &Path) {}

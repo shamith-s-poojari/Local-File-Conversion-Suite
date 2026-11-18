@@ -114,9 +114,9 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install --cask libreoffice
 
-      - name: Install LibreOffice (Windows)
-        if: runner.os == 'Windows'
-        run: choco install libreoffice-fresh --no-progress -y
+      # Not on Windows yet: LibreOffice inside the AppContainer sandbox
+      # never finished a conversion (CI, 2026-11-18; see docs/known-limits.md).
+      # The Python tests, which run it unsandboxed, still install it there.
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -138,7 +138,7 @@ jobs:
       # Which engines the tests ran against (they are not pinned), and a
       # failure if LibreOffice isn't where the app looks for it.
       - name: Engine versions
-        run: uv run --no-sync python tools/engine-versions.py --require ffmpeg --require soffice
+        run: uv run --no-sync python tools/engine-versions.py --require ffmpeg ${{ runner.os != 'Windows' && '--require soffice' || '' }}
         shell: bash
 
       - name: Build frontend

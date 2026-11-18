@@ -149,6 +149,17 @@ class ConversionAdapter(Adapter):
         return f"{self.title(params, index)}{suffix}.{ext}"
 
 
+_RUN_SPECIFIC_XMP = (
+    "xmp:CreateDate",
+    "xmp:ModifyDate",
+    "xmp:MetadataDate",
+    "xmpMM:DocumentID",
+    "xmpMM:InstanceID",
+    "xmpMM:VersionID",
+    "xmpMM:History",
+)
+
+
 def pdf_bytes_to_output(ctx: JobContext, data: bytes, path: Path) -> int:
     """Write PDF bytes made by another engine (PyMuPDF, LibreOffice) under the
     shared saving rules (spec 13.2): full rewrite, deterministic /ID, checked.
@@ -161,9 +172,11 @@ def pdf_bytes_to_output(ctx: JobContext, data: bytes, path: Path) -> int:
     scratch.write_bytes(data)
     try:
         with pikepdf.open(scratch) as pdf:
-            # Engines stamp creation times; drop them so repeat runs match.
+            # Engines stamp creation times and fresh random document IDs
+            # (newer LibreOffice writes xmpMM:DocumentID/InstanceID UUIDs);
+            # drop them so repeat runs match.
             with pdf.open_metadata(set_pikepdf_as_editor=False, update_docinfo=False) as meta:
-                for key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
+                for key in _RUN_SPECIFIC_XMP:
                     if key in meta:
                         del meta[key]
             # The engine's random /ID (and LibreOffice's /DocChecksum of its

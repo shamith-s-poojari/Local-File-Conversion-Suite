@@ -8,9 +8,11 @@ internally, in ``work/``.
 
 from __future__ import annotations
 
+import html
 import io
 import re
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -153,6 +155,7 @@ class OfficeConvertAdapter(ConversionAdapter):
         # conversion should keep; see "Why inputs aren't disarmed" in the README.
         if to == "txt" and src in CALC:
             produced = soffice_convert(ctx, source, TEXT_SHEETS, import_filter=import_filter)
+            produced = _in_sheet_order(produced, path)
             ctx.warn("FORMULAS_DROPPED")
             parts = []
             for p in produced:
@@ -184,6 +187,7 @@ class OfficeConvertAdapter(ConversionAdapter):
             pages = pdf_bytes_to_output(ctx, produced[0].read_bytes(), out)
             return [OutputFile(out, pages=pages)]
         if to == "csv":
+            produced = _in_sheet_order(produced, path)
             ctx.warn("FORMULAS_DROPPED")
             if len(produced) > 1:
                 ctx.warn("SHEETS_SPLIT")
@@ -263,6 +267,38 @@ def _sheet_name(produced: Path, stem: str) -> str:
     name = produced.stem
     sheet = name[len(stem) + 1 :] if name.startswith(stem + "-") else ""
     return re.sub(r"[^\w .()-]", "_", sheet).strip()
+
+
+_XLSX_SHEET = re.compile(rb"<(?:\w+:)?sheet\b[^>]*?\bname=\"([^\"]*)\"")
+_ODS_SHEET = re.compile(rb"<table:table\b[^>]*?\btable:name=\"([^\"]*)\"")
+
+
+def _workbook_sheets(path: Path) -> list[str]:
+    """Sheet names in workbook order, read from an xlsx or ods; ``[]`` when
+    the file is another kind or can't be read (the caller keeps its order)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            if "xl/workbook.xml" in names:
+                found = _XLSX_SHEET.findall(z.read("xl/workbook.xml"))
+            elif "content.xml" in names:
+                found = _ODS_SHEET.findall(z.read("content.xml"))
+            else:
+                return []
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return []
+    return [html.unescape(n.decode("utf-8", "replace")) for n in found]
+
+
+def _in_sheet_order(produced: list[Path], source: Path) -> list[Path]:
+    """One file per sheet, in the workbook's own order. LibreOffice's write
+    order (file times) can't be trusted for that: on Windows the files of one
+    run can share a timestamp."""
+    if len(produced) < 2:
+        return produced
+    clean = [re.sub(r"[^\w .()-]", "_", n).strip() for n in _workbook_sheets(source)]
+    rank = {name: i for i, name in enumerate(clean)}
+    return sorted(produced, key=lambda p: rank.get(_sheet_name(p, source.stem), len(rank)))
 
 
 if __name__ == "__main__":
