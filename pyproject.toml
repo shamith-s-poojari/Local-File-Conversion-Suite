@@ -21,7 +21,7 @@ dev = [
     "pypdfium2>=4.30,<5",
     "pytest>=8",
     "pyyaml>=6.0.3",
-    "reportlab>=4.2,<5",
+    "reportlab>=4.2,<6",
     "ruff>=0.6",
 ]
 
