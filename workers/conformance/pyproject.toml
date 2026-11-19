@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.14"
 license = "AGPL-3.0-only"
 dependencies = [
     "converter-sdk",
-    "pikepdf>=9.5,<10",
+    "pikepdf>=9.5,<11",
     "pyyaml>=6.0.3",
 ]
 
