@@ -10,7 +10,7 @@ dependencies = []
 dev = [
     "converter-conformance",
     "converter-sdk",
-    "datamodel-code-generator[ruff]==0.91.0",
+    "datamodel-code-generator[ruff]==0.96.0",
     "markdown-it-py>=3",
     "openpyxl>=3.1",
     "pdf2docx>=0.5.8",
