@@ -7,7 +7,7 @@ license.workspace = true
 description = "File format sniffer (spec section 6): reads only the head, tail and ZIP central directory"
 
 [dependencies]
-getrandom = "0.3"
+getrandom = "0.4"
 # Inflates `[Content_Types].xml` only, with a hard output limit.
 miniz_oxide = "0.8"
 serde = { version = "1", features = ["derive"] }
