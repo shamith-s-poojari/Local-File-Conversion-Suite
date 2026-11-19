@@ -4,7 +4,6 @@ image to PDF (ADR 0003). One output per input."""
 from __future__ import annotations
 
 import io
-import warnings
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,12 +19,12 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
+from converter_sdk.images import PIL_FORMAT as RASTER_FORMAT
+from converter_sdk.images import flatten, has_alpha, open_image, pixels, to_palette
+from converter_sdk.limits import MB, check_pixels
 from converter_sdk.protocol import MediaInfo
-from PIL import Image, ImageOps, ImageSequence, UnidentifiedImageError
+from PIL import Image, ImageOps, ImageSequence
 
-MB = 1024 * 1024
-MAX_PIXELS = 200_000_000
-"""Larger images fail with E_LIMIT_EXCEEDED (decompression-bomb guard)."""
 SVG_SCALE = 2.0
 """SVG has no pixel size of its own; it's rendered at twice its declared size."""
 
@@ -64,20 +63,8 @@ EDGES: dict[tuple[str, str], Tier] = {
     (s, t): tier for s in SOURCES for t in TARGETS if (tier := _tier(s, t)) is not None
 }
 
-PIL_FORMAT = {
-    "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP",
-    "tiff": "TIFF", "avif": "AVIF", "ico": "ICO",
-}  # fmt: skip
+PIL_FORMAT = {**RASTER_FORMAT, "ico": "ICO"}
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
-
-
-def _register_heif() -> None:
-    try:
-        import pillow_heif  # noqa: PLC0415 - optional engine
-
-        pillow_heif.register_heif_opener()
-    except ImportError:
-        raise AdapterError("E_INSTALL_CORRUPT", {"missing": "pillow-heif"}) from None
 
 
 def _hex(color: str) -> tuple[int, int, int]:
@@ -113,25 +100,6 @@ class Decoded:
         return self.total_frames > 1
 
 
-def _open(path: Path) -> Image.Image:
-    fmt = source_format(path)
-    if fmt == "heic":
-        _register_heif()
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            img = Image.open(path)
-            if img.width * img.height > MAX_PIXELS:
-                raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"})
-            return img
-    except AdapterError:
-        raise
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
-        raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"}) from None
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
-        raise AdapterError("E_INPUT_CORRUPT") from None
-
-
 def _svg_document(path: Path):
     import pymupdf  # noqa: PLC0415 - engine imported on demand
 
@@ -162,8 +130,7 @@ def _render_svg(path: Path, max_side: int = 0) -> Image.Image:
     try:
         page = doc[0]
         w, h = page.rect.width * SVG_SCALE, page.rect.height * SVG_SCALE
-        if w * h > MAX_PIXELS:
-            raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"})
+        check_pixels(round(w), round(h))
         scale = SVG_SCALE
         if max_side and max(w, h) > max_side:
             scale *= max_side / max(w, h)
@@ -176,7 +143,7 @@ def _render_svg(path: Path, max_side: int = 0) -> Image.Image:
 def decode(ctx: JobContext, path: Path, *, max_side: int = 0, first_only: bool = False) -> Decoded:
     if source_format(path) == "svg":
         return Decoded([_render_svg(path, max_side)], [0], 0, {})
-    img = _open(path)
+    img = open_image(path)
     try:
         info = dict(img.info)
         frames: list[Image.Image] = []
@@ -216,25 +183,12 @@ def _fit(img: Image.Image, max_side: int) -> Image.Image:
     return img
 
 
-def _has_alpha(img: Image.Image) -> bool:
-    if img.mode in ("RGBA", "LA", "PA"):
-        return img.getextrema()[-1][0] < 255
-    return img.mode == "P" and "transparency" in img.info
-
-
-def _flatten(img: Image.Image, background: tuple[int, int, int]) -> Image.Image:
-    rgba = img.convert("RGBA")
-    base = Image.new("RGB", rgba.size, background)
-    base.paste(rgba, mask=rgba.getchannel("A"))
-    return base
-
-
 def _rgb_or_rgba(img: Image.Image) -> Image.Image:
     if img.mode in ("RGB", "RGBA", "L", "LA"):
         return img
     if img.mode in ("I;16", "I;16B", "I;16L", "I"):
         return img.convert("I;16") if img.mode != "I" else img
-    return img.convert("RGBA" if _has_alpha(img) else "RGB")
+    return img.convert("RGBA" if has_alpha(img) else "RGB")
 
 
 def _clean_exif(exif: bytes | None, strip: bool) -> bytes | None:
@@ -265,7 +219,7 @@ class ImageConvertAdapter(ConversionAdapter):
                 media=MediaInfo(kind="image", width=w, height=h, frames=1),
                 findings=reveal.findings(ctx, input),
             )
-        img = _open(input)
+        img = open_image(input)
         try:
             frames = int(getattr(img, "n_frames", 1))
             return InspectReport(
@@ -282,7 +236,7 @@ class ImageConvertAdapter(ConversionAdapter):
         side = max(64, min(4096, dpi * 8))
         img = decode(ctx, input, max_side=side, first_only=True).first
         img = _fit(img, side)
-        img = img.convert("RGBA" if _has_alpha(img) else "RGB")
+        img = img.convert("RGBA" if has_alpha(img) else "RGB")
         img.save(out, "PNG")
         return RenderedPage(width_px=img.width, height_px=img.height)
 
@@ -291,19 +245,16 @@ class ImageConvertAdapter(ConversionAdapter):
     def validate_sources(
         self, ctx: JobContext, params: dict[str, Any], to: str
     ) -> ValidationReport:
-        pixels = []
+        sizes = []
         for p in ctx.inputs:
             ctx.check_cancelled()
             if source_format(p) == "svg":
                 w, h = _svg_size(p)
-            else:
-                img = _open(p)
-                w, h = img.size
-                frames = int(getattr(img, "n_frames", 1))
-                img.close()
-                w, h = w, h * min(frames, 50)
-            pixels.append(w * h)
-        return ValidationReport(metadata={"pixels": pixels})
+                check_pixels(w, h)
+                sizes.append(w * h)
+                continue
+            sizes.append(pixels(p))
+        return ValidationReport(metadata={"pixels": sizes})
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]
@@ -341,6 +292,9 @@ class ImageConvertAdapter(ConversionAdapter):
         src = source_format(path)
         keep_animation = to in ("gif", "webp", "avif")
         d = decode(ctx, path, max_side=max_side, first_only=not keep_animation)
+        # Between the two slow steps: a cancel during a large decode needn't
+        # also wait for the encode (2 s budget on slower machines).
+        ctx.check_cancelled()
         if d.animated and not keep_animation:
             ctx.warn("ANIMATION_FLATTENED")
         frames = [_fit(f, max_side) for f in d.frames]
@@ -352,19 +306,17 @@ class ImageConvertAdapter(ConversionAdapter):
         icc = d.icc
         save: dict[str, Any] = {}
         if to == "jpg":
-            if any(_has_alpha(f) for f in frames[:1]):
+            if any(has_alpha(f) for f in frames[:1]):
                 ctx.warn("TRANSPARENCY_FLATTENED")
             img = (
-                _flatten(frames[0], background)
-                if _has_alpha(frames[0])
-                else frames[0].convert("RGB")
+                flatten(frames[0], background) if has_alpha(frames[0]) else frames[0].convert("RGB")
             )
             frames = [img]
             save = {"quality": quality, "optimize": True, "progressive": True}
         elif to == "bmp":
-            if _has_alpha(frames[0]):
+            if has_alpha(frames[0]):
                 ctx.warn("TRANSPARENCY_FLATTENED")
-                frames = [_flatten(frames[0], background)]
+                frames = [flatten(frames[0], background)]
             else:
                 frames = [
                     frames[0].convert("RGB")
@@ -384,18 +336,18 @@ class ImageConvertAdapter(ConversionAdapter):
             save = {"compression": "tiff_lzw"}
         elif to == "webp":
             lossless = src not in LOSSY_CODED
-            frames = [f.convert("RGBA" if _has_alpha(f) else "RGB") for f in frames]
+            frames = [f.convert("RGBA" if has_alpha(f) else "RGB") for f in frames]
             save = {"lossless": lossless, "quality": 100 if lossless else quality, "method": 4}
             if lossless:
                 save["exact"] = True  # keep colour under transparent pixels
         elif to == "avif":
-            frames = [f.convert("RGBA" if _has_alpha(f) else "RGB") for f in frames]
+            frames = [f.convert("RGBA" if has_alpha(f) else "RGB") for f in frames]
             # Speed 8 keeps one 50-megapixel encode well under the 2 s cancel budget.
             save = {"quality": quality, "speed": 8}
         elif to == "gif":
             if any(f.mode not in ("P", "L", "1") for f in frames):
                 ctx.warn("COLORS_REDUCED")
-            frames = [_to_palette(f) for f in frames]
+            frames = [to_palette(f) for f in frames]
             save = {"optimize": False}
             exif = icc = None
         elif to == "ico":
@@ -467,24 +419,6 @@ class ImageConvertAdapter(ConversionAdapter):
         finally:
             doc.close()
         pdf_bytes_to_output(ctx, data, out)
-
-
-def _to_palette(img: Image.Image) -> Image.Image:
-    if img.mode in ("P", "L", "1"):
-        return img
-    if _has_alpha(img):
-        rgba = img.convert("RGBA")
-        alpha = rgba.getchannel("A")
-        p = rgba.convert("RGB").quantize(
-            colors=255, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG
-        )
-        mask = alpha.point(lambda a: 255 if a < 128 else 0)
-        p.paste(255, mask=mask)
-        p.info["transparency"] = 255
-        return p
-    return img.convert("RGB").quantize(
-        colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG
-    )
 
 
 def _square(img: Image.Image) -> Image.Image:

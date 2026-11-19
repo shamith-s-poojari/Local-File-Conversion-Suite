@@ -19,7 +19,8 @@ something was missed and the adapter's verifier fails the job).
 
 Finding ``detail`` strings and error details only ever hold kinds and counts,
 never document text. XML is parsed without entities, DTDs or network access;
-a DOCTYPE in an OOXML part or SVG is hostile and refused (``E_INPUT_CORRUPT``).
+a DOCTYPE in an OOXML part is hostile and refused (``E_INPUT_CORRUPT``), and so
+is one in an SVG unless it is the standard 1.0/1.1 one without an internal subset.
 """
 
 from __future__ import annotations
@@ -28,13 +29,17 @@ import posixpath
 import re
 import shutil
 import zipfile
+from bisect import bisect_left
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
+from . import xmlsafe
 from .errors import AdapterError
 from .markup import _strip_declaration, check_zip, read_text
 from .protocol import Finding
+from .urls import CONTROL as _CONTROL
+from .urls import WEB_SCHEMES, is_web_url  # noqa: F401  (re-exported)
+from .urls import scheme as _scheme
 
 OOXML_FORMATS = ("docx", "xlsx", "pptx", "docm", "xlsm", "pptm")
 OOXML_MEMBER_MAX = 256 * 1024 * 1024
@@ -49,9 +54,6 @@ PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 CFB_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-
-WEB_SCHEMES = {"http", "https", "mailto", "tel"}
-_CONTROL = re.compile(r"[\x00-\x20\x7f]")
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -71,19 +73,29 @@ def _etree() -> Any:
     return etree
 
 
-def parse_xml(data: bytes) -> Any:
-    """Parse untrusted XML: no entities, DTD or network. A DOCTYPE is refused."""
-    etree = _etree()
-    parser = etree.XMLParser(
-        resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
-    )
-    try:
-        root = etree.fromstring(data, parser=parser)
-    except etree.XMLSyntaxError:
-        raise AdapterError("E_INPUT_CORRUPT") from None
-    if root is None or root.getroottree().docinfo.doctype or b"<!ENTITY" in data[:100_000]:
-        raise AdapterError("E_INPUT_CORRUPT")
-    return root
+_SVG_DOCTYPES = {
+    b"-//W3C//DTD SVG 1.1//EN": b"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd",
+    b"-//W3C//DTD SVG 1.0//EN": b"http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd",
+}
+_SVG_DOCTYPE = re.compile(
+    rb"""<!DOCTYPE\s+svg\s+PUBLIC\s+["']([^"'<>\[\]]{1,64})["']\s+["']([^"'<>\[\]]{1,128})["']\s*>"""
+)
+
+
+def _is_standard_svg_doctype(data: bytes) -> bool:
+    """The one DOCTYPE editors have always written into SVG: the published
+    1.0 or 1.1 public and system ids and nothing else. The ``>`` must follow
+    the system id directly, so there is no internal subset and nothing to
+    declare an entity in."""
+    if data.count(b"<!DOCTYPE") != 1:
+        return False
+    m = _SVG_DOCTYPE.search(data)
+    return m is not None and _SVG_DOCTYPES.get(m.group(1)) == m.group(2)
+
+
+def parse_xml(data: bytes, *, svg: bool = False) -> Any:
+    """``xmlsafe.parse_xml``, allowing (with ``svg``) the standard SVG 1.0 or 1.1 DOCTYPE."""
+    return xmlsafe.parse_xml(data, doctype_ok=_is_standard_svg_doctype if svg else None)
 
 
 def _serialize(root: Any) -> bytes:
@@ -113,19 +125,6 @@ def _drop(el: Any) -> None:
 
 
 # ------------------------------------------------------------- URLs
-
-
-def _scheme(url: str) -> str:
-    """Lower-case scheme of ``url`` after removing the control characters
-    browsers ignore. ``""`` for relative references; ``"//"`` for network paths
-    and ``"unc"`` for ``\\\\host`` paths."""
-    u = _CONTROL.sub("", url)
-    if u.startswith(("//", "\\\\", "\\/", "/\\")):
-        return "//"
-    try:
-        return urlsplit(u).scheme.lower()
-    except ValueError:
-        return "invalid"
 
 
 def _is_web(url: str) -> bool:
@@ -195,6 +194,7 @@ _DROP_ELEMENTS = {
     "hlinkclick",
     "hlinkhover",
     "hlinkmouseover",
+    "altchunk",
 }
 """Elements whose only job is to point at a relationship that was removed."""
 _PRUNE_EMPTY = {"oleobjects", "controls", "externalreferences"}
@@ -221,6 +221,28 @@ _MACROENABLED = {
     + "presentationml.template.main+xml",
 }
 _VBA_CONTENT_TYPE = "application/vnd.ms-office.vbaProject"
+_CUSTOM_UI = re.compile(r"customui/[^/]+\.xml")
+_QUERY_TABLE = re.compile(r"xl/querytables/[^/]+\.xml")
+CUSTOM_UI_MAX = 8 * 1024 * 1024
+"""A ribbon part larger than this is not read, and counts as having callbacks."""
+
+
+def _has_callbacks(data: bytes) -> bool:
+    """Whether a custom ribbon part names code to call: ``onLoad``, ``onAction``
+    and the other ``on*`` and ``get*`` callbacks, or ``loadImage``."""
+    root = parse_xml(data)
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for name in el.attrib:
+            local = _local(name)
+            if (
+                local == "loadimage"
+                or (local[:2] == "on" and len(local) > 2)
+                or (local[:3] == "get" and len(local) > 3)
+            ):
+                return True
+    return False
 
 
 def _key(name: str) -> str:
@@ -249,6 +271,10 @@ class _Package:
         self.embeddings: set[str] = set()
         self.macrosheets: set[str] = set()
         self.workbook_links: set[str] = set()
+        self.connections: set[str] = set()
+        self.custom_xml: set[str] = set()
+        self.custom_ui: set[str] = set()
+        self.custom_ui_active = 0
         for k in self.by_key:
             if k.endswith(".rels") or k.endswith("/"):
                 continue
@@ -262,16 +288,74 @@ class _Package:
                 self.macrosheets.add(k)
             elif k.startswith("xl/externallinks/"):
                 self.workbook_links.add(k)
+            elif k == "xl/connections.xml" or _QUERY_TABLE.fullmatch(k):
+                self.connections.add(k)
+            elif k.startswith("customxml/"):
+                self.custom_xml.add(k)
+            elif _CUSTOM_UI.fullmatch(k):
+                self.custom_ui.add(k)
+        for k in sorted(self.custom_ui):
+            info = self.by_key[k]
+            if info.file_size > CUSTOM_UI_MAX or _has_callbacks(self.read(k)):
+                self.custom_ui_active += 1
         # Parts that go, and the relationship files that belonged to them.
-        self.removed = self.macros | self.activex | self.embeddings | self.workbook_links
+        self.removed = (
+            self.macros
+            | self.activex
+            | self.embeddings
+            | self.workbook_links
+            | self.connections
+            | self.custom_xml
+            | self.custom_ui
+        )
         self.removed |= {self._rels_of(k) for k in self.removed}
+        # rels part -> parsed once; the parts that other parts import (altChunk).
+        self._rels_roots: dict[str, Any] = {}
+        self.alt_chunks = self._find_alt_chunks()
+        self.removed |= self.alt_chunks | {self._rels_of(k) for k in self.alt_chunks}
         # rels part -> [(rId, type, target, external)]; counts for findings.
         self.rels: dict[str, list[tuple[str, str, str, bool]]] = {}
         self.dropped_rids: dict[str, set[str]] = {}  # source part key -> rIds to neutralize
         self.drop_rel_ids: dict[str, set[str]] = {}  # rels part key -> rIds to delete
         self.external = 0
         self.web_links = 0
+        # Computed once: the scan and the rewrite both loop over every part.
+        self._word_parts = [
+            k
+            for k in self.by_key
+            if k.startswith("word/") and k.endswith(".xml") and "/" not in k[5:]
+        ]
+        self._deck_parts = [k for k in self.by_key if k.startswith("ppt/") and k.endswith(".xml")]
+        self.word_set = set(self._word_parts)
+        self.deck_set = set(self._deck_parts)
         self._read_rels()
+
+    def _rels_root(self, key: str) -> Any:
+        if key not in self._rels_roots:
+            self._rels_roots[key] = parse_xml(self.read(key))
+        return self._rels_roots[key]
+
+    def _resolve(self, source: str, target: str) -> str:
+        base_dir = posixpath.dirname(source)
+        resolved = _key(target[1:] if target.startswith("/") else posixpath.join(base_dir, target))
+        return posixpath.normpath(resolved)
+
+    def _find_alt_chunks(self) -> set[str]:
+        """Parts that a ``w:altChunk`` imports into a document: they hold
+        another document (HTML, RTF, a package) that Word opens with the first."""
+        found: set[str] = set()
+        for k in sorted(self.by_key):
+            if not k.endswith(".rels") or k in self.removed:
+                continue
+            source = self._source_of(k)
+            for rel in self._rels_root(k).iter(f"{{{PKG_REL_NS}}}Relationship"):
+                if rel.get("Type", "").lower().endswith("/afchunk") and (
+                    rel.get("TargetMode", "").lower() != "external"
+                ):
+                    target = self._resolve(source, rel.get("Target", ""))
+                    if target in self.by_key:
+                        found.add(target)
+        return found
 
     @staticmethod
     def _rels_of(part: str) -> str:
@@ -292,9 +376,8 @@ class _Package:
         for k in sorted(self.by_key):
             if not k.endswith(".rels") or k in self.removed:
                 continue
-            root = parse_xml(self.read(k))
+            root = self._rels_root(k)
             source = self._source_of(k)
-            base_dir = posixpath.dirname(source)
             entries = []
             for rel in root.iter(f"{{{PKG_REL_NS}}}Relationship"):
                 rid = rel.get("Id", "")
@@ -311,13 +394,8 @@ class _Package:
                         continue
                     self._drop(k, source, rid)
                     self.external += 1
-                else:
-                    resolved = _key(
-                        target[1:] if target.startswith("/") else posixpath.join(base_dir, target)
-                    )
-                    resolved = posixpath.normpath(resolved)
-                    if resolved in self.removed:
-                        self._drop(k, source, rid)
+                elif self._resolve(source, target) in self.removed:
+                    self._drop(k, source, rid)
             self.rels[k] = entries
 
     def _drop(self, rels_key: str, source: str, rid: str) -> None:
@@ -327,14 +405,10 @@ class _Package:
     # ---------------------------------------------- field codes and actions
 
     def word_parts(self) -> list[str]:
-        return [
-            k
-            for k in self.by_key
-            if k.startswith("word/") and k.endswith(".xml") and "/" not in k[5:]
-        ]
+        return self._word_parts
 
     def deck_parts(self) -> list[str]:
-        return [k for k in self.by_key if k.startswith("ppt/") and k.endswith(".xml")]
+        return self._deck_parts
 
 
 def _fields(root: Any, remove: bool, counts: dict[str, int]) -> bool:
@@ -412,6 +486,10 @@ def _ooxml_scan(pkg: _Package) -> dict[str, int]:
         ("activeX", len([k for k in pkg.activex if not k.endswith(".rels")])),
         ("embedded", len(pkg.embeddings)),
         ("workbookLinks", len(pkg.workbook_links)),
+        ("connections", len(pkg.connections)),
+        ("customXml", len(pkg.custom_xml)),
+        ("customUI", pkg.custom_ui_active),
+        ("altChunks", len(pkg.alt_chunks)),
         ("external", pkg.external),
     ):
         if n:
@@ -469,6 +547,14 @@ def _ooxml_findings(path: Path) -> list[Finding]:
         found.append(Finding(kind="externalLinks", detail=_outside(loads)))
     if counts.get("workbookLinks"):
         found.append(Finding(kind="externalLinks", detail="Links to other workbooks"))
+    if counts.get("connections"):
+        found.append(Finding(kind="externalLinks", detail="Data connections"))
+    if counts.get("customXml"):
+        found.append(Finding(kind="activeContent", detail="Custom data parts"))
+    if counts.get("customUI"):
+        found.append(Finding(kind="activeContent", detail="Custom ribbon code"))
+    if counts.get("altChunks"):
+        found.append(Finding(kind="activeContent", detail="Imports other documents"))
     return found
 
 
@@ -512,12 +598,20 @@ def _strip_dropped(root: Any, rids: set[str]) -> bool:
     return changed
 
 
+def neutralize_relationship_ids(root: Any, rids: set[str]) -> bool:
+    """In one OOXML part, remove what refers to the relationship ids in ``rids``
+    (which the caller has deleted from the part's ``.rels``): the attribute, or
+    the whole element where it can't stand without one. True if anything changed."""
+    return _strip_dropped(root, rids)
+
+
 def disarm_ooxml(src: Path, dst: Path, *, remove_links: bool = False) -> dict[str, int]:
     """Copy an OOXML file without macros, ActiveX, embedded objects, links that
     load from outside the file, DDE and program-running actions. The main part's
     content type becomes the plain one (``docm`` to ``docx``). Returns counts:
     ``macros``, ``activeX``, ``embedded``, ``external``, ``workbookLinks``,
-    ``dde``, ``fieldLinks``, ``macroButtons``, ``programActions``, ``links``
+    ``dde``, ``fieldLinks``, ``macroButtons``, ``programActions``, ``connections``,
+    ``customXml``, ``customUI``, ``altChunks``, ``links``
     (web links, only with ``remove_links``). Excel 4.0 macro sheets can't be
     removed safely and are reported as ``macrosheets`` (still present).
     Raises ``E_INPUT_CORRUPT`` for a damaged or hostile package."""
@@ -540,14 +634,14 @@ def disarm_ooxml(src: Path, dst: Path, *, remove_links: bool = False) -> dict[st
                 replace[pkg.by_key[rels_key].filename] = _serialize(root)
 
             # Parts that referenced them, field codes and program actions.
-            wanted = set(pkg.dropped_rids) | set(pkg.word_parts()) | set(pkg.deck_parts())
+            wanted = set(pkg.dropped_rids) | pkg.word_set | pkg.deck_set
             for k in sorted(wanted):
                 if k not in pkg.by_key or k in pkg.removed or k.endswith(".rels"):
                     continue
                 data = pkg.read(k)
                 rids = pkg.dropped_rids.get(k, set())
-                is_word = k in pkg.word_parts() and b"instr" in data
-                is_deck = k in pkg.deck_parts() and bool(_PROGRAM_ACTION.search(data))
+                is_word = k in pkg.word_set and b"instr" in data
+                is_deck = k in pkg.deck_set and bool(_PROGRAM_ACTION.search(data))
                 if not (rids or is_word or is_deck):
                     continue
                 root = parse_xml(data)
@@ -647,11 +741,35 @@ _URL_ATTRS = {
 }
 _NO_LOAD_ATTRS = {"action", "formaction"}
 """URL attributes that submit rather than load: only code-like schemes matter."""
-_CSS_URL = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I | re.S)
-_CSS_IMPORT = re.compile(r"@import\b[^;{}]*;?", re.I)
-_CSS_ACTIVE = re.compile(r"[^;{}]*(?:expression\s*\(|-moz-binding|behavior\s*:)[^;}]*;?", re.I)
+CSS_MAX = 64 * 1024
+"""Longest style text examined. Real styles in a page or an SVG are far smaller;
+longer is treated as hostile (it is removed, and reported as ``cssOversize``)."""
+_CSS_DELIMS = re.compile(r"[;{}]")
+_CSS_IMPORT = re.compile(r"@import\b", re.I)
+_CSS_ACTIVE = re.compile(r"expression\s*\(|-moz-binding|behavior\s*:", re.I)
+_CSS_URL = re.compile(r"url\(", re.I)
+_CSS_WS = re.compile(r"\s*")
+_CSS_CLOSERS = {
+    '"': re.compile(r'"\s*\)'),
+    "'": re.compile(r"'\s*\)"),
+    "": re.compile(r"\)"),
+}
 _SRCSET_EXTERNAL = re.compile(r"(?:^|[\s,])(?:[a-z][a-z0-9+.-]*:)?//", re.I)
 _CODE_SCHEMES = {"javascript", "vbscript", "livescript"}
+
+
+def _splice(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """``text`` with each (start, end, replacement) span replaced; the spans are
+    in order and don't overlap."""
+    if not spans:
+        return text
+    parts: list[str] = []
+    pos = 0
+    for start, end, repl in spans:
+        parts += (text[pos:start], repl)
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 class _Markup:
@@ -668,26 +786,79 @@ class _Markup:
     # -- CSS --------------------------------------------------------------
 
     def css(self, text: str) -> str:
-        """Count (and strip) external loads and scripts in CSS text."""
-        imports = len(_CSS_IMPORT.findall(text))
-        if imports:
-            self.hit("external", imports)
-            text = _CSS_IMPORT.sub("", text)
+        """Count (and strip) external loads and scripts in CSS text.
 
-        def url(m: re.Match[str]) -> str:
-            target = m.group(2).strip()
+        Every step finds its tokens with one pass and looks up the ends of
+        their spans in a table built once (bisect), so the time is linear in
+        the text however it is shaped. Unclosed ``url(`` and quotes run to
+        the end of the text, as a browser reads them."""
+        if len(text) > CSS_MAX:
+            self.hit("cssOversize")
+            return ""
+        text = self._css_imports(text)
+        text = self._css_urls(text)
+        return self._css_active(text)
+
+    def _css_imports(self, text: str) -> str:
+        delims = [m.start() for m in _CSS_DELIMS.finditer(text)]
+        spans: list[tuple[int, int, str]] = []
+        last = 0
+        for m in _CSS_IMPORT.finditer(text):
+            if m.start() < last:
+                continue
+            i = bisect_left(delims, m.end())
+            if i == len(delims):
+                last = len(text)
+            else:
+                last = delims[i] + (1 if text[delims[i]] == ";" else 0)
+            spans.append((m.start(), last, ""))
+        if spans:
+            self.hit("external", len(spans))
+        return _splice(text, spans)
+
+    def _css_urls(self, text: str) -> str:
+        tokens = list(_CSS_URL.finditer(text))
+        if not tokens:
+            return text
+        closers: dict[str, tuple[list[int], list[int]]] = {}
+        for quote, pattern in _CSS_CLOSERS.items():
+            found = list(pattern.finditer(text))
+            closers[quote] = ([m.start() for m in found], [m.end() for m in found])
+        spans: list[tuple[int, int, str]] = []
+        last = 0
+        for m in tokens:
+            if m.start() < last:
+                continue
+            pos = _CSS_WS.match(text, m.end()).end()  # type: ignore[union-attr]
+            quote = text[pos] if text[pos : pos + 1] in ("'", '"') else ""
+            body = pos + 1 if quote else pos
+            starts, ends = closers[quote]
+            i = bisect_left(starts, body)
+            body_end, last = (starts[i], ends[i]) if i < len(starts) else (len(text), len(text))
+            target = text[body:body_end].strip()
             low = _CONTROL.sub("", target).lower()
             if not low or low.startswith(("#", "data:image/")) or _scheme(target) == "":
-                return m.group(0)
+                continue
             self.hit("external")
-            return "url()"
+            spans.append((m.start(), last, "url()"))
+        return _splice(text, spans)
 
-        text = _CSS_URL.sub(url, text)
-        active = len(_CSS_ACTIVE.findall(text))
-        if active:
-            self.hit("cssActive", active)
-            text = _CSS_ACTIVE.sub("", text)
-        return text
+    def _css_active(self, text: str) -> str:
+        delims = [m.start() for m in _CSS_DELIMS.finditer(text)]
+        ends = [d for d in delims if text[d] != "{"]
+        spans: list[tuple[int, int, str]] = []
+        last = 0
+        for m in _CSS_ACTIVE.finditer(text):
+            if m.start() < last:
+                continue
+            i = bisect_left(delims, m.start())
+            begin = max(last, delims[i - 1] + 1 if i else 0)
+            j = bisect_left(ends, m.end())
+            last = len(text) if j == len(ends) else ends[j] + (1 if text[ends[j]] == ";" else 0)
+            spans.append((begin, last, ""))
+        if spans:
+            self.hit("cssActive", len(spans))
+        return _splice(text, spans)
 
     # -- one element ---------------------------------------------------------
 
@@ -818,6 +989,8 @@ def _markup_findings_from(c: dict[str, int]) -> list[Finding]:
         found.append(Finding(kind="activeContent", detail="Opens another program"))
     if c.get("cssActive"):
         found.append(Finding(kind="activeContent", detail="Script in styles"))
+    if c.get("cssOversize"):
+        found.append(Finding(kind="activeContent", detail="Oversized styles"))
     if c.get("external"):
         found.append(Finding(kind="externalLinks", detail=_outside(c["external"])))
     return found
@@ -826,7 +999,7 @@ def _markup_findings_from(c: dict[str, int]) -> list[Finding]:
 def _load_markup(path: Path, fmt: str) -> tuple[Any, str]:
     """(root element, doctype). SVG is strict XML; HTML is parsed leniently."""
     if fmt == "svg":
-        root = parse_xml(path.read_bytes())
+        root = parse_xml(path.read_bytes(), svg=True)
         return root, ""
     from lxml import html as lxml_html  # noqa: PLC0415
 
@@ -857,7 +1030,7 @@ def disarm_markup(src: Path, dst: Path, fmt: str, *, remove_links: bool = False)
     ``#fragment`` and ``data:image/`` URLs and plain web links stay (web links
     go with ``remove_links``). Returns counts by kind: ``script``, ``handler``,
     ``jsUrl``, ``frame``, ``refresh``, ``base``, ``scheme``, ``cssActive``,
-    ``external``, ``links``."""
+    ``cssOversize``, ``external``, ``links``."""
     root, doctype, counts = _scan_markup(src, fmt, True, remove_links)
     etree = _etree()
     if fmt == "svg":

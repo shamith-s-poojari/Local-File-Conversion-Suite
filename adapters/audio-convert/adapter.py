@@ -18,9 +18,11 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, issue, source_format
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     AUDIO_FORMATS,
     LOSSLESS_AUDIO,
+    audio_codec,
     audio_streams,
     duration_s,
     ffmpeg,
@@ -30,7 +32,6 @@ from converter_sdk.media import (
     render_waveform,
 )
 
-MB = 1024 * 1024
 LOSSY = [f for f in AUDIO_FORMATS if f not in LOSSLESS_AUDIO]
 # Decoding keeps every sample, so a lossless target loses nothing more.
 # AAC in ADTS moves into M4A without re-encoding.
@@ -163,7 +164,7 @@ class AudioConvertAdapter(ConversionAdapter):
             elif to in ("wav", "aiff"):
                 args += pcm_codec(to, source_bits(stream))
             else:
-                args += CODEC[to]
+                args += audio_codec(to) if to == "ogg" else CODEC[to]
                 if to in LOSSY:
                     args += ["-b:a", f"{bitrate}k"]
             in_rate = int(stream.get("sample_rate") or 0)

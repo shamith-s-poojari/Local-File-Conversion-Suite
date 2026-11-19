@@ -12,6 +12,12 @@ from .errors import AdapterError
 from .protocol import Finding, MediaInfo, ValidationIssue, WarningItem, WordBox
 
 
+def issue(param: str, reason: str, **detail: Any) -> ValidationIssue:
+    """An invalid parameter. The catalog has no parameter error code yet, so
+    this uses ``E_INTERNAL`` with ``param`` set; the core and UI key on ``param``."""
+    return ValidationIssue(code="E_INTERNAL", param=param, detail={"reason": reason, **detail})
+
+
 @dataclass
 class InspectReport:
     pages: int

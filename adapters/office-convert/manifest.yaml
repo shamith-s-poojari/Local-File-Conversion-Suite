@@ -27,7 +27,7 @@ edges:
   - { from: [docx, doc, odt, rtf, pptx, ppt, odp, xlsx, xls, ods], to: webp, tier: L }
   - { from: [xlsx, ods, csv], to: xls, tier: H }
   - { from: [xls, ods, csv], to: xlsx, tier: H }
-fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, FORMULAS_DROPPED, SHEETS_SPLIT, EMBEDDED_FONTS_MISSING]
+fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, FORMULAS_DROPPED, SHEETS_SPLIT, ENCRYPTION_REMOVED]
 limits: { timeoutBaseS: 300, timeoutSPerMb: 10, noProgressS: 300, diskFactor: 10.0 }
 params: ./params.schema.json
 platforms: [windows, macos, linux]

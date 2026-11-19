@@ -14,13 +14,14 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import JobContext, OutputFile, run_main
+from converter_sdk.adapter import issue
+from converter_sdk.limits import MB
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     RangeError,
     displayed_box,
     pages_in,
-    param_issue,
     parse_page_ranges,
     placement,
     save_pdf,
@@ -28,7 +29,6 @@ from converter_sdk.pdf import (
 from converter_sdk.protocol import ValidationIssue
 from pikepdf import Name
 
-MB = 1024 * 1024
 MARGIN = 36.0
 POSITIONS = ("center", "topLeft", "topRight", "bottomLeft", "bottomRight", "tile")
 FONT_FILE = Path(__file__).resolve().parents[2] / "engines" / "fonts" / "NotoSans-Regular.ttf"
@@ -131,32 +131,32 @@ class PdfWatermarkAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         if params.get("type", "text") != "text":
-            return [param_issue("type", "notImplemented")]
+            return [issue("type", "notImplemented")]
         text = params.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
-            return [param_issue("text", "required")]
+            return [issue("text", "required")]
         if params.get("position", "center") not in POSITIONS:
-            return [param_issue("position", "invalid")]
+            return [issue("position", "invalid")]
         if params.get("layer", "over") not in ("over", "under"):
-            return [param_issue("layer", "invalid")]
+            return [issue("layer", "invalid")]
         if not 0.05 <= float(params.get("opacity", 0.3)) <= 1.0:
-            return [param_issue("opacity", "outOfBounds")]
+            return [issue("opacity", "outOfBounds")]
         if not 4 <= float(params.get("fontSize", 48)) <= 400:
-            return [param_issue("fontSize", "outOfBounds")]
+            return [issue("fontSize", "outOfBounds")]
         color = params.get("color", "#808080")
         if not (isinstance(color, str) and len(color) == 7 and color[0] == "#"):
-            return [param_issue("color", "invalid")]
+            return [issue("color", "invalid")]
         try:
             int(color[1:], 16)
         except ValueError:
-            return [param_issue("color", "invalid")]
+            return [issue("color", "invalid")]
         if params.get("pages"):
             try:
                 parse_page_ranges(params["pages"], inputs[0].pages)
             except RangeError as e:
-                return [param_issue("pages", e.reason, pages=inputs[0].pages)]
+                return [issue("pages", e.reason, pages=inputs[0].pages)]
         return []
 
     def execute_conversion(self, ctx: JobContext, params: dict[str, Any]) -> list[OutputFile]:

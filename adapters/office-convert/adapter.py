@@ -8,9 +8,12 @@ internally, in ``work/``.
 
 from __future__ import annotations
 
+import html
 import io
 import re
 import shutil
+import struct
+import zipfile
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -23,11 +26,17 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.markup import html_to_markdown, markdown_to_html, read_text
-from converter_sdk.office import IMPORT_FILTERS, export_filter, soffice_convert
+from converter_sdk.office import (
+    IMPORT_FILTERS,
+    export_filter,
+    is_encrypted_ooxml,
+    reject_encrypted_ooxml,
+    soffice_convert,
+)
 from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 WRITER = ["docx", "doc", "odt", "rtf"]
 IMPRESS = ["pptx", "ppt", "odp"]
 CALC = ["xlsx", "xls", "ods"]
@@ -83,11 +92,19 @@ class OfficeConvertAdapter(ConversionAdapter):
             if size == 0:
                 raise AdapterError("E_INPUT_CORRUPT")
             sizes.append(size)
+            rel = p.relative_to(ctx.job_dir.resolve()).as_posix()
+            if is_encrypted_ooxml(p, source_format(p)):
+                # Not corrupt: Office wrapped it for a password LibreOffice can't be given.
+                report.errors.append(
+                    ValidationIssue(
+                        code="E_PASSWORD_REQUIRED", input=rel, detail={"reason": "officePassword"}
+                    )
+                )
+                continue
             if source_format(p) == "pdf":
                 try:
                     self._plain_pdf(ctx, p, check_only=True)
                 except AdapterError as e:
-                    rel = p.relative_to(ctx.job_dir.resolve()).as_posix()
                     report.errors.append(ValidationIssue(code=e.code, input=rel))
         report.metadata = {"bytes": sizes}
         return report
@@ -109,6 +126,7 @@ class OfficeConvertAdapter(ConversionAdapter):
         total = len(ctx.inputs)
         for i, path in enumerate(ctx.inputs):
             ctx.check_cancelled()
+            reject_encrypted_ooxml(path, source_format(path))
             ctx.stage("convert", i + 1, total)
             ctx.progress("convert", i, total)
             outputs += self._one(ctx, path, source_format(path), to, params, i)
@@ -134,8 +152,11 @@ class OfficeConvertAdapter(ConversionAdapter):
         elif src in IMPORT_FILTERS:
             import_filter = IMPORT_FILTERS[src]
 
+        # Not disarmed first (audit P15): that would drop objects and links the
+        # conversion should keep; see "Why inputs aren't disarmed" in the README.
         if to == "txt" and src in CALC:
             produced = soffice_convert(ctx, source, TEXT_SHEETS, import_filter=import_filter)
+            produced = _in_sheet_order(produced, path)
             ctx.warn("FORMULAS_DROPPED")
             parts = []
             for p in produced:
@@ -167,6 +188,7 @@ class OfficeConvertAdapter(ConversionAdapter):
             pages = pdf_bytes_to_output(ctx, produced[0].read_bytes(), out)
             return [OutputFile(out, pages=pages)]
         if to == "csv":
+            produced = _in_sheet_order(produced, path)
             ctx.warn("FORMULAS_DROPPED")
             if len(produced) > 1:
                 ctx.warn("SHEETS_SPLIT")
@@ -200,6 +222,8 @@ class OfficeConvertAdapter(ConversionAdapter):
             outs = []
             for n in range(len(doc)):
                 ctx.check_cancelled()
+                width, height = doc[n].get_size()
+                check_pixels(*rendered_size(width, height, dpi / 72))
                 img = doc[n].render(scale=dpi / 72).to_pil().convert("RGB")
                 name = f"{title}.{to}" if len(doc) == 1 else f"{title}-page-{n + 1}.{to}"
                 out = ctx.output_path(name)
@@ -225,6 +249,8 @@ class OfficeConvertAdapter(ConversionAdapter):
                     return path
                 out = ctx.temp_path(".pdf")
                 pdf.save(out)  # without `encryption`, pikepdf writes it unencrypted
+                # Whatever is made from this copy has no password or limits.
+                ctx.warn_encryption_removed()
                 return out
         except pikepdf.PasswordError:
             raise AdapterError("E_PASSWORD_WRONG" if password else "E_PASSWORD_REQUIRED") from None
@@ -242,6 +268,162 @@ def _sheet_name(produced: Path, stem: str) -> str:
     name = produced.stem
     sheet = name[len(stem) + 1 :] if name.startswith(stem + "-") else ""
     return re.sub(r"[^\w .()-]", "_", sheet).strip()
+
+
+_XLSX_SHEET = re.compile(rb"<(?:\w+:)?sheet\b[^>]*?\bname=\"([^\"]*)\"")
+_ODS_SHEET = re.compile(rb"<table:table\b[^>]*?\btable:name=\"([^\"]*)\"")
+
+
+def _workbook_sheets(path: Path) -> list[str]:
+    """Sheet names in workbook order, read from an xlsx, ods or xls; ``[]``
+    when the file is another kind or can't be read (the caller keeps its order)."""
+    try:
+        with path.open("rb") as f:
+            is_compound = f.read(8) == _CFB_MAGIC
+    except OSError:
+        return []
+    if is_compound:
+        return _xls_sheets(path)
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            if "xl/workbook.xml" in names:
+                found = _XLSX_SHEET.findall(z.read("xl/workbook.xml"))
+            elif "content.xml" in names:
+                found = _ODS_SHEET.findall(z.read("content.xml"))
+            else:
+                return []
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return []
+    return [html.unescape(n.decode("utf-8", "replace")) for n in found]
+
+
+_CFB_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_CFB_LAST = 0xFFFFFFFA
+"""Sector numbers from here up are markers (end of chain, free), not sectors."""
+
+
+def _cfb_stream(data: bytes, name: str) -> bytes:
+    """One stream of a compound file (the container of an .xls), followed
+    through its sector chain, or through the mini stream for a stream under
+    the cutoff (4096 bytes). Raises ValueError on anything malformed."""
+    if len(data) < 512 or data[:8] != _CFB_MAGIC:
+        raise ValueError("notCompound")
+    shift = struct.unpack_from("<H", data, 0x1E)[0]
+    if shift not in (9, 12):
+        raise ValueError("sectorSize")
+    size = 1 << shift
+    per = size // 4
+    limit = len(data) // size + 1
+    """No chain can be longer than the file has sectors, so a loop stops here."""
+
+    def sector(n: int) -> bytes:
+        off = (n + 1) * size
+        if n >= _CFB_LAST or off + size > len(data):
+            raise ValueError("sector")
+        return data[off : off + size]
+
+    fat_count, dir_start = struct.unpack_from("<II", data, 0x2C)
+    cutoff = struct.unpack_from("<I", data, 0x38)[0]
+    difat = list(struct.unpack_from("<109I", data, 0x4C))
+    nxt = struct.unpack_from("<I", data, 0x44)[0]
+    for _ in range(limit):
+        if nxt >= _CFB_LAST:
+            break
+        entries = struct.unpack(f"<{per}I", sector(nxt))
+        difat += entries[:-1]
+        nxt = entries[-1]
+    else:
+        raise ValueError("difatLoop")
+    if fat_count > len(difat):
+        raise ValueError("fatCount")
+    fat: list[int] = []
+    for n in difat[:fat_count]:
+        fat += struct.unpack(f"<{per}I", sector(n))
+
+    def chain(start: int, table: list[int], read) -> bytes:
+        parts, n = [], start
+        while n < _CFB_LAST:
+            if len(parts) >= len(table) or n >= len(table):
+                raise ValueError("chain")
+            parts.append(read(n))
+            n = table[n]
+        return b"".join(parts)
+
+    directory = chain(dir_start, fat, sector)
+    if len(directory) < 128 or directory[66] != 5:  # 5: the root entry
+        raise ValueError("noRoot")
+    for off in range(0, len(directory) - 127, 128):
+        entry = directory[off : off + 128]
+        name_len = struct.unpack_from("<H", entry, 64)[0]
+        if entry[66] != 2 or not 2 <= name_len <= 64:  # 2: a stream
+            continue
+        if entry[: name_len - 2].decode("utf-16-le", "replace") != name:
+            continue
+        start, length = struct.unpack_from("<II", entry, 116)
+        if length >= cutoff:
+            stream = chain(start, fat, sector)
+        else:
+            stream = _cfb_mini(data, directory, fat, sector, chain)(start)
+        if len(stream) < length:
+            raise ValueError("short")
+        return stream[:length]
+    raise ValueError("noStream")
+
+
+def _cfb_mini(data: bytes, directory: bytes, fat: list[int], sector, chain):
+    """A reader for the mini stream: small streams kept in 64-byte pieces
+    inside the root entry's own stream, chained by the mini FAT."""
+    mini_size = 1 << struct.unpack_from("<H", data, 0x20)[0]
+    minifat_start = struct.unpack_from("<I", data, 0x3C)[0]
+    minifat_raw = chain(minifat_start, fat, sector) if minifat_start < _CFB_LAST else b""
+    minifat = list(struct.unpack(f"<{len(minifat_raw) // 4}I", minifat_raw))
+    container = chain(struct.unpack_from("<I", directory, 116)[0], fat, sector)
+
+    def piece(n: int) -> bytes:
+        if (n + 1) * mini_size > len(container):
+            raise ValueError("miniSector")
+        return container[n * mini_size : (n + 1) * mini_size]
+
+    return lambda start: chain(start, minifat, piece)
+
+
+_BIFF_BOF, _BIFF_EOF, _BIFF_SHEET = 0x0809, 0x000A, 0x0085
+
+
+def _xls_sheets(path: Path) -> list[str]:
+    """Sheet names in order from an Excel 97 (BIFF8) workbook: the sheet
+    records of its first part, which ends at the first EOF record."""
+    try:
+        stream = _cfb_stream(path.read_bytes(), "Workbook")
+        kind, size = struct.unpack_from("<HH", stream, 0)
+        if kind != _BIFF_BOF or size < 2 or struct.unpack_from("<H", stream, 4)[0] != 0x0600:
+            return []
+        names, pos = [], 0
+        while pos + 4 <= len(stream):
+            kind, size = struct.unpack_from("<HH", stream, pos)
+            body = stream[pos + 4 : pos + 4 + size]
+            pos += 4 + size
+            if kind == _BIFF_EOF:
+                return names
+            if kind == _BIFF_SHEET and len(body) >= 8:
+                count, wide = body[6], body[7] & 1
+                chars = body[8 : 8 + count * (2 if wide else 1)]
+                names.append(chars.decode("utf-16-le" if wide else "latin-1"))
+    except (OSError, ValueError, struct.error):
+        return []
+    return []
+
+
+def _in_sheet_order(produced: list[Path], source: Path) -> list[Path]:
+    """One file per sheet, in the workbook's own order. LibreOffice's write
+    order (file times) can't be trusted for that: on Windows the files of one
+    run can share a timestamp."""
+    if len(produced) < 2:
+        return produced
+    clean = [re.sub(r"[^\w .()-]", "_", n).strip() for n in _workbook_sheets(source)]
+    rank = {name: i for i, name in enumerate(clean)}
+    return sorted(produced, key=lambda p: rank.get(_sheet_name(p, source.stem), len(rank)))
 
 
 if __name__ == "__main__":

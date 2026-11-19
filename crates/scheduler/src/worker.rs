@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +28,23 @@ pub const STDERR_BUFFER_BYTES: usize = 256 * 1024;
 
 /// More messages than this in one second kills the worker.
 pub const MAX_MESSAGES_PER_SECOND: u32 = 1000;
+
+/// Lines the reader thread may queue ahead of the supervisor. A full queue
+/// stops the reader, which stops draining the pipe, which blocks the worker's
+/// writes: a flooding worker costs the core at most this many lines
+/// (64 × 1 MiB) of memory, not unbounded growth.
+const QUEUE_LINES: usize = 64;
+
+/// Largest file a worker may write (`RLIMIT_FSIZE`, Unix). The per-job total
+/// is the watchdog's disk limit; this stops one runaway write between checks.
+pub const MAX_WORKER_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// How often the watchdog measures the job folder.
+const DISK_CHECK_EVERY: Duration = Duration::from_secs(1);
+
+/// Walking more entries than this counts as over the limit: a tree of
+/// millions of tiny files costs as much to measure as to write.
+const MAX_DISK_ENTRIES: usize = 200_000;
 
 /// What a launcher needs to start a worker.
 #[derive(Debug, Clone)]
@@ -79,6 +96,13 @@ pub struct Watchdog {
     pub total: Duration,
     /// `noProgressS`: longest silence allowed.
     pub silence: Duration,
+    /// Most bytes the whole job folder (`in/`, `work/`, `out/` and anything
+    /// else the worker can write there) may hold; over it the worker is
+    /// killed with `E_RESOURCE_DISK`. Measured before the request is sent,
+    /// every second while it runs, and when its result arrives, so a worker
+    /// that writes while idle, or just before it answers, is caught too.
+    /// `None` turns the check off.
+    pub disk_limit: Option<u64>,
 }
 
 impl Watchdog {
@@ -94,9 +118,19 @@ impl Watchdog {
         Watchdog {
             total: Duration::try_from_secs_f64(total).unwrap_or(Duration::MAX),
             silence: Duration::from_secs(u64::from(no_progress_s)),
+            // The core's own figure, not the worker's `diskBytes`: an
+            // estimate from the worker can't be trusted to cap the worker.
+            disk_limit: Some(input_bytes.saturating_mul(32).clamp(2 * GIB, 64 * GIB)),
         }
     }
+
+    pub fn with_disk_limit(mut self, limit: Option<u64>) -> Self {
+        self.disk_limit = limit;
+        self
+    }
 }
+
+const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Shared cancel flag for one job.
 #[derive(Debug, Clone, Default)]
@@ -193,6 +227,8 @@ pub fn retryable(code: &str) -> bool {
 enum Incoming {
     Line(Vec<u8>),
     TooLong,
+    /// More than [`MAX_MESSAGES_PER_SECOND`] lines in one second.
+    Flood,
     Closed,
 }
 
@@ -214,15 +250,18 @@ impl Stop {
 /// A running worker. Dropping it kills the process tree.
 pub struct Worker {
     child: Child,
-    stdin: Option<ChildStdin>,
+    /// Lines for the writer thread. A thread, because a worker that never
+    /// reads would block a direct write for ever, and with it the watchdog.
+    stdin: Option<mpsc::Sender<Zeroizing<Vec<u8>>>>,
+    /// Set by the writer thread when a write failed.
+    write_failed: Arc<AtomicBool>,
     tree: ProcessTree,
     lines: Receiver<Incoming>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
     codec: Arc<Codec>,
     job_id: JobId,
+    job_dir: PathBuf,
     timing: Timing,
-    rate_window: Instant,
-    rate_count: u32,
 }
 
 impl std::fmt::Debug for Worker {
@@ -245,7 +284,7 @@ impl Worker {
         let mut cmd = launcher
             .command(spec)
             .map_err(|_| failure("E_SANDBOX_UNAVAILABLE"))?;
-        prepare(&mut cmd);
+        prepare(&mut cmd, MAX_WORKER_FILE_BYTES);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -259,7 +298,7 @@ impl Worker {
             }
         };
 
-        let (tx, lines) = mpsc::channel();
+        let (tx, lines) = mpsc::sync_channel(QUEUE_LINES);
         let stdout = child.stdout.take().expect("stdout is piped");
         thread::spawn(move || read_lines(stdout, tx));
         let stderr = Arc::new(Mutex::new(VecDeque::new()));
@@ -267,18 +306,24 @@ impl Worker {
         let sink = stderr.clone();
         thread::spawn(move || drain_stderr(err_pipe, sink));
 
-        let stdin = child.stdin.take();
+        let write_failed = Arc::new(AtomicBool::new(false));
+        let stdin = child.stdin.take().map(|pipe| {
+            let (tx, rx) = mpsc::channel();
+            let failed = write_failed.clone();
+            thread::spawn(move || write_lines(pipe, rx, failed));
+            tx
+        });
         let mut worker = Worker {
             child,
             stdin,
+            write_failed,
             tree,
             lines,
             stderr,
             codec,
             job_id: spec.job_id.clone(),
+            job_dir: spec.job_dir.clone(),
             timing,
-            rate_window: Instant::now(),
-            rate_count: 0,
         };
         worker.handshake(&spec.adapter_id)?;
         Ok(worker)
@@ -287,7 +332,7 @@ impl Worker {
     fn handshake(&mut self, adapter_id: &str) -> Result<(), JobFailure> {
         let line = match self.lines.recv_timeout(self.timing.hello) {
             Ok(Incoming::Line(l)) => l,
-            Ok(Incoming::TooLong) => return Err(self.kill_with("E_PROTOCOL")),
+            Ok(Incoming::TooLong | Incoming::Flood) => return Err(self.kill_with("E_PROTOCOL")),
             Ok(Incoming::Closed) | Err(RecvTimeoutError::Disconnected) => {
                 return Err(self.kill_with("E_INSTALL_CORRUPT"))
             }
@@ -329,22 +374,37 @@ impl Worker {
         token: &CancelToken,
         on_event: &mut dyn FnMut(WorkerEvent),
     ) -> Result<Value, JobFailure> {
+        // A worker is idle between requests, but a process it left behind
+        // isn't: what it wrote since the last request counts now.
+        if self.over_disk_limit(watchdog.disk_limit) {
+            return Err(self.kill_with("E_RESOURCE_DISK"));
+        }
         let line = encode(kind.wire(), &self.job_id, body, secrets);
         debug_assert!(
             self.codec.validate(Direction::Core, &line).is_ok(),
             "the core built an invalid {} message",
             kind.wire()
         );
-        if self.send(&line).is_err() {
+        if self.send(line).is_err() {
             return Err(self.kill_with("E_INTERNAL"));
         }
-        drop(line);
 
         let start = Instant::now();
         let mut last_message = start;
+        let mut last_disk_check = start;
         let mut stop: Option<(Stop, Instant)> = None;
         loop {
+            if self.write_failed.load(Ordering::SeqCst) {
+                // The pipe broke while the worker lives on.
+                return Err(self.kill_with(stop.map_or("E_INTERNAL", |(why, _)| why.code())));
+            }
             let now = Instant::now();
+            if now.duration_since(last_disk_check) >= DISK_CHECK_EVERY {
+                last_disk_check = now;
+                if self.over_disk_limit(watchdog.disk_limit) {
+                    return Err(self.kill_with("E_RESOURCE_DISK"));
+                }
+            }
             if stop.is_none() {
                 let why = if token.is_cancelled() {
                     Some(Stop::Cancelled)
@@ -356,7 +416,7 @@ impl Worker {
                     None
                 };
                 if let Some(why) = why {
-                    let _ = self.send(&encode("cancel", &self.job_id, Value::Null, None));
+                    let _ = self.send(encode("cancel", &self.job_id, Value::Null, None));
                     stop = Some((why, now + self.timing.cancel_grace));
                 }
             }
@@ -381,17 +441,18 @@ impl Worker {
             let line = match self.lines.recv_timeout(wait) {
                 Ok(Incoming::Line(l)) => l,
                 Err(RecvTimeoutError::Timeout) => continue,
-                Ok(Incoming::TooLong) => return Err(self.kill_with("E_PROTOCOL")),
+                Ok(Incoming::TooLong | Incoming::Flood) => return Err(self.kill_with("E_PROTOCOL")),
                 Ok(Incoming::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     // The worker died without answering.
-                    let code = stop.map_or("E_INTERNAL", |(why, _)| why.code());
+                    let code = match stop {
+                        Some((why, _)) => why.code(),
+                        None if self.hit_file_size_limit() => "E_RESOURCE_DISK",
+                        None => "E_INTERNAL",
+                    };
                     return Err(self.kill_with(code));
                 }
             };
             last_message = Instant::now();
-            if !self.within_rate(last_message) {
-                return Err(self.kill_with("E_PROTOCOL"));
-            }
             let Ok(msg) = self.codec.validate(Direction::Worker, &line) else {
                 return Err(self.kill_with("E_PROTOCOL"));
             };
@@ -428,6 +489,11 @@ impl Worker {
                     if let Some((why, _)) = stop {
                         return Err(self.kill_with(why.code()));
                     }
+                    // Between two periodic checks a worker can fill the disk
+                    // and answer at once.
+                    if self.over_disk_limit(watchdog.disk_limit) {
+                        return Err(self.kill_with("E_RESOURCE_DISK"));
+                    }
                     return Ok(msg);
                 }
                 // A second hello, or the wrong kind of result.
@@ -439,6 +505,9 @@ impl Worker {
     /// Closes stdin, gives the worker the exit grace to leave, then kills the
     /// tree.
     pub fn shutdown(mut self) {
+        // Looked for while the worker lives: once it exits, what it started
+        // is reparented and can't be traced back to it.
+        let strays = self.tree.find_strays();
         self.stdin = None;
         let deadline = Instant::now() + self.timing.exit_grace;
         while Instant::now() < deadline {
@@ -447,6 +516,8 @@ impl Worker {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        // Whatever outlived the worker must not touch out/ during verification.
+        self.tree.kill_strays(&strays);
         // Drop kills the tree and reaps the child.
     }
 
@@ -461,22 +532,44 @@ impl Worker {
         self.child.id()
     }
 
-    fn send(&mut self, line: &[u8]) -> std::io::Result<()> {
-        let stdin = self
+    /// Queues a line for the writer thread; never blocks.
+    fn send(&mut self, line: Zeroizing<Vec<u8>>) -> std::io::Result<()> {
+        let tx = self
             .stdin
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| std::io::Error::other("stdin closed"))?;
-        stdin.write_all(line)?;
-        stdin.flush()
+        tx.send(line)
+            .map_err(|_| std::io::Error::other("stdin closed"))
     }
 
-    fn within_rate(&mut self, now: Instant) -> bool {
-        if now.duration_since(self.rate_window) >= Duration::from_secs(1) {
-            self.rate_window = now;
-            self.rate_count = 0;
+    fn over_disk_limit(&self, limit: Option<u64>) -> bool {
+        limit.is_some_and(|l| over_disk_limit(std::slice::from_ref(&self.job_dir), l))
+    }
+
+    /// Whether the worker ended by the file size limit. Under the sandbox
+    /// runner the signal comes back as exit code 128 + `SIGXFSZ`. Waits a
+    /// moment: stdout closes slightly before the exit status is ready.
+    #[cfg(unix)]
+    fn hit_file_size_limit(&mut self) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let xfsz = libc::SIGXFSZ;
+                    return status.signal() == Some(xfsz) || status.code() == Some(128 + xfsz);
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                _ => return false,
+            }
         }
-        self.rate_count += 1;
-        self.rate_count <= MAX_MESSAGES_PER_SECOND
+    }
+
+    #[cfg(not(unix))]
+    fn hit_file_size_limit(&mut self) -> bool {
+        false
     }
 
     fn kill_with(&mut self, code: &str) -> JobFailure {
@@ -492,6 +585,19 @@ impl Drop for Worker {
         self.tree.kill();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Writes queued lines to the worker's stdin until the queue is closed or a
+/// write fails. Ends by dropping the pipe, which closes the worker's stdin.
+/// It can sit in a write for as long as the worker doesn't read; the
+/// supervisor doesn't wait for it, and killing the worker frees it.
+fn write_lines(mut pipe: ChildStdin, lines: Receiver<Zeroizing<Vec<u8>>>, failed: Arc<AtomicBool>) {
+    for line in lines {
+        if pipe.write_all(&line).and_then(|()| pipe.flush()).is_err() {
+            failed.store(true, Ordering::SeqCst);
+            return;
+        }
     }
 }
 
@@ -538,11 +644,43 @@ fn encode(
     line
 }
 
+/// Whether `dirs` hold more than `limit` bytes. Links aren't followed, so a
+/// link can't make the walk leave the job directory.
+fn over_disk_limit(dirs: &[PathBuf], limit: u64) -> bool {
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut pending: Vec<PathBuf> = dirs.to_vec();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+            if total > limit || seen > MAX_DISK_ENTRIES {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Splits stdout into lines of at most [`MAX_LINE_BYTES`] (plus `\r\n`),
-/// without ever buffering more than that.
-fn read_lines(stdout: impl Read, tx: Sender<Incoming>) {
+/// without ever buffering more than that, and counts them. The queue is
+/// bounded, so a worker that outpaces the supervisor is held back; one that
+/// sends more than [`MAX_MESSAGES_PER_SECOND`] is reported as a flood. The
+/// count lives here, not in the supervisor, because lines the supervisor
+/// hasn't read yet must count too.
+fn read_lines(stdout: impl Read, tx: SyncSender<Incoming>) {
     let mut reader = BufReader::with_capacity(64 * 1024, stdout);
     let mut line = Vec::new();
+    let mut window = Instant::now();
+    let mut count = 0u32;
     loop {
         let buf = match reader.fill_buf() {
             Ok(b) if !b.is_empty() => b,
@@ -560,6 +698,16 @@ fn read_lines(stdout: impl Read, tx: Sender<Incoming>) {
                 }
                 if line.len() > MAX_LINE_BYTES {
                     let _ = tx.send(Incoming::TooLong);
+                    return;
+                }
+                let now = Instant::now();
+                if now.duration_since(window) >= Duration::from_secs(1) {
+                    window = now;
+                    count = 0;
+                }
+                count += 1;
+                if count > MAX_MESSAGES_PER_SECOND {
+                    let _ = tx.send(Incoming::Flood);
                     return;
                 }
                 if tx.send(Incoming::Line(std::mem::take(&mut line))).is_err() {
@@ -600,7 +748,7 @@ mod tests {
 
     #[test]
     fn line_reader_limits_and_splits() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let data = b"{\"a\":1}\r\n{\"b\":2}\npartial".to_vec();
         read_lines(&data[..], tx);
         let got: Vec<_> = rx.iter().collect();
@@ -608,15 +756,102 @@ mod tests {
         assert!(matches!(&got[1], Incoming::Line(l) if l == b"{\"b\":2}"));
         assert!(matches!(got[2], Incoming::Closed));
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let long = vec![b'x'; MAX_LINE_BYTES + 10];
         read_lines(&long[..], tx);
         assert!(matches!(rx.recv().unwrap(), Incoming::TooLong));
     }
 
+    /// Serves endless valid lines and counts the bytes taken.
+    struct Endless {
+        served: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(100_000);
+            buf[..n].fill(b'x');
+            // A newline every 100 KB keeps each line well under the limit.
+            buf[n - 1] = b'\n';
+            self.served.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn an_unread_queue_holds_the_reader_back() {
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
+        let source = Endless {
+            served: served.clone(),
+        };
+        let reader = thread::spawn(move || read_lines(source, tx));
+        // Wait until the reader stops taking bytes (it's blocked on the full
+        // queue), however long that takes; a reader that never stops fails at
+        // the deadline instead of passing by luck.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut last = usize::MAX;
+        let taken = loop {
+            thread::sleep(Duration::from_millis(200));
+            let now = served.load(Ordering::SeqCst);
+            if now == last {
+                break now;
+            }
+            assert!(
+                now < 200 * 1024 * 1024 && Instant::now() < deadline,
+                "{now} bytes read with no consumer, and still reading"
+            );
+            last = now;
+        };
+        // A full queue plus the line in hand and the buffer: nowhere near
+        // what an unbounded queue would take.
+        assert!(
+            taken < 20 * 1024 * 1024,
+            "{taken} bytes read with no consumer"
+        );
+        drop(rx);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn more_than_the_rate_limit_is_a_flood() {
+        let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
+        let data = b"{}\n".repeat(MAX_MESSAGES_PER_SECOND as usize + 5);
+        let reader = thread::spawn(move || read_lines(&data[..], tx));
+        let mut lines = 0;
+        loop {
+            match rx.recv().unwrap() {
+                Incoming::Line(_) => lines += 1,
+                Incoming::Flood => break,
+                _ => panic!("expected a flood"),
+            }
+        }
+        assert_eq!(lines, MAX_MESSAGES_PER_SECOND);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn disk_walk_counts_nested_files_and_ignores_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("f"), vec![0u8; 1000]).unwrap();
+        std::fs::write(dir.path().join("g"), vec![0u8; 500]).unwrap();
+        let roots = [dir.path().to_path_buf(), dir.path().join("missing")];
+        assert!(!over_disk_limit(&roots, 1500));
+        assert!(over_disk_limit(&roots, 1499));
+        #[cfg(unix)]
+        {
+            // The link itself is a few bytes; what it points at isn't counted
+            // again, and a loop doesn't hang the walk.
+            std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+            assert!(!over_disk_limit(&roots, 2000));
+        }
+    }
+
     #[test]
     fn exact_limit_is_allowed() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let mut data = vec![b'x'; MAX_LINE_BYTES];
         data.extend_from_slice(b"\r\n");
         read_lines(&data[..], tx);

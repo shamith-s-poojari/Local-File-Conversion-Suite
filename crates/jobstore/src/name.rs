@@ -4,18 +4,42 @@
 /// room for a collision suffix such as ` (12)`.
 const MAX_NAME_BYTES: usize = 200;
 
-const WINDOWS_RESERVED: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
+/// Whether Windows treats `name` as a device, whatever follows its first dot
+/// (`CON.txt` is still the console) and however it is cased or padded.
+///
+/// Besides the classic names this covers `CONIN$`, `CONOUT$` and the
+/// superscript forms `COM¹`/`LPT²`: Windows maps those to the same ports, so
+/// a check on ASCII digits alone misses them. Used for names we write and for
+/// names a worker claims, so it is the one definition.
+pub(crate) fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split(['.', ':']).next().unwrap_or("");
+    let stem = stem.trim_end_matches([' ', '.']).to_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let Some(rest) = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('1'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}' | '\u{2074}'..='\u{2079}'), None)
+    )
+}
 
 /// Turns a worker's `suggestedName` into a safe file name ending in
 /// `.{extension}`.
 ///
 /// - Keeps only the last path component, so `../../x` can't escape.
-/// - Drops control characters, characters Windows forbids, and invisible
-///   formatting characters such as right-to-left overrides that could
-///   disguise the real extension.
+/// - Drops control characters, characters Windows forbids, and every
+///   `Default_Ignorable` character (zero-width, bidi controls, variation
+///   selectors, the soft hyphen) that could disguise the real extension.
 /// - Trims leading and trailing dots and spaces, avoids Windows device names
 ///   such as `CON`, and limits the length.
 /// - Forces the extension of the declared output format.
@@ -70,11 +94,7 @@ fn clean_stem(raw: &str, suffix: &str) -> String {
         stem = trim(&stem).to_owned();
     }
 
-    let device = stem.split('.').next().unwrap_or("").trim_end();
-    if WINDOWS_RESERVED
-        .iter()
-        .any(|r| r.eq_ignore_ascii_case(device))
-    {
+    if is_windows_device_name(&stem) {
         stem.insert(0, '_');
     }
     stem
@@ -88,13 +108,34 @@ fn allowed(c: char) -> bool {
     if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
         return false;
     }
-    // Bidirectional controls, zero-width characters and the BOM.
-    !matches!(c,
-        '\u{200B}'..='\u{200F}'
+    // The interlinear annotation marks are not Default_Ignorable but are
+    // invisible in the same way.
+    !is_default_ignorable(c) && !matches!(c, '\u{FFF9}'..='\u{FFFB}')
+}
+
+/// The Unicode `Default_Ignorable_Code_Point` property (Unicode 15), written
+/// out so no crate is needed: zero-width and bidi controls, variation
+/// selectors, the soft hyphen, fillers and tag characters. They render as
+/// nothing, so they can hide an extension or make two names look the same.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'
+        | '\u{034F}'
+        | '\u{061C}'
+        | '\u{115F}'..='\u{1160}'
+        | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2069}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{3164}'
+        | '\u{FE00}'..='\u{FE0F}'
         | '\u{FEFF}'
-        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{FFA0}'
+        | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}'
     )
 }
 
@@ -124,9 +165,39 @@ mod tests {
             ("日本語の文書.pdf", "pdf", "日本語の文書.pdf"),
             ("x.pdf", "PDF", "x.pdf"),
             ("x.pdf", "../x", "x.pdf"),
+            ("COM\u{B9}", "pdf", "_COM\u{B9}.pdf"),
+            ("lpt\u{B3}.txt", "pdf", "_lpt\u{B3}.txt.pdf"),
+            ("CONIN$", "pdf", "_CONIN$.pdf"),
+            ("conout$.log", "pdf", "_conout$.log.pdf"),
+            ("COM0", "pdf", "COM0.pdf"),
+            ("COM10", "pdf", "COM10.pdf"),
+            // Invisible characters can't hide a device name or an extension.
+            ("C\u{200B}ON", "pdf", "_CON.pdf"),
+            ("a\u{AD}b\u{FE0F}c\u{E0041}d\u{3164}.pdf", "pdf", "abcd.pdf"),
+            ("x\u{2065}\u{FFF0}\u{1D173}.pdf", "pdf", "x.pdf"),
+            ("report\u{180E}.exe", "pdf", "report.exe.pdf"),
         ];
         for (input, ext, want) in cases {
             assert_eq!(s(input, ext, "fallback"), *want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn device_names_ignore_case_padding_and_extensions() {
+        use super::is_windows_device_name as dev;
+        for yes in [
+            "con",
+            "NuL.txt",
+            "aux .x",
+            "COM9.",
+            "Lpt\u{B2}",
+            "com\u{2079}",
+            "CONOUT$",
+        ] {
+            assert!(dev(yes), "{yes:?}");
+        }
+        for no in ["console", "com", "COM12", "lpt", "con-1", "x.con", ""] {
+            assert!(!dev(no), "{no:?}");
         }
     }
 

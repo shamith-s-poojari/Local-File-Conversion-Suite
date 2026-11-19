@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Output check",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verifier"],
+  "properties": {
+    "verifier": {
+      "enum": ["redaction", "activeContent", "hiddenDetails"],
+      "$comment": "Which tool's verifier to run: pdf-redact's, file-disarm's or file-clean's. Never a path."
+    },
+    "expectedPages": { "type": "integer", "minimum": 1, "maximum": 100000 },
+    "fill": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
+    "terms": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["page", "x0", "y0", "x1", "y1"],
+        "properties": {
+          "page": { "type": "integer", "minimum": 1, "maximum": 100000 },
+          "x0": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y0": { "type": "number", "minimum": 0, "maximum": 1 },
+          "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y1": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  },
+  "$comment": "All set by the core from the tool job's own params (redaction: expectedPages, fill, terms, regions), never from what the tool's worker reported."
+}

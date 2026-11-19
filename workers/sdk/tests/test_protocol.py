@@ -44,10 +44,19 @@ def test_accepts_valid_messages(case: dict) -> None:
     assert parsed.type == case["message"]["type"]
 
 
-@pytest.mark.parametrize("case", CASES["invalid"], ids=lambda c: c["name"])
-def test_rejects_invalid_messages(case: dict) -> None:
+def _invalid_case(case: dict):
+    """Known gaps are expected failures; ``strict`` makes closing one a visible change."""
     if case["name"] in KNOWN_GAPS:
-        pytest.skip(KNOWN_GAPS[case["name"]])
+        return pytest.param(
+            case,
+            id=case["name"],
+            marks=pytest.mark.xfail(reason=KNOWN_GAPS[case["name"]], strict=True),
+        )
+    return pytest.param(case, id=case["name"])
+
+
+@pytest.mark.parametrize("case", [_invalid_case(c) for c in CASES["invalid"]])
+def test_rejects_invalid_messages(case: dict) -> None:
     with pytest.raises(ValidationError):
         PARSERS[case["direction"]](line(case["message"]))
 

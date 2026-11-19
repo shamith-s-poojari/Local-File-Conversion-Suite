@@ -9,13 +9,16 @@ from typing import Any, ClassVar, Literal
 
 from converter_sdk import (
     Adapter,
+    AdapterError,
     JobContext,
     OutputFile,
     ResourceEstimate,
     ValidationReport,
     run_main,
 )
-from converter_sdk.convert import ConversionAdapter, issue, source_format
+from converter_sdk.adapter import issue
+from converter_sdk.convert import ConversionAdapter, source_format
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     MUXER,
     atempo,
@@ -24,13 +27,40 @@ from converter_sdk.media import (
     ffmpeg,
     has_extra_streams,
     probe,
+    validate_media,
     video_encode_args,
-    video_streams,
 )
+from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 ROTATE = {90: "transpose=1", 180: "hflip,vflip", 270: "transpose=2"}
 FLIP = {"horizontal": "hflip", "vertical": "vflip"}
+# The values params.schema.json allows. The schema is checked by the core
+# before a job starts, but these go into an FFmpeg filter graph, so the
+# adapter doesn't rely on that alone; a test keeps both lists the same.
+ROTATIONS = (0, 90, 180, 270)
+FLIPS = ("none", "horizontal", "vertical")
+SPEEDS = (0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4)
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def check_params(params: dict[str, Any]) -> ValidationIssue | None:
+    """The first parameter outside its allowed values, as an issue."""
+    rotate = params.get("rotate")
+    if rotate is not None and not (_number(rotate) and rotate in ROTATIONS):
+        return issue("rotate", "invalid")
+    flip = params.get("flip")
+    if flip is not None and flip not in FLIPS:
+        return issue("flip", "invalid")
+    speed = params.get("speed")
+    if speed is not None and not (_number(speed) and speed in SPEEDS):
+        return issue("speed", "invalid")
+    mute = params.get("removeAudio")
+    if mute is not None and not isinstance(mute, bool):
+        return issue("removeAudio", "invalid")
+    return None
 
 
 def video_filter(params: dict[str, Any]) -> str:
@@ -59,18 +89,11 @@ class VideoEditAdapter(Adapter):
     fidelity: ClassVar[Literal["E", "H", "R", "L"]] = "L"
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
+        if (problem := check_params(params)) is not None:
+            return ValidationReport(errors=[problem])
         if not changes(params):
             return ValidationReport(errors=[issue("rotate", "nothingToChange")])
-        durations, pixels = [], []
-        for p in ctx.inputs:
-            ctx.check_cancelled()
-            info = probe(ctx, p)
-            video = video_streams(info)
-            if not video:
-                return ValidationReport(errors=[issue("inputs", "noVideo")])
-            durations.append(duration_s(info))
-            pixels.append(int(video[0].get("width") or 0) * int(video[0].get("height") or 0))
-        return ValidationReport(metadata={"durations": durations, "pixels": pixels})
+        return validate_media(ctx, "video")
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]
@@ -84,6 +107,8 @@ class VideoEditAdapter(Adapter):
         )
 
     def execute_conversion(self, ctx: JobContext, params: dict[str, Any]) -> list[OutputFile]:
+        if (problem := check_params(params)) is not None:
+            raise AdapterError("E_INTERNAL", {"param": problem.param, "reason": "invalid"})
         speed = float(params.get("speed") or 1)
         mute = bool(params.get("removeAudio"))
         outputs = []

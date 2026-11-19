@@ -16,4 +16,6 @@ Images and slide text go through PDF inside the job (rendered with pdfium). Mark
 
 LibreOffice runs with a fresh profile in `work/`, never the user's. Macros don't run. Its single-instance pipe is the only thing it may create outside the job directory (`/tmp/OSL_PIPE_…`), and it may only listen on it, never connect to another instance (see `crates/app-core/src/engines.rs`).
 
+Why inputs aren't disarmed first (audit P15): `file-disarm` removes embedded objects, linked content and similar parts. A conversion should keep what the document shows, so disarming first would silently change the result. The risks are limited another way: LibreOffice runs headless with its default macro security (it never asks to enable macros), the sandbox denies it the network (ADR 0003), and every job uses a fresh profile in `work/`. The output is a new file written by LibreOffice's export filters, and is re-sniffed before it can be saved. Users who want a document made inert use file-disarm on its own. This is a documented decision, not a tested guarantee: the macro-security default comes from LibreOffice's documented behaviour, not from a test here.
+
 Warnings: `LAYOUT_APPROXIMATED` (HTML, Markdown, EPUB), `IMAGES_DROPPED` (to Markdown), `FORMULAS_DROPPED` and `SHEETS_SPLIT` (to CSV).

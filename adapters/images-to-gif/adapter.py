@@ -15,10 +15,9 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.images import pixels, read_frames
+from converter_sdk.limits import MB
 from converter_sdk.sheets import fit_on_canvas
 from PIL import Image
-
-MB = 1024 * 1024
 
 
 class ImagesToGifAdapter(Adapter):

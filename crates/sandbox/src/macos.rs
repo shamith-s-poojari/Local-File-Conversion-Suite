@@ -187,6 +187,7 @@ mod tests {
     #[test]
     fn profile_quotes_paths_and_scopes_the_job() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -197,6 +198,7 @@ mod tests {
             grants: Default::default(),
         };
         let inner = Inner {
+            job_id: "j1",
             config: &config,
             job_dir: PathBuf::from("/data/jobs/j_\"1"),
             argv: vec![],
@@ -208,6 +210,7 @@ mod tests {
         assert!(p.contains("(allow process-exec (subpath \"/py\"))"));
         assert!(!p.contains("network"));
         let relative = Inner {
+            job_id: "j1",
             config: &config,
             job_dir: PathBuf::from("jobs/x"),
             argv: vec![],
@@ -219,6 +222,7 @@ mod tests {
     #[test]
     fn engine_grants_add_only_their_paths() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -235,6 +239,7 @@ mod tests {
             ..Default::default()
         };
         let inner = Inner {
+            job_id: "j1",
             config: &config,
             job_dir: PathBuf::from("/data/jobs/j1"),
             argv: vec![],
@@ -250,6 +255,7 @@ mod tests {
     #[test]
     fn socket_grants_listen_but_never_connect() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/py/bin/python".into(),
             runtime_read: vec!["/py".into()],
             exec_roots: vec!["/py".into()],
@@ -264,6 +270,7 @@ mod tests {
             ..Default::default()
         };
         let inner = Inner {
+            job_id: "j1",
             config: &config,
             job_dir: PathBuf::from("/data/jobs/j1"),
             argv: vec![],
@@ -282,6 +289,7 @@ mod tests {
             ..Default::default()
         };
         let inner = Inner {
+            job_id: "j1",
             grant: Some(&bad),
             ..inner
         };

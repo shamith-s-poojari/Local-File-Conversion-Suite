@@ -11,7 +11,7 @@ from converter_conformance.harness import load_adapter_class, run_in_process
 from PIL import Image
 
 ADAPTER = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(files.ffmpeg() is None, reason="FFmpeg isn't installed")
+pytestmark = pytest.mark.skipif(files.skip_ffmpeg(), reason="FFmpeg isn't installed")
 
 
 def test_frames_spread_evenly_and_named_by_time(tmp_path: Path) -> None:

@@ -100,3 +100,11 @@ def test_sentinel_password_stays_out_of_the_job_directory(tmp_path, three) -> No
         if path.is_file():
             assert sentinel not in path.read_bytes()
     assert sentinel not in repr(r.sent).encode("utf-8")
+
+
+def test_unlock_warns_that_encryption_was_removed(tmp_path, three) -> None:
+    """P6: the unlocked copy carries no password or limits; say so."""
+    protected = run(tmp_path / "p", three, {"mode": "protect"}, {"userPassword": PASSWORD})
+    assert "ENCRYPTION_REMOVED" not in protected.warnings  # locking is not unlocking
+    unlocked = run(tmp_path / "u", protected.outputs[0], {"mode": "unlock"}, {"password": PASSWORD})
+    assert unlocked.warnings.count("ENCRYPTION_REMOVED") == 1

@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+import subprocess
+from collections.abc import Callable, Sequence
+from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from .adapter import ValidationReport, issue
 from .context import JobContext
-from .engines import binary, run
+from .engines import available, binary, engine_env, run
 from .errors import AdapterError
 from .protocol import MediaInfo
 
@@ -59,9 +62,48 @@ MUXER = {
 OPUS_RATES = {48000, 24000, 16000, 12000, 8000}
 
 
+@cache
+def _encoders(exe: str) -> frozenset[str]:
+    """Encoder names this FFmpeg build has; empty if it couldn't be asked."""
+    try:
+        out = subprocess.run(  # noqa: S603 - the granted FFmpeg, fixed arguments
+            [exe, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            input="",  # a pipe: an AppContainer is denied the null device
+            timeout=20,
+            env=engine_env(),
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    # Lines look like " A....D libvorbis   libvorbis (codec vorbis)".
+    return frozenset(
+        parts[1]
+        for line in out.splitlines()
+        if len(parts := line.split()) > 1 and len(parts[0]) == 6
+    )
+
+
+def audio_codec(to: str) -> list[str]:
+    """The encoder arguments for an audio format.
+
+    Ogg needs libvorbis, which some FFmpeg builds leave out (Homebrew's
+    ``ffmpeg`` 9; ``ffmpeg-full`` has it). FFmpeg's own Vorbis encoder is no
+    substitute: it crashes re-encoding decoded Vorbis. So a build without
+    libvorbis is reported as a missing part of the engine.
+    """
+    if to == "ogg" and available("ffmpeg"):
+        found = _encoders(str(binary("ffmpeg")))
+        # Asking failed: keep the usual encoder and let FFmpeg report it.
+        if found and "libvorbis" not in found:
+            raise AdapterError("E_INSTALL_CORRUPT", {"missing": "libvorbis"}, retryable=False)
+    return list(AUDIO_CODEC[to])
+
+
 def audio_encode_args(to: str, bitrate_kbps: int = 192, rate: int = 0) -> list[str]:
     """Encoder, bitrate (lossy formats) and a sample rate the format takes."""
-    args = list(AUDIO_CODEC[to])
+    args = audio_codec(to)
     if to not in LOSSLESS_AUDIO:
         args += ["-b:a", f"{bitrate_kbps}k"]
     if to == "opus" and rate not in OPUS_RATES:
@@ -197,6 +239,48 @@ def media_info(info: dict[str, Any], kind: str) -> MediaInfo:
         hasAudio=bool(audio),
         hasVideo=bool(video),
     )
+
+
+def validate_media(
+    ctx: JobContext,
+    kind: Literal["audio", "video"],
+    check: Callable[[dict[str, Any], float], dict[str, Any] | None] | None = None,
+) -> ValidationReport:
+    """The ``validate_input`` every media adapter shares: probe each input,
+    refuse one without the stream the tool needs (``noAudio`` / ``noVideo`` on
+    ``inputs``), and report what the memory estimate needs in ``metadata``:
+    ``durations`` (seconds), ``pixels`` (video) and ``rates`` / ``channels``
+    (audio).
+
+    ``check(info, duration)`` may return an ``issue(...)`` to refuse an input
+    for a reason of the adapter's own."""
+    durations: list[float] = []
+    pixels: list[int] = []
+    rates: list[int] = []
+    channels: list[int] = []
+    for path in ctx.inputs:
+        ctx.check_cancelled()
+        info = probe(ctx, path)
+        streams = audio_streams(info) if kind == "audio" else video_streams(info)
+        if not streams:
+            return ValidationReport(
+                errors=[issue("inputs", "noAudio" if kind == "audio" else "noVideo")]
+            )
+        seconds = duration_s(info)
+        if check is not None and (problem := check(info, seconds)) is not None:
+            return ValidationReport(errors=[problem])
+        durations.append(seconds)
+        first = streams[0]
+        if kind == "audio":
+            rates.append(int(first.get("sample_rate") or 0))
+            channels.append(int(first.get("channels") or 0))
+        else:
+            pixels.append(int(first.get("width") or 0) * int(first.get("height") or 0))
+    if kind == "audio":
+        return ValidationReport(
+            metadata={"durations": durations, "rates": rates, "channels": channels}
+        )
+    return ValidationReport(metadata={"durations": durations, "pixels": pixels})
 
 
 def parse_time(value: Any) -> float | None:

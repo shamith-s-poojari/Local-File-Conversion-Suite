@@ -22,4 +22,8 @@ export interface WidgetProps<T> {
    * also edits `terms`). */
   params: Record<string, unknown>;
   setParam: (key: string, value: unknown) => void;
+  /** The core or the form found this field's value invalid; `errorId` is the
+   * element that says why, for `aria-describedby` (audit U27). */
+  invalid?: boolean;
+  errorId?: string;
 }

@@ -33,7 +33,22 @@ pub const REGISTRY_VERSION: u32 = 1;
 pub enum Kind {
     Operation,
     Conversion,
+    /// Runs on the core's behalf and has no UI entry: never a target and
+    /// never listed as a tool (ADR 0006).
+    Check,
 }
+
+/// Which independent check of its output the core runs before a tool's job
+/// may succeed (ADR 0006). Each names a verifier in the tool's own folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecheckKind {
+    Redaction,
+    ActiveContent,
+}
+
+/// The adapter that runs every re-check.
+pub const CHECK_ADAPTER: &str = "output-check";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -165,6 +180,8 @@ pub struct Manifest {
     pub edges: Option<Vec<EdgeDecl>>,
     #[serde(default)]
     pub fidelity_notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck: Option<RecheckKind>,
     pub limits: Limits,
     pub params: String,
     pub platforms: Vec<Platform>,
@@ -339,6 +356,26 @@ pub fn build_registry(
         }
     }
 
+    if adapters.iter().any(|a| a.manifest.recheck.is_some()) {
+        let has_checker = adapters
+            .iter()
+            .any(|a| a.manifest.id == CHECK_ADAPTER && a.manifest.kind == Kind::Check);
+        if !has_checker {
+            problems.push(Problem::new(
+                None,
+                format!("a manifest declares `recheck`, but there is no `{CHECK_ADAPTER}` adapter of kind check"),
+            ));
+        }
+    }
+    for a in &adapters {
+        if a.manifest.kind == Kind::Check && a.manifest.id != CHECK_ADAPTER {
+            problems.push(Problem::new(
+                Some(&a.manifest.id),
+                format!("only `{CHECK_ADAPTER}` may be of kind check"),
+            ));
+        }
+    }
+
     if problems.is_empty() {
         adapters.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         Ok(Registry {
@@ -397,6 +434,12 @@ fn load_adapter(
 
     if manifest.id != folder {
         problem(format!("id {:?} must equal the folder name", manifest.id));
+    }
+    if manifest.recheck.is_some() && manifest.kind != Kind::Operation {
+        problem("recheck: only an operation can declare one".into());
+    }
+    if manifest.recheck.is_some() && !dir.join("verify.py").is_file() {
+        problem("recheck: the adapter folder needs a verify.py".into());
     }
     if let Some(inputs) = &manifest.inputs {
         if inputs.min > inputs.max {

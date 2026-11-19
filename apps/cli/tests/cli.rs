@@ -59,15 +59,41 @@ fn py(python: &Path, code: &str) {
     assert!(ok, "python helper failed");
 }
 
+/// `lfcs` with the repository as its runtime. A checkout is only used with
+/// `--dev` (audit S1), so the tests ask for it.
 fn lfcs(data: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lfcs"))
+    lfcs_command(data, args).output().unwrap()
+}
+
+fn lfcs_command(data: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lfcs"));
+    c.env_remove("LFCS_DEV")
+        .env_remove("LFCS_PASSWORD")
+        .arg("--dev")
         .arg("--resources")
         .arg(repo())
         .arg("--data-dir")
         .arg(data)
-        .args(args)
-        .output()
-        .unwrap()
+        .args(args);
+    c
+}
+
+fn json(o: &Output) -> serde_json::Value {
+    serde_json::from_str(&stdout(o)).unwrap_or_else(|e| panic!("{e}: {}", stdout(o)))
+}
+
+/// `--json` failures are `{ok: false, error: {code, reason, message}}`.
+fn assert_error_shape(v: &serde_json::Value, code: &str) {
+    assert_eq!(v["ok"], false, "{v}");
+    let e = &v["error"];
+    assert_eq!(e["code"], code, "{v}");
+    for key in ["reason", "message"] {
+        assert!(
+            e[key].as_str().is_some_and(|s| !s.is_empty()),
+            "error.{key}: {v}"
+        );
+    }
+    assert_eq!(e.as_object().unwrap().len(), 3, "{v}");
 }
 
 fn stdout(o: &Output) -> String {
@@ -111,6 +137,7 @@ fn doctor_json() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
     assert_eq!(v["processingEnabled"], true);
+    assert_eq!(v["ok"], true, "doctor --json says ok (audit U20)");
 }
 
 #[test]
@@ -285,4 +312,484 @@ fn unknown_tool_is_a_usage_error() {
         &["run", "no-such-tool", a.to_str().unwrap()],
     );
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
+
+#[test]
+fn a_checkout_needs_dev() {
+    // Without --dev (or LFCS_DEV=1) a repository checkout is not a runtime,
+    // so this needs no virtualenv (audit S1).
+    let t = tempfile::tempdir().unwrap();
+    let data = t.path().join("data");
+    let plain = |env: &[(&str, &str)]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_lfcs"));
+        c.env_remove("LFCS_DEV")
+            .arg("--resources")
+            .arg(repo())
+            .arg("--data-dir")
+            .arg(&data)
+            .args(["doctor", "--json"]);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c.output().unwrap()
+    };
+    let o = plain(&[]);
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    assert!(stderr(&o).contains("--dev"), "{}", stderr(&o));
+    assert_error_shape(&json(&o), "E_INSTALL_CORRUPT");
+
+    // LFCS_DEV=1 is the same switch (it is exactly "1", as in the core).
+    if python().is_some() {
+        let o = plain(&[("LFCS_DEV", "1")]);
+        assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+        assert_eq!(json(&o)["ok"], true);
+    }
+    let o = plain(&[("LFCS_DEV", "yes")]);
+    assert_eq!(o.status.code(), Some(1), "only 1 turns it on");
+}
+
+#[test]
+fn usage_errors_have_the_json_shape() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("data");
+    for (args, reason) in [
+        (&["--json", "frobnicate"][..], "unknownCommand"),
+        (&["--json"][..], "noCommand"),
+        (&["--json", "--bogus"][..], "unknownOption"),
+        (&["convert", "x.png", "--json"][..], "missingTarget"),
+        (
+            &["convert", "x.png", "--to", "nope", "--json"][..],
+            "unknownFormat",
+        ),
+        (&["run", "pdf-merge", "--json"][..], "noFiles"),
+        (&["doctor", "extra", "--json"][..], "unexpectedArguments"),
+    ] {
+        let o = lfcs(&d, args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", stderr(&o));
+        let v = json(&o);
+        assert_error_shape(&v, "E_USAGE");
+        assert_eq!(v["error"]["reason"], reason, "{args:?}");
+    }
+}
+
+#[test]
+fn a_failed_job_has_the_json_shape() {
+    let Some(_) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    // PNG signature, then nothing a decoder can use.
+    let bad = t.path().join("broken.png");
+    std::fs::write(&bad, [&b"\x89PNG\r\n\x1a\n"[..], &[7u8; 64][..]].concat()).unwrap();
+    let o = lfcs(
+        &t.path().join("data"),
+        &[
+            "convert",
+            bad.to_str().unwrap(),
+            "--to",
+            "jpg",
+            "--json",
+            "-q",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    let v = json(&o);
+    assert_error_shape(&v, "E_INPUT_CORRUPT");
+    assert_eq!(v["state"], "failed");
+    assert!(v["warnings"].is_array() && v["skipped"].is_array());
+}
+
+#[test]
+fn inspect_json_reports_the_failure_in_the_same_shape() {
+    let Some(_) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let bad = t.path().join("broken.png");
+    std::fs::write(&bad, [&b"\x89PNG\r\n\x1a\n"[..], &[7u8; 64][..]].concat()).unwrap();
+    let o = lfcs(
+        &t.path().join("data"),
+        &["inspect", bad.to_str().unwrap(), "--json"],
+    );
+    let v = json(&o);
+    if o.status.code() == Some(1) {
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"].as_object().unwrap().len(), 3, "{v}");
+        assert_eq!(v["files"][0]["error"], v["error"]);
+    } else {
+        // The inspector may accept a PNG this broken; then there is no error.
+        assert_eq!(v["ok"], true, "{v}");
+    }
+}
+
+#[test]
+fn folder_truncation_is_reported() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("many");
+    std::fs::create_dir_all(&folder).unwrap();
+    let first = folder.join("0.png");
+    py(
+        &python,
+        &format!(
+            "from PIL import Image\nImage.new('RGB', (4, 4)).save('{}')\n",
+            slashed(&first)
+        ),
+    );
+    for i in 1..205 {
+        std::fs::copy(&first, folder.join(format!("{i}.png"))).unwrap();
+    }
+    // `targets` only sniffs, so 200 files don't start 200 workers.
+    let o = lfcs(
+        &t.path().join("data"),
+        &["targets", "--json", folder.to_str().unwrap()],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let v = json(&o);
+    let cut = v["folderTruncated"].as_array().unwrap();
+    assert_eq!(cut.len(), 1, "{v}");
+    assert_eq!(cut[0]["count"], 5);
+    assert!(stderr(&o).contains("5 more files"), "{}", stderr(&o));
+}
+
+#[test]
+fn passwords_come_from_stdin_or_the_environment() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a.pdf");
+    make_pdf(&python, &a, 1);
+    let data = t.path().join("data");
+
+    // Never in arguments: refused, and not echoed.
+    for args in [
+        &["run", "pdf-protect", "x.pdf", "--password", "hunter2"][..],
+        &[
+            "run",
+            "pdf-protect",
+            "x.pdf",
+            "--set",
+            "userPassword=hunter2",
+        ][..],
+    ] {
+        let o = lfcs(&data, args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&o).contains("--password-stdin"), "{}", stderr(&o));
+        assert!(!stderr(&o).contains("hunter2") && !stdout(&o).contains("hunter2"));
+    }
+
+    // On standard input.
+    let out = t.path().join("protected-stdin.pdf");
+    let mut c = lfcs_command(
+        &data,
+        &[
+            "run",
+            "pdf-protect",
+            a.to_str().unwrap(),
+            "--password-stdin",
+            "-q",
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    );
+    c.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"s3cret-pw\n")
+            .unwrap();
+    }
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    assert!(!stdout(&o).contains("s3cret-pw") && !stderr(&o).contains("s3cret-pw"));
+    assert_opens_only_with(&python, &out, "s3cret-pw");
+
+    // In the environment.
+    let out = t.path().join("protected-env.pdf");
+    let o = lfcs_command(
+        &data,
+        &[
+            "run",
+            "pdf-protect",
+            a.to_str().unwrap(),
+            "-q",
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    )
+    .env("LFCS_PASSWORD", "env-pw-1")
+    .output()
+    .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    assert_opens_only_with(&python, &out, "env-pw-1");
+
+    // Asked for and not given.
+    let o = lfcs_command(
+        &data,
+        &[
+            "run",
+            "pdf-protect",
+            a.to_str().unwrap(),
+            "--password-stdin",
+            "-q",
+        ],
+    )
+    .stdin(std::process::Stdio::null())
+    .output()
+    .unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
+
+/// The PDF is encrypted: it opens with `password` and not without one.
+fn assert_opens_only_with(python: &Path, pdf: &Path, password: &str) {
+    py(
+        python,
+        &format!(
+            "import pikepdf\n\
+             try:\n\
+             \x20   pikepdf.open('{p}')\n\
+             \x20   raise SystemExit('opened without a password')\n\
+             except pikepdf.PasswordError:\n\
+             \x20   pass\n\
+             pikepdf.open('{p}', password='{pw}')\n",
+            p = slashed(pdf),
+            pw = password
+        ),
+    );
+}
+
+/// Ctrl-C stops a running job, removes its folder and exits 130 (audit R17).
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_and_cleans_up() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    // A big picture of noise: slow to encode, so the job is still running
+    // when the signal arrives.
+    let png = t.path().join("noise.png");
+    py(
+        &python,
+        &format!(
+            "import os\nfrom PIL import Image\n\
+             Image.frombytes('RGB', (6000, 6000), os.urandom(6000 * 6000 * 3)).save('{}', compress_level=0)\n",
+            slashed(&png)
+        ),
+    );
+    let data = t.path().join("data");
+    let out = t.path().join("out");
+    let mut child = lfcs_command(
+        &data,
+        &[
+            "convert",
+            png.to_str().unwrap(),
+            "--to",
+            "webp",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    // Progress lines on stderr tell when the job is running.
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut seen = Vec::new();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let running = line.starts_with("[running");
+        seen.push(line);
+        if running {
+            break;
+        }
+    }
+    assert!(
+        seen.iter().any(|l| l.starts_with("[running")),
+        "the job never ran: {seen:?}"
+    );
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signalled.success());
+    let rest: Vec<String> = lines.map(Result::unwrap).collect();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(130), "{seen:?} {rest:?}");
+    assert!(rest.iter().any(|l| l.contains("Cancelled")), "{rest:?}");
+    assert!(!out.exists() || std::fs::read_dir(&out).unwrap().next().is_none());
+    // The session's shutdown removed the job folder.
+    let jobs = data.join("jobs");
+    let left: Vec<_> = std::fs::read_dir(&jobs)
+        .map(|d| d.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "job folders left behind: {left:?}");
+}
+
+/// Every flag the parser takes is in `--help`, and the text says where each applies.
+#[test]
+fn help_lists_every_option() {
+    let t = tempfile::tempdir().unwrap();
+    let o = lfcs(&t.path().join("data"), &["--help"]);
+    let h = stdout(&o);
+    for flag in [
+        "--to",
+        "--out",
+        "--set",
+        "--params",
+        "--skip-same",
+        "--keep-folders",
+        "--force",
+        "--json",
+        "--quiet",
+        "--password-stdin",
+        "--resources",
+        "--dev",
+        "--data-dir",
+        "--version",
+    ] {
+        assert!(h.contains(flag), "{flag} is missing from --help");
+    }
+    // `run` takes --keep-folders too.
+    let run_line = h
+        .split("COMMANDS")
+        .next()
+        .unwrap()
+        .lines()
+        .skip_while(|l| !l.contains("lfcs run"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(run_line.contains("--keep-folders"), "{run_line}");
+    assert!(!h.contains("Nothing is ever overwritten"));
+}
+
+#[test]
+fn skip_same_is_refused_for_run() {
+    let t = tempfile::tempdir().unwrap();
+    let o = lfcs(
+        &t.path().join("data"),
+        &["run", "pdf-merge", "a.pdf", "b.pdf", "--skip-same"],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
+
+fn make_png(python: &Path, path: &Path) {
+    py(
+        python,
+        &format!(
+            "from PIL import Image\nImage.new('RGB', (8, 8), (10, 90, 200)).save('{}')\n",
+            slashed(path)
+        ),
+    );
+}
+
+#[test]
+fn convert_skip_same_leaves_out_files_already_in_the_target_format() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let (png, jpg) = (t.path().join("a.png"), t.path().join("b.jpg"));
+    make_png(&python, &png);
+    py(
+        &python,
+        &format!(
+            "from PIL import Image\nImage.new('RGB', (8, 8)).save('{}')\n",
+            slashed(&jpg)
+        ),
+    );
+    let data = t.path().join("data");
+    let out = t.path().join("out");
+    let args = |extra: &[&'static str]| -> Vec<String> {
+        let mut v: Vec<String> = [
+            "convert",
+            png.to_str().unwrap(),
+            jpg.to_str().unwrap(),
+            "--to",
+            "jpg",
+            "--json",
+            "-q",
+            "--out",
+            out.to_str().unwrap(),
+        ]
+        .map(String::from)
+        .into();
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    // Without the flag a JPEG to JPEG has no route.
+    let plain = args(&[]);
+    let plain: Vec<&str> = plain.iter().map(String::as_str).collect();
+    let o = lfcs(&data, &plain);
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+
+    let with = args(&["--skip-same"]);
+    let with: Vec<&str> = with.iter().map(String::as_str).collect();
+    let o = lfcs(&data, &with);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let v = json(&o);
+    assert_eq!(v["skippedSameFormat"], 1, "{v}");
+    assert_eq!(v["savedCount"], 1, "{v}");
+    assert!(out.join("a.jpg").is_file());
+
+    // Everything skipped: nothing to do, and it says so.
+    let o = lfcs(
+        &data,
+        &[
+            "convert",
+            jpg.to_str().unwrap(),
+            "--to",
+            "jpg",
+            "--skip-same",
+            "--json",
+            "-q",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    assert_error_shape(&json(&o), "E_PARAMS_INVALID");
+}
+
+#[test]
+fn run_keeps_folders_like_convert() {
+    let Some(python) = python() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("scans");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    make_png(&python, &root.join("top.png"));
+    make_png(&python, &root.join("sub").join("deep.png"));
+    let out = t.path().join("out");
+    let o = lfcs(
+        &t.path().join("data"),
+        &[
+            "run",
+            "image-compress",
+            root.to_str().unwrap(),
+            "--keep-folders",
+            "-q",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let found: Vec<String> = walk(&out);
+    assert!(
+        found
+            .iter()
+            .any(|p| p.contains("sub") && p.contains("deep")),
+        "the folder layout was not kept: {found:?}"
+    );
+}
+
+fn walk(dir: &Path) -> Vec<String> {
+    let mut all = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            all.extend(walk(&p));
+        } else {
+            all.push(p.to_string_lossy().into_owned());
+        }
+    }
+    all
 }

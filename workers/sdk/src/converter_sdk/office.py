@@ -17,6 +17,9 @@ from .engines import binary, run
 from .errors import AdapterError
 
 TIMEOUT_S = 300
+RESTART_REQUESTED = 81
+"""soffice.bin's exit code after it creates a user profile: start it again.
+The `soffice` script (oosplash) does that for its callers."""
 """One document. A long novel converts in seconds; a hang is killed."""
 
 # LibreOffice export filters by target extension and document family.
@@ -56,6 +59,37 @@ IMPORT_FILTERS = {
 }
 
 
+CFB_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
+"""Start of a Compound File (OLE2) container."""
+
+OOXML_FORMATS = frozenset({"docx", "pptx", "xlsx"})
+"""Formats that are zip packages. The older ``doc``/``ppt``/``xls`` are
+Compound Files legitimately, so they don't count."""
+
+
+def is_encrypted_ooxml(path: Path, fmt: str) -> bool:
+    """Whether a ``docx``/``pptx``/``xlsx`` is really a Compound File.
+
+    Office wraps a password-protected package in one (an ``EncryptedPackage``
+    stream), so the zip a reader expects isn't there. Reading it as
+    "corrupt" would send the user to repair a file that only needs its
+    password."""
+    if fmt not in OOXML_FORMATS:
+        return False
+    try:
+        with path.open("rb") as f:
+            return f.read(len(CFB_MAGIC)) == CFB_MAGIC
+    except OSError:
+        return False
+
+
+def reject_encrypted_ooxml(path: Path, fmt: str) -> None:
+    """Raise ``E_PASSWORD_REQUIRED`` for a password-protected Office file.
+    The SDK can't open these (no password goes to LibreOffice headless)."""
+    if is_encrypted_ooxml(path, fmt):
+        raise AdapterError("E_PASSWORD_REQUIRED", {"reason": "officePassword"}, retryable=False)
+
+
 def soffice_convert(
     ctx: JobContext,
     src: Path,
@@ -89,6 +123,10 @@ def soffice_convert(
     work = str(ctx.work_dir)
     env = {"HOME": work, "TMPDIR": work, "TEMP": work, "TMP": work}
     code, _err = run(ctx, argv, env=env, timeout_s=TIMEOUT_S)
+    if code == RESTART_REQUESTED:
+        # A new profile was just made; LibreOffice's launcher would start it
+        # again, but the sandbox runs soffice.bin directly, so do it here.
+        code, _err = run(ctx, argv, env=env, timeout_s=TIMEOUT_S)
     produced = sorted(
         (p for p in outdir.iterdir() if p.is_file()), key=lambda p: (p.stat().st_mtime_ns, p.name)
     )

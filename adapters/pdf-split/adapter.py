@@ -6,6 +6,8 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import AdapterError, JobContext, OutputFile, run_main
+from converter_sdk.adapter import issue
+from converter_sdk.limits import MB
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
@@ -14,14 +16,12 @@ from converter_sdk.pdf import (
     field_names,
     flatten_forms,
     is_tagged,
-    param_issue,
     parse_page_ranges,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue
 from pikepdf import Name
 
-MB = 1024 * 1024
 MAX_OUTPUTS = 10_000
 """The protocol's limit on outputs per job."""
 
@@ -103,24 +103,24 @@ class PdfSplitAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         total = inputs[0].pages
         mode = params.get("mode", "ranges")
         if mode not in ("ranges", "everyN", "eachPage", "maxSize"):
-            return [param_issue("mode", "invalid")]
+            return [issue("mode", "invalid")]
         if mode == "maxSize":
             size = params.get("maxSizeMb")
             if not isinstance(size, int) or size < 1:
-                return [param_issue("maxSizeMb", "required")]
+                return [issue("maxSizeMb", "required")]
             return []
         if mode == "everyN":
             n = params.get("n")
             if not isinstance(n, int) or n < 1:
-                return [param_issue("n", "required")]
+                return [issue("n", "required")]
         try:
             parts = plan_parts(params, total)
         except RangeError as e:
-            return [param_issue("ranges", e.reason, pages=total)]
+            return [issue("ranges", e.reason, pages=total)]
         if len(parts) > MAX_OUTPUTS:
             return [ValidationIssue(code="E_LIMIT_EXCEEDED", detail={"limit": "outputs"})]
         return []

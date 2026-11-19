@@ -14,13 +14,14 @@ from typing import Any, ClassVar, Literal
 
 from converter_sdk import (
     Adapter,
+    AdapterError,
     JobContext,
     OutputFile,
     ResourceEstimate,
     ValidationReport,
     run_main,
 )
-from converter_sdk.convert import issue
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     MUXER,
     audio_streams,
@@ -29,11 +30,11 @@ from converter_sdk.media import (
     frame_rate,
     has_extra_streams,
     probe,
+    validate_media,
     video_encode_args,
     video_streams,
 )
 
-MB = 1024 * 1024
 COPY_VIDEO = {
     "mp4": {"h264", "hevc", "av1"},
     "mov": {"h264", "hevc", "prores"},
@@ -75,9 +76,18 @@ def can_copy(infos: list[dict[str, Any]], to: str) -> bool:
 
 
 def concat_list(paths: list[Path]) -> str:
-    """An FFmpeg concat list. Paths are staged inputs (``in/0.mp4``), so
-    they need no escaping beyond quotes."""
-    return "".join(f"file '{p.resolve().as_posix()}'\n" for p in paths)
+    """An FFmpeg concat list. A path sits in single quotes, where only the
+    quote itself needs care: ``'`` becomes ``'\\''`` (close, escaped quote,
+    reopen). The job's folder is outside our control, so its name can hold
+    one; unescaped, the rest of the name would be read as more list syntax.
+    A line break can't be quoted at all."""
+    lines = []
+    for p in paths:
+        text = p.resolve().as_posix()
+        if "\n" in text or "\r" in text:
+            raise AdapterError("E_INTERNAL", {"reason": "pathLineBreak"}, retryable=False)
+        lines.append("file '" + text.replace("'", "'\\''") + "'\n")
+    return "".join(lines)
 
 
 def reencode_graph(infos: list[dict[str, Any]], with_sound: bool) -> tuple[str, int, int, float]:
@@ -114,16 +124,7 @@ class VideoJoinAdapter(Adapter):
     fidelity: ClassVar[Literal["E", "H", "R", "L"]] = "L"
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
-        durations, pixels = [], []
-        for p in ctx.inputs:
-            ctx.check_cancelled()
-            info = probe(ctx, p)
-            video = video_streams(info)
-            if not video:
-                return ValidationReport(errors=[issue("inputs", "noVideo")])
-            durations.append(duration_s(info))
-            pixels.append(int(video[0].get("width") or 0) * int(video[0].get("height") or 0))
-        return ValidationReport(metadata={"durations": durations, "pixels": pixels})
+        return validate_media(ctx, "video")
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]

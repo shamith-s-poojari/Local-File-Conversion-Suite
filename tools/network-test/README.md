@@ -4,7 +4,7 @@ Proves that processing makes no network connections ([spec 14.5](../../docs/spec
 
 | Layer | Where | Needs | What it proves |
 |---|---|---|---|
-| Canary and socket sampler | `crates/app-core/tests/network.rs`, part of `cargo test` | Nothing special | No worker, runner or verifier holds an internet socket, and nothing contacts the canary, across every tool and read path |
+| Canary and socket sampler | `crates/app-core/tests/network.rs`, part of `cargo test` (macOS and Linux; the sampler reads `lsof` and the process tree, so on Windows the test prints "skipped" and passes) | Nothing special | No worker, runner or verifier holds an internet socket, and nothing contacts the canary, across every tool and read path |
 | Packet capture | `capture.sh`, nightly | Root | No packet leaves the machine from our processes. With `--app`, the idle app's WebView traffic matches the allowlist |
 
 ## The canary corpus
@@ -47,8 +47,8 @@ sudo tools/network-test/capture.sh --app "target/debug/bundle/macos/Local File C
 |---|---|
 | macOS | `tcpdump -i pktap -k`: the kernel tags each packet with its process |
 | Linux | `strace -f` on the test's process tree records every `connect` and `sendto`, with tcpdump as a record |
-| Windows | Not wired up yet (`pktmon`, needs the T09 Windows machine) |
+| Windows | Not wired up (`pktmon`, needs a Windows machine) |
 
 `webview-allowlist.txt` is empty until spike S4 measures and discloses WebView runtime traffic. Until then any WebView destination fails `--app`.
 
-**Status:** `network.rs` passes on macOS (25 worker processes watched, no sockets, no canary hits). `capture.sh` has not been run yet: it needs root, and its first run is the nightly job.
+**Status:** `network.rs` passes on macOS and Linux (25 to 28 worker processes watched, no sockets, no canary hits). `capture.sh` runs in the nightly job: it has passed on macOS. On Linux it failed on 2026-11-15 to 17 (`strace` couldn't write its trace into the root-owned temp folder); the script now hands the folder to the test user and fails if the trace holds no `connect()` call at all, and has not run since. Nothing runs on Windows.

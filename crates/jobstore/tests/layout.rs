@@ -50,6 +50,7 @@ impl Fixture {
                 extension: "pdf".into(),
                 size_bytes: name.len() as u64,
                 source: *source,
+                sha256: None,
             });
         }
         self.store.transition(&id, JobState::Verifying).unwrap();

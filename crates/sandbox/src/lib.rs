@@ -23,16 +23,19 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use converter_scheduler::{LaunchSpec, Launcher};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(unix, test)))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod probe;
 pub mod runner;
+#[cfg(any(target_os = "linux", all(unix, test)))]
+mod seccomp;
 #[cfg(windows)]
 mod windows;
 
@@ -46,6 +49,11 @@ pub const DEFAULT_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 pub struct SandboxConfig {
     /// The interpreter to run, e.g. `.venv/bin/python`.
     pub python: PathBuf,
+    /// Symlinks met on the way from `python` to the real interpreter, as
+    /// (link, target). Bubblewrap mounts only resolved folders, so it
+    /// recreates these; uv's `.venv/bin/python` points through a
+    /// `cpython-3.13-…` link to `cpython-3.13.x-…`.
+    pub python_links: Vec<(PathBuf, PathBuf)>,
     /// Directories the worker may read: interpreter, libraries, site-packages,
     /// and every `sys.path` entry (editable installs live outside site-packages).
     pub runtime_read: Vec<PathBuf>,
@@ -127,11 +135,27 @@ impl SandboxConfig {
     /// Asks `python` where its runtime lives. Runs our own interpreter,
     /// unsandboxed, with no input: this is configuration, not a job.
     pub fn discover(python: &Path, adapters_dir: &Path, runner: &Path) -> Result<Self, String> {
-        let out = Command::new(python)
-            .args([
-                "-I",
-                "-c",
-                "import os, sys, sysconfig\n\
+        Self::discover_within(python, adapters_dir, runner, DISCOVER_TIMEOUT)
+    }
+
+    fn discover_within(
+        python: &Path,
+        adapters_dir: &Path,
+        runner: &Path,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        // The folder resolved, the file name kept: a virtualenv is found from
+        // the path the interpreter is started by, and `crates/x/../..` names
+        // folders a sandbox doesn't have.
+        let python = &match (python.parent(), python.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => canonical(dir)?.join(name),
+            _ => python.to_path_buf(),
+        };
+        let mut cmd = Command::new(python);
+        cmd.args([
+            "-I",
+            "-c",
+            "import os, sys, sysconfig\n\
                  paths = {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix,\n\
                           os.path.dirname(os.path.realpath(sys.executable)),\n\
                           sysconfig.get_paths()['purelib'], sysconfig.get_paths()['platlib']}\n\
@@ -139,15 +163,11 @@ impl SandboxConfig {
                  print(os.path.realpath(sys.executable))\n\
                  print(os.path.realpath(sys.base_prefix))\n\
                  for p in sorted(paths): print(os.path.realpath(p))",
-            ])
-            .env_clear()
-            .envs(base_env())
-            .output()
-            .map_err(|e| format!("can't run the worker interpreter: {e}"))?;
-        if !out.status.success() {
-            return Err("the worker interpreter failed to describe itself".into());
-        }
-        let text = String::from_utf8(out.stdout).map_err(|_| "non-UTF-8 runtime path")?;
+        ])
+        .env_clear()
+        .envs(base_env());
+        let stdout = run_bounded(cmd, timeout)?;
+        let text = String::from_utf8(stdout).map_err(|_| "non-UTF-8 runtime path")?;
         let mut lines = text.lines().map(PathBuf::from);
         let executable = lines.next().ok_or("no executable path")?;
         let base = lines.next().ok_or("no base prefix")?;
@@ -156,7 +176,7 @@ impl SandboxConfig {
         if let Some(venv) = python.parent().and_then(Path::parent) {
             runtime_read.push(canonical(venv)?);
         }
-        let exec_root = installation_root(&executable, &base);
+        let exec_root = installation_root(&executable, &base)?;
         runtime_read.push(exec_root.clone());
         runtime_read.sort();
         runtime_read.dedup();
@@ -167,6 +187,7 @@ impl SandboxConfig {
                 .is_some_and(|v| v.join("pyvenv.cfg").is_file());
         Ok(SandboxConfig {
             python: python.to_path_buf(),
+            python_links: symlink_chain(python),
             runtime_read,
             exec_roots: vec![exec_root],
             adapters_dir: canonical(adapters_dir)?,
@@ -221,21 +242,233 @@ impl SandboxConfig {
     }
 }
 
-/// The interpreter's installation root: for a framework build the whole
-/// versioned install (the `python3.13` launcher re-executes `Python.app`
-/// inside it), otherwise the base prefix.
-fn installation_root(executable: &Path, base: &Path) -> PathBuf {
-    // e.g. /opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/…
-    let mut root = base.to_path_buf();
-    for ancestor in executable.ancestors() {
-        if ancestor.file_name().is_some_and(|n| n == "Frameworks") {
-            if let Some(parent) = ancestor.parent() {
-                root = parent.to_path_buf();
+/// How long the interpreter gets to describe itself. Startup and the
+/// self-test wait on it; a hung interpreter must fail them, not freeze the app.
+const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Runs `cmd` with no input and returns its stdout, or an error if it fails
+/// or outlives `timeout` (then it is killed). Stdout is drained on a thread
+/// so a large answer can't fill the pipe and look like a hang.
+fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("can't run the worker interpreter: {e}"))?;
+    let mut pipe = child.stdout.take().ok_or("no output pipe")?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the worker interpreter did not answer in time".into());
             }
-            break;
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("can't run the worker interpreter: {e}")),
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err("the worker interpreter failed to describe itself".into());
+    }
+    Ok(out)
+}
+
+/// The interpreter's installation root: for a Homebrew framework build the
+/// whole keg (the `python3.13` launcher re-executes `Python.app` inside
+/// it), for any other framework build its `Python.framework/Versions/X`,
+/// otherwise the base prefix. Never a folder that is, or contains, the home
+/// folder or `/`: a python.org install lives under `/Library/Frameworks`, and
+/// granting `/Library` would hand the worker every installed framework,
+/// font and preference file.
+fn installation_root(executable: &Path, base: &Path) -> Result<PathBuf, String> {
+    installation_root_in(executable, base, home_dir().as_deref())
+}
+
+fn installation_root_in(
+    executable: &Path,
+    base: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf, String> {
+    // e.g. /opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/…
+    let keg = executable.ancestors().find(|a| {
+        a.parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "Cellar")
+    });
+    // e.g. /Library/Frameworks/Python.framework/Versions/3.13
+    let framework = executable.ancestors().find(|a| {
+        a.parent().is_some_and(|v| {
+            v.file_name().is_some_and(|n| n == "Versions")
+                && v.parent()
+                    .and_then(Path::extension)
+                    .is_some_and(|e| e == "framework")
+        })
+    });
+    for candidate in [keg, framework, Some(base)].into_iter().flatten() {
+        if !too_broad(candidate, home) {
+            return Ok(candidate.to_path_buf());
         }
     }
-    root
+    Err("the interpreter's install folder is too broad to share with workers".into())
+}
+
+/// The current user's home or profile folder, resolved.
+pub fn home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())?;
+    Some(home.canonicalize().map(|c| plain_path(&c)).unwrap_or(home))
+}
+
+/// Folders at the top of a drive that hold other people's or the system's
+/// files. Matched without regard to case, for Windows.
+const BROAD_TOP_LEVEL: &[&str] = &[
+    "applications",
+    "bin",
+    "dev",
+    "etc",
+    "home",
+    "lib",
+    "library",
+    "opt",
+    "private",
+    "proc",
+    "programdata",
+    "program files",
+    "program files (x86)",
+    "root",
+    "sbin",
+    "system",
+    "tmp",
+    "users",
+    "var",
+    "volumes",
+    "windows",
+];
+
+/// Whether `outer` is `inner` or one of its parents (case-insensitive on
+/// Windows, where `Path::starts_with` is not).
+fn encloses(outer: &Path, inner: &Path) -> bool {
+    if !cfg!(windows) {
+        return inner.starts_with(outer);
+    }
+    let mut inner = inner.components();
+    outer.components().all(|o| {
+        inner
+            .next()
+            .is_some_and(|i| i.as_os_str().eq_ignore_ascii_case(o.as_os_str()))
+    })
+}
+
+/// Whether granting `path` would expose far more than an install: a relative
+/// path, a drive root or `/`, the home folder or any folder holding it, or a
+/// system folder such as `/Library`, `/Users` or `C:\Windows`. Engine and
+/// interpreter installs are shared with workers read-only; these must never
+/// be, however the binary was found (`~/bin/ffmpeg` is in `PATH` for many
+/// people).
+pub fn too_broad(path: &Path, home: Option<&Path>) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    let names: Vec<_> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if names.is_empty() || home.is_some_and(|h| encloses(path, h)) {
+        return true;
+    }
+    names.len() == 1
+        && BROAD_TOP_LEVEL
+            .iter()
+            .any(|b| names[0].eq_ignore_ascii_case(b))
+}
+
+/// Fails if a runtime folder is one `too_broad` refuses. The interpreter's own
+/// root already passes that check; the rest come from `sys.path` and the
+/// virtualenv, and a stray entry such as `/` or the home folder would be
+/// mounted read-only into every worker (SEC-10).
+fn refuse_broad_runtime(config: &SandboxConfig, home: Option<&Path>) -> Result<(), String> {
+    if config.runtime_read.iter().any(|p| too_broad(p, home)) {
+        return Err("a runtime folder is too broad to share with workers".into());
+    }
+    Ok(())
+}
+
+/// Whether the current user owns the file or folder (`lstat`: a symlink is
+/// judged by itself). Windows has no owner uid to compare here, so the check
+/// holds there; its development checkouts sit in the user's own profile.
+pub fn owned_by_current_user(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        meta.uid() == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
+}
+
+/// The symlinks met while resolving `path`, in order, as (link, target)
+/// with absolute targets. Gives up quietly on a loop or an unreadable link:
+/// the sandbox then reports the start failure as before.
+fn symlink_chain(path: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut links = Vec::new();
+    let mut pending: Vec<std::ffi::OsString> = path
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    let mut at = PathBuf::new();
+    while let Some(part) = pending.pop() {
+        if part == ".." {
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let Ok(target) = std::fs::read_link(&next) else {
+                    return links;
+                };
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    at.join(target)
+                };
+                links.push((next, target.clone()));
+                if links.len() > 40 {
+                    return Vec::new();
+                }
+                // Resolve the target from the root again.
+                pending.extend(
+                    target
+                        .components()
+                        .rev()
+                        .map(|c| c.as_os_str().to_os_string()),
+                );
+                at = PathBuf::new();
+            }
+            _ => at = next,
+        }
+    }
+    links
 }
 
 fn canonical(p: &Path) -> Result<PathBuf, String> {
@@ -268,6 +501,8 @@ pub fn plain_path(p: &Path) -> PathBuf {
 /// What the runner executes inside the OS sandbox, before platform wrapping.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(crate) struct Inner<'a> {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub job_id: &'a str,
     pub config: &'a SandboxConfig,
     pub job_dir: PathBuf,
     pub argv: Vec<OsString>,
@@ -326,7 +561,9 @@ impl SandboxLauncher {
         grant: Option<&Grant>,
     ) -> Result<Command, String> {
         let job_dir = canonical(job_dir)?;
+        refuse_broad_runtime(&self.config, home_dir().as_deref())?;
         let inner = Inner {
+            job_id,
             config: &self.config,
             job_dir: job_dir.clone(),
             argv,
@@ -341,12 +578,15 @@ impl SandboxLauncher {
             .arg("--job-id")
             .arg(job_id)
             .arg("--max-processes")
-            .arg(processes.to_string())
-            .arg("--")
-            .args(sandboxed);
+            .arg(processes.to_string());
+        #[cfg(target_os = "linux")]
+        if seccomp::host_arch().is_some() {
+            cmd.arg("--seccomp-fd").arg(linux::SECCOMP_FD.to_string());
+        }
+        cmd.arg("--").args(sandboxed);
         cmd.current_dir(&job_dir);
         cmd.env_clear();
-        for (key, value) in worker_env(&job_dir) {
+        for (key, value) in worker_env(job_id, &job_dir) {
             cmd.env(key, value);
         }
         for (key, value) in grant.map(|g| g.env.as_slice()).unwrap_or_default() {
@@ -387,9 +627,14 @@ pub fn base_env() -> Vec<(&'static str, OsString)> {
 }
 
 /// The scrubbed, rebuilt environment (spec 9.2).
-pub(crate) fn worker_env(job_dir: &Path) -> Vec<(&'static str, OsString)> {
+///
+/// `LFCS_JOB` carries the job's id (the one the scheduler launched it with,
+/// also `--job-id`). A worker that double-forks a daemon keeps it, so the
+/// scheduler finds strays after a job by scanning for this tag (SEC-2).
+pub(crate) fn worker_env(job_id: &str, job_dir: &Path) -> Vec<(&'static str, OsString)> {
     let work = job_dir.join("work").into_os_string();
     let mut env = vec![
+        ("LFCS_JOB", OsString::from(job_id)),
         ("LANG", OsString::from("C.UTF-8")),
         ("LC_ALL", OsString::from("C.UTF-8")),
         ("TMPDIR", work.clone()),
@@ -448,6 +693,8 @@ fn platform_command(_: &Inner<'_>) -> Result<Vec<OsString>, String> {
 mod tests {
     use super::*;
 
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
     #[test]
     fn framework_installs_use_the_whole_versioned_root() {
         let exe = Path::new(
@@ -456,19 +703,137 @@ mod tests {
         let base = Path::new(
             "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13",
         );
+        let home = Path::new("/Users/me");
         assert_eq!(
-            installation_root(exe, base),
+            installation_root_in(exe, base, Some(home)).unwrap(),
             Path::new("/opt/homebrew/Cellar/python@3.13/3.13.4")
         );
         assert_eq!(
-            installation_root(Path::new("/usr/bin/python3.12"), Path::new("/usr")),
+            installation_root_in(
+                Path::new("/usr/bin/python3.12"),
+                Path::new("/usr"),
+                Some(home)
+            )
+            .unwrap(),
             Path::new("/usr")
         );
+    }
+
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn python_org_framework_grants_its_version_not_library() {
+        let home = Path::new("/Users/me");
+        let base = Path::new("/Library/Frameworks/Python.framework/Versions/3.13");
+        let exe = base.join("bin/python3.13");
+        assert_eq!(installation_root_in(&exe, base, Some(home)).unwrap(), base);
+    }
+
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn an_install_that_is_or_holds_home_is_refused() {
+        let home = Path::new("/Users/me");
+        // A prefix that is the home folder, one that contains it, and `/`.
+        for base in ["/Users/me", "/Users", "/"] {
+            let base = Path::new(base);
+            assert!(
+                installation_root_in(&base.join("bin/python3"), base, Some(home)).is_err(),
+                "{base:?}"
+            );
+        }
+        // Inside home is fine (uv-managed interpreters live there).
+        let uv = Path::new("/Users/me/.local/share/uv/python/cpython-3.13");
+        assert_eq!(
+            installation_root_in(&uv.join("bin/python3"), uv, Some(home)).unwrap(),
+            uv
+        );
+    }
+
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn too_broad_names_the_dangerous_roots() {
+        let home = Some(Path::new("/Users/me"));
+        for p in ["/", "/Users", "/Users/me", "/Library", "/home", "rel/dir"] {
+            assert!(too_broad(Path::new(p), home), "{p}");
+        }
+        for p in [
+            "/usr",
+            "/opt/homebrew/Cellar",
+            "/Users/me/bin",
+            "/Applications/LibreOffice.app",
+        ] {
+            assert!(!too_broad(Path::new(p), home), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_worker_environment_is_tagged_with_the_job() {
+        let env = worker_env("j_abc123", Path::new("/data/jobs/j_abc123"));
+        let tag = env
+            .iter()
+            .find(|(k, _)| *k == "LFCS_JOB")
+            .expect("LFCS_JOB");
+        assert_eq!(tag.1, "j_abc123");
+    }
+
+    // Unix layouts: "/usr" isn't an absolute path on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn broad_runtime_folders_are_refused() {
+        let home = Some(Path::new("/Users/me"));
+        let config = |read: &[&str]| SandboxConfig {
+            python_links: Vec::new(),
+            python: "/py/bin/python".into(),
+            runtime_read: read.iter().map(PathBuf::from).collect(),
+            exec_roots: vec![],
+            adapters_dir: "/app/adapters".into(),
+            runner: "/x".into(),
+            runner_args: vec![],
+            interpreter_processes: 0,
+            grants: BTreeMap::new(),
+        };
+        assert!(refuse_broad_runtime(&config(&["/opt/py", "/Users/me/venv"]), home).is_ok());
+        for bad in ["/", "/Users/me", "/Users", "/Library", "rel/dir"] {
+            let c = config(&["/opt/py", bad]);
+            assert!(refuse_broad_runtime(&c, home).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_is_the_current_users() {
+        let t = tempfile::tempdir().unwrap();
+        let meta = std::fs::metadata(t.path()).unwrap();
+        assert!(owned_by_current_user(&meta));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_interpreter_fails_discovery_instead_of_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let fake = t.path().join("python");
+        // exec: the sleep is the child, so killing it closes the pipe.
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        let e = SandboxConfig::discover_within(
+            &fake,
+            t.path(),
+            Path::new("/x"),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(e.contains("did not answer in time"), "{e}");
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
     fn adapter_ids_cannot_escape() {
         let config = SandboxConfig {
+            python_links: Vec::new(),
             python: "/x".into(),
             runtime_read: vec![],
             exec_roots: vec![],

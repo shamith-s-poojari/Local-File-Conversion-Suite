@@ -252,3 +252,21 @@ def _png() -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (200, 40, 40)).save(buf, "PNG")
     return buf.getvalue()
+
+
+def test_epub_to_html_output_is_disarmed(tmp_path: Path) -> None:
+    """P4: markup in a book is untrusted; the page that comes out has no
+    handlers, no script URLs and no loads from outside the file."""
+    book = make_epub(
+        tmp_path / "hostile.epub",
+        [
+            "<p onclick='steal()'>Kept text</p>"
+            "<a href='javascript:steal()'>link</a>"
+            "<img src='https://tracker.example/p.gif'/>"
+            "<iframe src='https://evil.example/'></iframe>"
+        ],
+    )
+    html = convert(tmp_path / "h", book, "html").outputs[0].read_text("utf-8").lower()
+    assert "kept text" in html
+    for bad in ("onclick", "javascript:", "tracker.example", "<iframe", "<script"):
+        assert bad not in html, bad

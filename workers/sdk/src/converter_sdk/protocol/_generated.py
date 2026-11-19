@@ -96,6 +96,9 @@ class WarningCode(
             "EXTERNAL_LINKS_REMOVED",
             "DETAILS_REMOVED",
             "TRACKED_CHANGES_KEPT",
+            "ENCRYPTION_REMOVED",
+            "WARNINGS_TRUNCATED",
+            "PART_FAILED",
         ]
     ]
 ):
@@ -136,6 +139,9 @@ class WarningCode(
             "EXTERNAL_LINKS_REMOVED",
             "DETAILS_REMOVED",
             "TRACKED_CHANGES_KEPT",
+            "ENCRYPTION_REMOVED",
+            "WARNINGS_TRUNCATED",
+            "PART_FAILED",
         ],
         Field(
             description="Warning codes in the catalog (spec section 13.1). Workers may send other codes; the core shows those as a generic warning, so the wire format accepts any WarningCodeString."

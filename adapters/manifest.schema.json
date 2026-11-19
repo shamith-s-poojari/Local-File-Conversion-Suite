@@ -12,7 +12,10 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
     },
-    "kind": { "enum": ["operation", "conversion"] },
+    "kind": {
+      "description": "A \"check\" has no UI entry and runs for the core only (ADR 0006); only output-check is one. It declares inputs and outputs like an operation.",
+      "enum": ["operation", "conversion", "check"]
+    },
     "title": { "type": "string", "minLength": 1, "maxLength": 80 },
     "devOnly": {
       "description": "Development and test adapters. Left out of the registry unless the generator runs with --include-dev, so they never ship.",
@@ -68,6 +71,10 @@
         }
       }
     },
+    "recheck": {
+      "description": "The independent check of this operation's output that the core runs in a separate job before the job may succeed (ADR 0006). The adapter folder's verify.py is the verifier.",
+      "enum": ["redaction", "activeContent"]
+    },
     "fidelityNotes": {
       "description": "Every warning code the adapter may emit. Each must be in the catalog (spec section 13.1).",
       "type": "array",
@@ -113,7 +120,7 @@
   },
   "oneOf": [
     {
-      "properties": { "kind": { "const": "operation" } },
+      "properties": { "kind": { "enum": ["operation", "check"] } },
       "required": ["inputs", "outputs", "fidelity"],
       "not": { "required": ["edges"] }
     },

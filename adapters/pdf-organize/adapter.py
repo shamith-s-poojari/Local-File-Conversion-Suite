@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import JobContext, OutputFile, run_main
+from converter_sdk.adapter import issue
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
@@ -14,7 +15,6 @@ from converter_sdk.pdf import (
     field_names,
     flatten_forms,
     is_tagged,
-    param_issue,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue
@@ -31,19 +31,19 @@ class PdfOrganizeAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         total = inputs[0].pages
         pages = params.get("pages")
         if not isinstance(pages, list) or not pages:
-            return [param_issue("pages", "empty")]
+            return [issue("pages", "empty")]
         if len(pages) > self.max_pages * 10:
             return [ValidationIssue(code="E_LIMIT_EXCEEDED", detail={"limit": "pages"})]
         for n, entry in enumerate(pages):
             source = entry.get("source") if isinstance(entry, dict) else None
             if not isinstance(source, int) or not 1 <= source <= total:
-                return [param_issue("pages", "outOfBounds", index=n, pages=total)]
+                return [issue("pages", "outOfBounds", index=n, pages=total)]
             if entry.get("rotate", 0) not in ROTATIONS:
-                return [param_issue("pages", "rotation", index=n)]
+                return [issue("pages", "rotation", index=n)]
         return []
 
     def execute_conversion(self, ctx: JobContext, params: dict[str, Any]) -> list[OutputFile]:

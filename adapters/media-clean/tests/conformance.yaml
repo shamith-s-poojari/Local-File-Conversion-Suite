@@ -12,5 +12,7 @@ negative:
   inputs: [audio-wav]
   bad: [corrupt-mp3, truncated-mp3, corrupt-mp4, truncated-mp4]
 cancel:
-  inputs: [video-long-mp4]
+  # Copying streams is quick: one video can finish on a fast machine before
+  # the cancel arrives, so give it many (the same file, staged 30 times).
+  inputs: [video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4, video-long-mp4]
   params: {}

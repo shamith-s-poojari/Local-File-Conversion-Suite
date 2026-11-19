@@ -14,6 +14,7 @@ import base64
 import io
 import posixpath
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import unquote, urlsplit
@@ -26,7 +27,9 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
+from converter_sdk.active import disarm_markup
 from converter_sdk.convert import ConversionAdapter, Tier, pdf_bytes_to_output, source_format
+from converter_sdk.limits import MB
 from converter_sdk.markup import (
     PAGE_CSS,
     check_zip,
@@ -41,7 +44,6 @@ from converter_sdk.markup import (
     text_to_markdown,
 )
 
-MB = 1024 * 1024
 EDGES: dict[tuple[str, str], Tier] = {
     ("md", "html"): "H", ("md", "pdf"): "H", ("md", "txt"): "L",
     ("txt", "html"): "H", ("txt", "md"): "H", ("txt", "pdf"): "H",
@@ -116,13 +118,21 @@ class MarkupConvertAdapter(ConversionAdapter):
                     book.close()
                     pages = self._epub_pdf(ctx, path, out, size)
                     return OutputFile(out, pages=pages)
-                body, dropped = book.body(embed_images=to == "html")
+                body, dropped = book.body(embed_images=to == "html", check=ctx.check_cancelled)
             finally:
                 book.close()
             if dropped:
                 self._warn(ctx, "IMAGES_DROPPED")
             if to == "html":
-                out.write_text(html_document(body, title), "utf-8", newline="\n")
+                # A book is untrusted markup that may carry handlers, javascript:
+                # links or remote loads that sanitising the body let through; the
+                # page is only handed over after the shared disarm has been over it.
+                raw = ctx.temp_path(".html")
+                raw.write_text(html_document(body, title), "utf-8", newline="\n")
+                try:
+                    disarm_markup(raw, out, "html")
+                finally:
+                    raw.unlink(missing_ok=True)
             elif to == "md":
                 md, _ = html_to_markdown(f"<html><body>{body}</body></html>")
                 out.write_text(md, "utf-8", newline="\n")
@@ -321,14 +331,18 @@ class Epub:
         )
         return etree.fromstring(self.zip.read(name), parser=parser)
 
-    def body(self, embed_images: bool) -> tuple[str, bool]:
-        """Every chapter's body as one HTML fragment, and whether images were left out."""
+    def body(self, embed_images: bool, check: Callable[[], None] | None = None) -> tuple[str, bool]:
+        """Every chapter's body as one HTML fragment, and whether images were left out.
+        ``check`` runs before each chapter (pass ``ctx.check_cancelled``): a book can
+        have thousands."""
         from lxml import html as lxml_html  # noqa: PLC0415
 
         parts = []
         dropped = False
         budget = EPUB_MAX_IMAGES
         for chapter in self.spine:
+            if check is not None:
+                check()
             tree = lxml_html.document_fromstring(
                 self.zip.read(chapter) or b"<p></p>", parser=_parser()
             )

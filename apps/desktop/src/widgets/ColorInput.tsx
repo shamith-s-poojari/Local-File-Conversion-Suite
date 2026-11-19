@@ -1,9 +1,10 @@
+import { describedBy } from "./describe";
 import type { WidgetProps } from "./types";
 
-const HEX = /^#[0-9A-Fa-f]{6}$/;
+export const HEX = /^#[0-9A-Fa-f]{6}$/;
 
 /** A colour as `#RRGGBB`, with the system picker and a text field (`x-ui: color`). */
-export function ColorInput({ id, label, schema, value, onChange }: WidgetProps<string>) {
+export function ColorInput({ id, label, schema, value, onChange, invalid, errorId }: WidgetProps<string>) {
   const current = typeof value === "string" ? value : typeof schema.default === "string" ? schema.default : "#000000";
   return (
     <div className="field">
@@ -13,6 +14,8 @@ export function ColorInput({ id, label, schema, value, onChange }: WidgetProps<s
           id={id}
           type="color"
           className="swatch"
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy(schema.description && `${id}-hint`, invalid && errorId)}
           value={HEX.test(current) ? current : "#000000"}
           onChange={(e) => onChange(e.target.value.toUpperCase())}
         />
@@ -21,10 +24,16 @@ export function ColorInput({ id, label, schema, value, onChange }: WidgetProps<s
           className="mono hex"
           value={current}
           maxLength={7}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy(schema.description && `${id}-hint`, invalid && errorId)}
           onChange={(e) => onChange(e.target.value)}
         />
       </div>
-      {schema.description && <p className="hint">{schema.description}</p>}
+      {schema.description && (
+        <p id={`${id}-hint`} className="hint">
+          {schema.description}
+        </p>
+      )}
     </div>
   );
 }

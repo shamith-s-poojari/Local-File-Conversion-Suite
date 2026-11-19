@@ -31,6 +31,7 @@ from typing import Any, ClassVar
 from converter_sdk import AdapterError, JobContext, OutputFile, ResourceEstimate, run_main
 from converter_sdk.adapter import ValidationReport
 from converter_sdk.convert import ConversionAdapter, Tier, source_format
+from converter_sdk.limits import MB
 from converter_sdk.markup import escape_markdown, html_document, read_text
 from converter_sdk.tables import (
     DELIMITERS,
@@ -44,7 +45,6 @@ from converter_sdk.tables import (
     write_xlsx,
 )
 
-MB = 1024 * 1024
 EDGES: dict[tuple[str, str], Tier] = {
     ("csv", "json"): "H", ("csv", "yaml"): "H", ("csv", "xlsx"): "H",
     ("csv", "md"): "H", ("csv", "html"): "H",

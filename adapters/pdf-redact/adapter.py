@@ -16,7 +16,7 @@ Pipeline:
 3. Document-level content is stripped (spec 13.8 "Strip step").
 4. pikepdf does a full rewrite: no incremental save, unreferenced objects
    dropped, one cross-reference section.
-5. ``verify.py`` runs V1 to V9 in a new process.
+5. ``verify.py`` runs V1 to V10 in a new process.
 
 This file and ``verify.py`` are each self-contained: workers run with
 ``python -I``, so neither can import the other.
@@ -24,11 +24,6 @@ This file and ``verify.py`` are each self-contained: workers run with
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-import threading
-import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,19 +31,19 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import AdapterError, JobContext, OutputFile, PageWords, run_main
-from converter_sdk.engines import helper_env
+from converter_sdk.adapter import issue
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     is_tagged,
-    param_issue,
     remove_hidden_layers,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue, WordBox
+from converter_sdk.verify import run_verifier as run_sdk_verifier
 from pikepdf import Name
 
-MB = 1024 * 1024
 VERIFY = Path(__file__).resolve().with_name("verify.py")
 VERIFY_TIMEOUT_S = 600
 RASTER_DPI = 200
@@ -78,6 +73,18 @@ def normalize(text: str) -> str:
     text = _fold(text).replace("­", "")
     text = text.replace("-\n", "")
     return " ".join(text.split())
+
+
+def hits(text: str, needles: list[str]) -> bool:
+    """Whether ``text`` contains any needle, with whitespace collapsed and, as
+    in ``find_terms``, with whitespace removed (text split across operators)."""
+    spaced = normalize(text)
+    tight = spaced.replace(" ", "")
+    for needle in needles:
+        n = normalize(needle)
+        if n and (n in spaced or n.replace(" ", "") in tight):
+            return True
+    return False
 
 
 @dataclass
@@ -281,8 +288,9 @@ def apply(doc: Any, plan: Plan, ctx: JobContext) -> None:
         )
 
 
-def strip_with_mupdf(doc: Any, terms: list[str]) -> None:
-    """Document-level content that MuPDF handles best."""
+def strip_with_mupdf(doc: Any, needles: list[str], ctx: JobContext) -> None:
+    """Document-level content that MuPDF handles best. ``needles`` are the search
+    terms and the text that was under a box."""
     doc.scrub(
         attached_files=True,
         clean_pages=True,
@@ -298,15 +306,15 @@ def strip_with_mupdf(doc: Any, terms: list[str]) -> None:
         xml_metadata=True,
     )
     for page in doc:
+        ctx.check_cancelled()
         for widget in list(page.widgets()):
             page.delete_widget(widget)
         for annot in list(page.annots()):
             page.delete_annot(annot)
-    needles = [normalize(t) for t in terms]
     toc = doc.get_toc(simple=True)
     kept: list[list[Any]] = []
     for level, title, target in toc:
-        if any(n and n in normalize(title) for n in needles):
+        if hits(title, needles):
             continue
         level = min(level, (kept[-1][0] + 1) if kept else 1)
         kept.append([level, title, target])
@@ -314,10 +322,112 @@ def strip_with_mupdf(doc: Any, terms: list[str]) -> None:
         doc.set_toc(kept)
 
 
-def strip_with_pikepdf(pdf: pikepdf.Pdf) -> None:
-    """Everything else in the strip step, on the structure itself."""
+_TEXT_KEYS = ("/ActualText", "/Alt", "/E", "/TU")
+"""Keys whose string replaces or describes page text (marked content, structure elements)."""
+_NO_FOLLOW_TYPES = {"/Page", "/Pages", "/Catalog"}
+
+
+def _string(obj: Any) -> str | None:
+    if not isinstance(obj, pikepdf.String):
+        return None
+    try:
+        return str(obj)
+    except (UnicodeDecodeError, ValueError):
+        return bytes(obj).decode("latin-1")
+
+
+def _direct_dicts(obj: Any) -> Any:
+    """``obj`` and every dictionary directly inside it (indirect children are
+    visited as objects of their own by the caller)."""
+    stack = [obj]
+    budget = 100_000
+    while stack and budget > 0:
+        budget -= 1
+        node = stack.pop()
+        if isinstance(node, pikepdf.Stream):
+            node = node.stream_dict
+        if isinstance(node, pikepdf.Dictionary):
+            yield node
+            children = [node[k] for k in list(node.keys())]
+        elif isinstance(node, pikepdf.Array):
+            children = list(node)
+        else:
+            continue
+        stack.extend(c for c in children if not getattr(c, "is_indirect", False))
+
+
+def _reachable(start: Any, limit: int = 200_000) -> Any:
+    """Every dictionary reachable from ``start`` without entering a page, for
+    outlines, labels and threads, whose entries point at pages."""
+    seen: set[tuple[int, int]] = set()
+    stack = [start]
+    while stack and limit > 0:
+        limit -= 1
+        node = stack.pop()
+        if getattr(node, "is_indirect", False):
+            if node.objgen in seen:
+                continue
+            seen.add(node.objgen)
+        if isinstance(node, pikepdf.Dictionary):
+            if str(node.get(Name.Type, "")) in _NO_FOLLOW_TYPES:
+                continue
+            yield node
+            stack.extend(node[k] for k in list(node.keys()))
+        elif isinstance(node, pikepdf.Array):
+            stack.extend(list(node))
+
+
+def _drop_matching_keys(node: Any, keys: tuple[str, ...], needles: list[str]) -> None:
+    for key in keys:
+        if key in node:
+            text = _string(node[key])
+            if text is not None and hits(text, needles):
+                del node[key]
+
+
+def _strip_marked_content(pdf: pikepdf.Pdf, owner: Any, needles: list[str]) -> None:
+    """Remove ``ActualText``, ``Alt`` and friends that repeat redacted text from
+    inline property lists (``/Span <<...>> BDC``) in one content stream."""
+    try:
+        ops = list(pikepdf.parse_content_stream(owner))
+    except pikepdf.PdfError:
+        return  # the verifier decides whether anything was left
+    changed = False
+    for operands, operator in ops:
+        if (
+            str(operator) in ("BDC", "DP")
+            and operands
+            and isinstance(operands[-1], pikepdf.Dictionary)
+        ):
+            before = len(operands[-1].keys())
+            _drop_matching_keys(operands[-1], _TEXT_KEYS, needles)
+            changed |= len(operands[-1].keys()) != before
+    if changed:
+        data = pikepdf.unparse_content_stream(ops)
+        if isinstance(owner, pikepdf.Page):
+            owner.obj.Contents = pdf.make_stream(data)
+        else:
+            owner.write(data)
+
+
+def strip_with_pikepdf(pdf: pikepdf.Pdf, needles: list[str], ctx: JobContext) -> None:
+    """Everything else in the strip step, on the structure itself. ``needles``
+    are the search terms and the text that was under a box: wherever one of
+    them is repeated outside the page content, that copy goes too."""
     root = pdf.Root
-    for key in (Name.Metadata, Name.AcroForm, Name.OpenAction, Name.AA, Name.PieceInfo):
+    # The structure tree, article threads and their reading order carry text
+    # (ActualText, Alt) and positions of what was removed; nothing in them can
+    # be kept selectively, so they go (TAGS_DROPPED tells the user).
+    for key in (
+        Name.Metadata,
+        Name.AcroForm,
+        Name.OpenAction,
+        Name.AA,
+        Name.PieceInfo,
+        Name.StructTreeRoot,
+        Name.MarkInfo,
+        Name.Threads,
+    ):
         if key in root:
             del root[key]
     names = root.get(Name.Names)
@@ -325,15 +435,42 @@ def strip_with_pikepdf(pdf: pikepdf.Pdf) -> None:
         for key in list(names.keys()):
             if key != "/Dests":
                 del names[key]
-    for obj in pdf.objects:
+        tree = names.get(Name.Dests)
+        if tree is not None:
+            try:
+                keys = list(pikepdf.NameTree(tree).keys())
+            except Exception:  # noqa: BLE001 - a damaged tree can't be trusted either
+                keys = None
+            if keys is None or any(hits(k, needles) for k in keys):
+                del names[Name.Dests]
+    dests = root.get(Name.Dests)
+    if isinstance(dests, pikepdf.Dictionary):
+        for key in list(dests.keys()):
+            if hits(key.lstrip("/"), needles):
+                del dests[key]
+    for part in (Name.Outlines, Name.PageLabels):
+        if part in root:
+            for node in _reachable(root[part]):
+                _drop_matching_keys(node, ("/Title", "/P"), needles)
+    for n, obj in enumerate(pdf.objects):
+        if n % 256 == 0:
+            ctx.check_cancelled()
         if isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)):
-            target = obj.stream_dict if isinstance(obj, pikepdf.Stream) else obj
-            for key in ("/Metadata", "/PieceInfo", "/Thumb", "/AA"):
-                if key in target:
-                    del target[key]
+            for node in _direct_dicts(obj):
+                for key in ("/Metadata", "/PieceInfo", "/Thumb", "/AA"):
+                    if key in node:
+                        del node[key]
+                for key in ("/StructParent", "/StructParents"):
+                    if key in node:
+                        del node[key]
+                _drop_matching_keys(node, _TEXT_KEYS, needles)
+            if isinstance(obj, pikepdf.Stream) and obj.stream_dict.get(Name.Subtype) == Name.Form:
+                _strip_marked_content(pdf, obj, needles)
     for page in pdf.pages:
+        ctx.check_cancelled()
         if Name.Annots in page.obj:
             del page.obj[Name.Annots]
+        _strip_marked_content(pdf, page, needles)
     for key in list(pdf.docinfo.keys()):
         del pdf.docinfo[key]
     pdf.docinfo[Name.Producer] = PRODUCER
@@ -390,15 +527,18 @@ def draw_fills(
         page.contents_add(pdf.make_stream(("Q\n" + "\n".join(ops) + "\n").encode("ascii")))
 
 
-def rasterize(doc: Any, pages: set[int]) -> Any:
+def rasterize(doc: Any, pages: set[int], ctx: JobContext) -> Any:
     """A new document where ``pages`` are images of the redacted rendering.
     Other pages are copied unchanged. Rotation is baked into the image."""
     fitz = _fitz()
     out = fitz.open()
     scale = fitz.Matrix(RASTER_DPI / 72, RASTER_DPI / 72)
     for number in range(len(doc)):
+        ctx.check_cancelled()
         page = doc[number]
         if number in pages:
+            # A page a viewer can show may still be too big to burn into a picture.
+            check_pixels(*rendered_size(page.rect.width, page.rect.height, RASTER_DPI / 72))
             pix = page.get_pixmap(matrix=scale, annots=False, alpha=False)
             new = out.new_page(width=page.rect.width, height=page.rect.height)
             new.insert_image(new.rect, pixmap=pix)
@@ -411,45 +551,10 @@ def rasterize(doc: Any, pages: set[int]) -> Any:
 
 
 def run_verifier(ctx: JobContext, output: Path, spec: dict[str, Any]) -> dict[str, Any]:
-    """Run ``verify.py`` in a fresh process. It sees only the output file
-    (job-relative) and what to check, on stdin."""
-    env = helper_env()
-    request = json.dumps({**spec, "output": output.relative_to(ctx.job_dir.resolve()).as_posix()})
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv: our interpreter and our verifier
-        [sys.executable, "-I", str(VERIFY)],
-        cwd=ctx.job_dir,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        # Read and dropped, not DEVNULL: a Windows AppContainer is denied
-        # the null device. It can hold document text, so it's never kept.
-        stderr=subprocess.PIPE,
-    )
-    if proc.stdin is None or proc.stdout is None or proc.stderr is None:  # pragma: no cover
-        raise AdapterError("E_INTERNAL", {"reason": "verifierPipes"})
-    err = proc.stderr
-
-    def drop_stderr() -> None:
-        while err.read(65536):
-            pass
-
-    threading.Thread(target=drop_stderr, daemon=True).start()
-    proc.stdin.write(request.encode("utf-8"))
-    proc.stdin.close()
-    deadline = time.monotonic() + VERIFY_TIMEOUT_S
-    while proc.poll() is None:
-        if ctx.cancelled or time.monotonic() > deadline:
-            proc.kill()
-            proc.wait(5)
-            ctx.check_cancelled()
-            raise AdapterError("E_TIMEOUT", {"stage": "verify"})
-        time.sleep(0.05)
-    raw = proc.stdout.read()
-    try:
-        report = json.loads(raw)
-        if not isinstance(report.get("checks"), list):
-            raise ValueError("no checks")
-    except (ValueError, AttributeError):
+    """Run ``verify.py`` in a fresh process (``converter_sdk.verify``). It sees
+    only the output file (job-relative) and what to check, on stdin."""
+    report = run_sdk_verifier(ctx, VERIFY, output, spec, timeout_s=VERIFY_TIMEOUT_S)
+    if report is None or not isinstance(report.get("checks"), list):
         # A verifier that can't report is a failed verification, never a pass.
         return {"checks": [{"id": "V0", "passed": False, "reason": "verifierFailed"}]}
     return report
@@ -473,28 +578,28 @@ class PdfRedactAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         total = inputs[0].pages
         boxes = params.get("boxes") or []
         terms = params.get("terms") or []
         if not boxes and not terms:
-            return [param_issue("boxes", "nothingToRedact")]
+            return [issue("boxes", "nothingToRedact")]
         for n, b in enumerate(boxes):
             try:
                 page = int(b["page"])
                 xs = (float(b["x0"]), float(b["x1"]))
                 ys = (float(b["y0"]), float(b["y1"]))
             except (KeyError, TypeError, ValueError):
-                return [param_issue("boxes", "invalid", index=n)]
+                return [issue("boxes", "invalid", index=n)]
             if not 1 <= page <= total:
-                return [param_issue("boxes", "pageOutOfBounds", index=n, pages=total)]
+                return [issue("boxes", "pageOutOfBounds", index=n, pages=total)]
             if not all(0 <= v <= 1 for v in (*xs, *ys)) or xs[0] == xs[1] or ys[0] == ys[1]:
-                return [param_issue("boxes", "empty", index=n)]
+                return [issue("boxes", "empty", index=n)]
         for n, t in enumerate(terms):
             if not isinstance(t, str) or len(normalize(t)) < 2:
-                return [param_issue("terms", "tooShort", index=n)]
+                return [issue("terms", "tooShort", index=n)]
         if params.get("fill", "black") not in FILLS:
-            return [param_issue("fill", "invalid")]
+            return [issue("fill", "invalid")]
         return []
 
     def page_text(self, ctx: JobContext, input: Path, page: int) -> PageWords:
@@ -555,10 +660,13 @@ class PdfRedactAdapter(PdfAdapter):
             if plan.no_text_pages:
                 ctx.warn("NO_TEXT_LAYER", {"pages": plan.no_text_pages[:100]})
 
+            # Text under a box may be repeated in outlines, labels, structure
+            # and marked content; those copies are found by what was captured.
+            needles = [*terms, *plan.captured]
             ctx.stage("redact", 2, 5)
             apply(doc, plan, ctx)
-            strip_with_mupdf(doc, terms)
-            output = self._write(ctx, doc, plan.regions, fill)
+            strip_with_mupdf(doc, needles, ctx)
+            output = self._write(ctx, doc, plan.regions, fill, needles)
 
             spec = {
                 "expectedPages": expected_pages,
@@ -574,10 +682,10 @@ class PdfRedactAdapter(PdfAdapter):
                 output.unlink(missing_ok=True)
                 ctx.stage("rasterize", 4, 5)
                 affected = self._affected(plan, failures, len(doc))
-                flat = rasterize(doc, affected)
+                flat = rasterize(doc, affected, ctx)
                 try:
-                    strip_with_mupdf(flat, terms)
-                    output = self._write(ctx, flat, plan.regions, fill)
+                    strip_with_mupdf(flat, needles, ctx)
+                    output = self._write(ctx, flat, plan.regions, fill, needles)
                 finally:
                     flat.close()
                 report = run_verifier(ctx, output, spec)
@@ -611,6 +719,7 @@ class PdfRedactAdapter(PdfAdapter):
         doc: Any,
         regions: dict[int, list[Region]],
         fill: tuple[float, float, float],
+        needles: list[str],
     ) -> Path:
         """MuPDF writes a clean intermediate; pikepdf strips and does the full rewrite."""
         fitz = _fitz()
@@ -626,7 +735,7 @@ class PdfRedactAdapter(PdfAdapter):
         )
         out = ctx.output_path("redacted.pdf")
         with pikepdf.open(stage1) as pdf:
-            strip_with_pikepdf(pdf)
+            strip_with_pikepdf(pdf, needles, ctx)
             draw_fills(pdf, regions, fill)
             save_pdf(ctx, pdf, out)
         stage1.unlink(missing_ok=True)

@@ -60,6 +60,10 @@ class JobContext:
     _outputs: dict[Path, str] = field(default_factory=dict)
     _last_progress: dict[str, float] = field(default_factory=dict)
     _temp_counter: int = 0
+    opened_encrypted_pdf: bool = False
+    encryption_warned: bool = False
+    """Set when ``open_pdf`` opened an encrypted input; ``save_pdf`` then warns
+    ``ENCRYPTION_REMOVED`` for any output it writes without encryption."""
 
     @property
     def out_dir(self) -> Path:
@@ -97,6 +101,13 @@ class JobContext:
     def warn(self, code: str, detail: dict[str, Any] | None = None) -> None:
         """Send a warning. Use catalog codes (spec section 13.1) listed in the manifest."""
         self._send(WorkerWarning(jobId=self.job_id, code=code, detail=detail))
+
+    def warn_encryption_removed(self) -> None:
+        """Warn ``ENCRYPTION_REMOVED``, once per job: an output carries what
+        an encrypted input held, without its password or permission limits."""
+        if not self.encryption_warned:
+            self.encryption_warned = True
+            self.warn("ENCRYPTION_REMOVED")
 
     # ------------------------------------------------------------------- paths
 
@@ -146,7 +157,10 @@ class JobContext:
         if self.secrets is not None and self.secrets.password is not None:
             password = self.secrets.password.get_secret_value()
         try:
-            return pikepdf.open(path, password=password)
+            pdf = pikepdf.open(path, password=password)
+            if pdf.is_encrypted:
+                self.opened_encrypted_pdf = True
+            return pdf
         except pikepdf.PasswordError:
             code = "E_PASSWORD_WRONG" if password else "E_PASSWORD_REQUIRED"
             raise AdapterError(code) from None

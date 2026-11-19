@@ -188,7 +188,8 @@ export interface JsonSchema {
 export interface AdapterEntry {
   manifest: {
     id: string;
-    kind: "operation" | "conversion";
+    /** `check` adapters (the output checker) are internal and never listed as tools. */
+    kind: "operation" | "conversion" | "check";
     title: string;
     inputs?: { formats: Format[]; min: number; max: number };
   };
@@ -229,6 +230,23 @@ export interface SaveResult {
   status: "saved" | "cancelled" | "confirmOverwrite";
   count: number;
   syncProvider?: string | null;
+  /**
+   * Where the result went, for display only: the saved file, or the folder
+   * for several. Set when `status` is `saved`. The renderer never opens it
+   * (audit U7).
+   */
+  path?: string | null;
+  /**
+   * One-time token for "Show in folder": `revealSaved(token)` asks Rust to
+   * show the saved file in Finder/Explorer, using the path Rust kept. The job
+   * is gone after a save, so this, not the job id, names what to show.
+   */
+  revealToken?: string | null;
+  /**
+   * With `confirmOverwrite`: the one-time token `confirmSave` and
+   * `cancelSave` must send back (audit S16).
+   */
+  confirmToken?: string | null;
 }
 
 /** The commands, one function each. Errors reject with a `CommandError`. */
@@ -269,7 +287,14 @@ export const api = {
    * json, yaml, html as text). Rejects with reason `notCopyable` otherwise. */
   copyOutput: (jobId: string, index: number) =>
     invoke<void>("copy_output", { jobId, index }),
-  confirmSave: (jobId: string) => invoke<SaveResult>("confirm_save", { jobId }),
+  confirmSave: (jobId: string, token: string) => invoke<SaveResult>("confirm_save", { jobId, token }),
+  /** The user declined replacing an input: Rust forgets the held destination. */
+  cancelSave: (jobId: string, token: string) => invoke<void>("cancel_save", { jobId, token }),
+  /** The file IDs of a job's inputs in the order the core numbers them: what
+   * a warning's `detail.inputs` indices refer to. */
+  jobInputs: (jobId: string) => invoke<string[]>("job_inputs", { jobId }),
+  /** Shows a saved result in the file manager (U7). */
+  revealSaved: (token: string) => invoke<void>("reveal_saved", { token }),
   discardJob: (jobId: string) => invoke<void>("discard_job", { jobId }),
   getSnapshot: () => invoke<Snapshot>("get_snapshot"),
   getDiagnostics: () => invoke<Diagnostics>("get_diagnostics"),
@@ -282,6 +307,15 @@ export const events = {
     listen<JobEvent>("job", (e) => f(e.payload)),
   onFilesAdded: (f: (files: FileResult[]) => void): Promise<UnlistenFn> =>
     listen<FileResult[]>("files-added", (e) => f(e.payload)),
+  /** Files are being dragged over the window (true) or left or dropped
+   * (false). These are Tauri's own drag events; `core:event:allow-listen`
+   * covers them. */
+  onDragState: (f: (over: boolean) => void): Promise<UnlistenFn> =>
+    Promise.all([
+      listen("tauri://drag-enter", () => f(true)),
+      listen("tauri://drag-leave", () => f(false)),
+      listen("tauri://drag-drop", () => f(false)),
+    ]).then((fns) => () => fns.forEach((u) => u())),
   onSelfTest: (f: (r: ProbeReport) => void): Promise<UnlistenFn> =>
     listen<ProbeReport>("selftest", (e) => f(e.payload)),
 };

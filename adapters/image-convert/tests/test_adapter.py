@@ -142,3 +142,40 @@ def test_broken_images_fail_cleanly(tmp_path: Path, bad: str) -> None:
         convert(tmp_path, src, "jpg")
     # A garbage header can claim an absurd size: refusing it is also correct.
     assert getattr(e.value, "code", None) in ("E_INPUT_CORRUPT", "E_LIMIT_EXCEEDED")
+
+
+def test_image_convert_uses_the_sdk_limits_and_helpers(tmp_path: Path) -> None:
+    """P11 and de-duplication: no private MAX_PIXELS or opener; 150 MP is allowed."""
+    import struct  # noqa: PLC0415
+    import zlib  # noqa: PLC0415
+
+    from converter_conformance.harness import context, make_job_dir  # noqa: PLC0415
+    from converter_sdk import AdapterError  # noqa: PLC0415
+
+    module = __import__("sys").modules[CLS.__module__]
+    assert not hasattr(module, "MAX_PIXELS") and not hasattr(module, "_open")
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    def header(w: int, h: int) -> bytes:
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b""))
+            + chunk(b"IEND", b"")
+        )
+
+    big = tmp_path / "big.png"
+    big.write_bytes(header(15_000, 10_000))
+    job, rel = make_job_dir(tmp_path / "job", [big])
+    ctx, _ = context(job, rel)
+    assert not CLS().validate_input(ctx, {"to": "jpg"}).errors
+    huge = tmp_path / "huge.png"
+    huge.write_bytes(header(30_000, 10_000))
+    job, rel = make_job_dir(tmp_path / "job2", [huge])
+    ctx, _ = context(job, rel)
+    with pytest.raises(AdapterError) as e:
+        CLS().validate_input(ctx, {"to": "jpg"})
+    assert e.value.code == "E_LIMIT_EXCEEDED"

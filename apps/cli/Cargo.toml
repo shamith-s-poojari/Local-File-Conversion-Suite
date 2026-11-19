@@ -1,5 +1,6 @@
 [package]
 name = "lfcs"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +17,10 @@ converter-router = { path = "../../crates/router" }
 converter-sandbox = { path = "../../crates/sandbox" }
 serde = "1"
 serde_json = "1"
+
+# Hidden password prompt (termios); already in the workspace via the sandbox.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

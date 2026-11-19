@@ -101,3 +101,42 @@ def test_cmyk_pictures_are_left_alone(tmp_path: Path) -> None:
     pdf.save(src)
     r = run_in_process(ADAPTER, tmp_path / "job", [src], {"level": "strong"})
     assert int(_image(r.outputs[0]).Width) == 800
+
+
+def test_a_picture_declaring_a_huge_size_is_not_decoded(monkeypatch) -> None:
+    """P3: the declared size is checked before pikepdf decodes anything."""
+    import zlib  # noqa: PLC0415
+
+    from converter_conformance.harness import load_adapter_class  # noqa: PLC0415
+
+    module = __import__("sys").modules[load_adapter_class(ADAPTER).__module__]
+    pdf = pikepdf.new()
+    stream = pdf.make_stream(
+        zlib.compress(b"\0" * 64),
+        Type=Name.XObject,
+        Subtype=Name.Image,
+        Width=100_000,
+        Height=100_000,
+        ColorSpace=Name.DeviceGray,
+        BitsPerComponent=8,
+        Filter=Name.FlateDecode,
+    )
+    assert module.candidate(stream)
+    decoded = []
+
+    class Spy:
+        def __init__(self, obj) -> None:
+            decoded.append(obj)
+            raise RuntimeError("must not be reached")
+
+    monkeypatch.setattr(pikepdf, "PdfImage", Spy)
+    assert module.recompress(stream, 800, 75) == (False, False)
+    assert decoded == []
+
+
+def test_encrypted_input_gives_encryption_removed(tmp_path: Path) -> None:
+    """P6: the compressed copy is not protected, and the user is told."""
+    src = corpus.encrypted_pdf(tmp_path / "enc.pdf")
+    r = run_in_process(ADAPTER, tmp_path / "job", [src], {}, {"password": corpus.SENTINEL_PASSWORD})
+    assert not r.errors
+    assert r.warnings.count("ENCRYPTION_REMOVED") == 1

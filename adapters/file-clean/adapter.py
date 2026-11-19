@@ -24,22 +24,35 @@ from converter_sdk import (
     ValidationReport,
     reveal,
     run_main,
+    xmlsafe,
 )
+from converter_sdk.active import is_web_url, neutralize_relationship_ids
 from converter_sdk.convert import ConversionAdapter, source_format
 from converter_sdk.errors import AdapterError
 from converter_sdk.images import encode, open_image, pixels, read_frames
+from converter_sdk.limits import MB, check_pixels
+from converter_sdk.markup import check_zip
 from converter_sdk.pdf import save_pdf
 from converter_sdk.protocol import ValidationIssue
+from converter_sdk.strip import (
+    clean_jpeg_bytes,
+    clean_picture_bytes,
+    clean_png_bytes,
+    clean_webp_bytes,
+)
 
-MB = 1024 * 1024
 MAX_ENTRIES = 20_000
 MAX_OFFICE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_REWRITE = 64 * MB
-"""Largest XML part read whole to be rewritten; anything larger is copied as it is."""
+"""Largest XML part read whole to be rewritten; a larger one that has to change
+fails the job (``E_LIMIT_EXCEEDED``) rather than go out as it was."""
 CHUNK = 1 << 20
 IMAGES = {"jpg", "png", "webp", "tiff", "avif"}
 OFFICE = {"docx", "xlsx", "pptx"}
-RIGHTS = reveal.IDENTIFYING_KINDS
+RIGHTS = reveal.IDENTIFYING_KINDS | {"tags", "embeddedFiles"}
+"""What a cleaned file must not show any more. Besides the identifying kinds,
+tags (properties, custom data, editing-session IDs, private chunks) and
+embedded files: this tool removes every one of them."""
 
 
 def corrupt() -> AdapterError:
@@ -47,63 +60,6 @@ def corrupt() -> AdapterError:
 
 
 # ------------------------------------------------------------------- JPEG
-
-_SCAN_MARKER = re.compile(rb"\xff[^\x00\xd0-\xd7\xff]")
-
-
-def _keep_segment(marker: int, body: bytes) -> bool:
-    """Only the segments a picture needs to display: JFIF, ICC and Adobe
-    colour flags, and everything that isn't an application or comment segment."""
-    if 0xE0 <= marker <= 0xEF:
-        return (
-            (marker == 0xE0 and body.startswith(b"JFIF\x00"))
-            or (marker == 0xE2 and body.startswith(b"ICC_PROFILE\x00"))
-            or (marker == 0xEE and body.startswith(b"Adobe"))
-        )
-    return marker != 0xFE
-
-
-def clean_jpeg_bytes(data: bytes) -> bytes:
-    """``data`` without EXIF, XMP, IPTC, thumbnails or comments, and without
-    anything after the end of the image. The compressed picture is copied
-    byte for byte."""
-    n = len(data)
-    if data[:2] != b"\xff\xd8":
-        raise corrupt()
-    out = bytearray(b"\xff\xd8")
-    pos, in_scan = 2, False
-    while pos < n:
-        if in_scan:
-            m = _SCAN_MARKER.search(data, pos)
-            if m is None:
-                raise corrupt()
-            out += data[pos : m.start()]
-            pos, in_scan = m.start(), False
-        if data[pos] != 0xFF:
-            raise corrupt()
-        while pos + 1 < n and data[pos + 1] == 0xFF:
-            pos += 1  # fill bytes
-        if pos + 1 >= n:
-            raise corrupt()
-        marker = data[pos + 1]
-        if marker == 0xD9:
-            out += b"\xff\xd9"
-            return bytes(out)
-        if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
-            out += data[pos : pos + 2]
-            pos += 2
-            continue
-        if pos + 4 > n:
-            raise corrupt()
-        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
-        end = pos + 2 + length
-        if length < 2 or end > n:
-            raise corrupt()
-        if _keep_segment(marker, data[pos + 4 : end]):
-            out += data[pos:end]
-        pos = end
-        in_scan = marker == 0xDA
-    raise corrupt()
 
 
 def clean_jpeg(ctx: JobContext, path: Path) -> tuple[bytes, bool]:
@@ -115,62 +71,8 @@ def clean_jpeg(ctx: JobContext, path: Path) -> tuple[bytes, bool]:
     if orientation not in (None, 1):
         f = read_frames(ctx, path, first_only=True)
         data = encode(f, "jpg", quality=95, keep_exif=False)
-        return clean_jpeg_bytes(data), True
-    return clean_jpeg_bytes(path.read_bytes()), False
-
-
-# -------------------------------------------------------------------- PNG
-
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-PNG_DROP = {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}
-
-
-def clean_png_bytes(data: bytes) -> bytes:
-    if data[:8] != PNG_SIGNATURE:
-        raise corrupt()
-    out = bytearray(PNG_SIGNATURE)
-    pos, n = 8, len(data)
-    while pos + 12 <= n:
-        size = int.from_bytes(data[pos : pos + 4], "big")
-        kind = data[pos + 4 : pos + 8]
-        end = pos + 12 + size
-        if end > n:
-            raise corrupt()
-        if kind not in PNG_DROP:
-            out += data[pos:end]
-        pos = end
-        if kind == b"IEND":
-            return bytes(out)
-    raise corrupt()
-
-
-# ------------------------------------------------------------------- WebP
-
-WEBP_DROP = {b"EXIF", b"XMP "}
-VP8X_METADATA_FLAGS = 0x08 | 0x04
-
-
-def clean_webp_bytes(data: bytes) -> bytes:
-    if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
-        raise corrupt()
-    end = 8 + int.from_bytes(data[4:8], "little")
-    if end > len(data) or end < 12:
-        raise corrupt()
-    chunks = bytearray()
-    pos = 12
-    while pos + 8 <= end:
-        fourcc = data[pos : pos + 4]
-        size = int.from_bytes(data[pos + 4 : pos + 8], "little")
-        body_end = pos + 8 + size
-        if body_end > end:
-            raise corrupt()
-        if fourcc not in WEBP_DROP:
-            body = bytearray(data[pos + 8 : body_end])
-            if fourcc == b"VP8X" and body:
-                body[0] &= ~VP8X_METADATA_FLAGS & 0xFF
-            chunks += fourcc + size.to_bytes(4, "little") + body + (b"\x00" if size & 1 else b"")
-        pos = body_end + (size & 1)
-    return b"RIFF" + (4 + len(chunks)).to_bytes(4, "little") + b"WEBP" + bytes(chunks)
+        return clean_jpeg_bytes(data, ctx.check_cancelled), True
+    return clean_jpeg_bytes(path.read_bytes(), ctx.check_cancelled), False
 
 
 # ------------------------------------------------------------ TIFF and AVIF
@@ -201,6 +103,36 @@ def reencode(ctx: JobContext, path: Path, fmt: str) -> bytes:
 # -------------------------------------------------------------------- PDF
 
 
+def _clean_pdf_picture(obj: Any) -> None:
+    """A JPEG in a PDF is the camera's file as it was: EXIF, XMP and all. The
+    compressed data is kept byte for byte, so the picture doesn't change."""
+    from pikepdf import Name  # noqa: PLC0415
+
+    data = reveal.dct_image_bytes(obj)
+    if data is None:
+        return
+    cleaned = clean_jpeg_bytes(data)  # one picture; the caller's loop checks for cancel
+    if cleaned == data and obj.get("/Filter") == Name.DCTDecode:
+        return
+    # A colour-transform hint in the parameters belongs to the JPEG filter and stays.
+    parms = obj.get("/DecodeParms") if obj.get("/Filter") == Name.DCTDecode else None
+    obj.write(cleaned, filter=Name.DCTDecode, decode_parms=parms)
+
+
+ANNOTATION_IDENTITY = ("/M", "/NM", "/CreationDate", "/T")
+"""Modification and creation dates, the unique name and the author of a note.
+A form field's ``/T`` is its name, which the form needs, so it stays."""
+
+
+def _scrub_annotation(annot: Any) -> None:
+    from pikepdf import Name  # noqa: PLC0415
+
+    widget = annot.get(Name.Subtype) == Name.Widget
+    for key in ANNOTATION_IDENTITY:
+        if key in annot and not (widget and key == "/T"):
+            del annot[key]
+
+
 def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) -> int:
     import pikepdf  # noqa: PLC0415
     from pikepdf import Name  # noqa: PLC0415
@@ -209,13 +141,20 @@ def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) ->
     try:
         if "/Info" in pdf.trailer:
             del pdf.trailer["/Info"]
+        # Without its /ID the writer makes a new one from the cleaned content.
+        # Kept, the first half would still identify the original file (it is a
+        # hash of the original's name, size and times).
+        if "/ID" in pdf.trailer:
+            del pdf.trailer["/ID"]
         for obj in pdf.objects:
             ctx.check_cancelled()
             if not isinstance(obj, pikepdf.Dictionary | pikepdf.Stream):
                 continue
-            for key in (Name.Metadata, Name.PieceInfo, Name.Thumb):
+            for key in (Name.Metadata, Name.PieceInfo, Name.Thumb, Name.LastModified):
                 if key in obj:
                     del obj[key]
+            if isinstance(obj, pikepdf.Stream):
+                _clean_pdf_picture(obj)
         if params.get("removeComments", True):
             for page in pdf.pages:
                 ctx.check_cancelled()
@@ -232,6 +171,11 @@ def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) ->
                     page.obj[Name.Annots] = pikepdf.Array(kept)
                 else:
                     del page.obj[Name.Annots]
+        for page in pdf.pages:
+            ctx.check_cancelled()
+            for a in page.obj.get(Name.Annots) or []:
+                if isinstance(a, pikepdf.Dictionary):
+                    _scrub_annotation(a)
         if params.get("removeHiddenLayers", False):
             try:
                 from converter_sdk.pdf import remove_hidden_layers  # noqa: PLC0415
@@ -250,13 +194,20 @@ def clean_pdf(ctx: JobContext, path: Path, out: Path, params: dict[str, Any]) ->
 # ------------------------------------------------------------------ OOXML
 
 COMMENT_PARTS = {
-    "docx": re.compile(
-        r"word/(?:comments|commentsExtended|commentsIds|commentsExtensible|people)\.xml"
-    ),
+    "docx": re.compile(r"word/(?:comments|commentsExtended|commentsIds|commentsExtensible)\.xml"),
     "xlsx": re.compile(r"xl/(?:comments\d*\.xml|threadedComments/[^/]+\.xml|persons/[^/]+\.xml)"),
     "pptx": re.compile(r"ppt/(?:comments/[^/]+\.xml|commentAuthors\.xml|authors\.xml)"),
 }
-CORE_DROP = {"creator", "lastModifiedBy", "revision", "lastPrinted", "created", "modified"}
+CORE_DROP = {"creator", "lastModifiedBy", "revision", "lastPrinted", "created", "modified",
+             *reveal.CORE_IDENTITY}  # fmt: skip
+ALWAYS_DROP = re.compile(
+    r"customXml/.+"  # SharePoint properties, citation sources
+    r"|(?:word|xl|ppt)/printerSettings/.+"  # printer and user names
+    r"|(?:word|xl|ppt)/embeddings/.+"  # whole documents with properties of their own
+    r"|docProps/custom\.xml|docProps/thumbnail\..*"
+    r"|word/people\.xml"  # who edited: the tracked changes are anonymised, so is this
+)
+IDENTITY_ATTRS = re.compile(rb"w:rsid\w*")
 APP_KEEP = {
     "DocSecurity", "ScaleCrop", "LinksUpToDate", "SharedDoc", "HyperlinksChanged", "Pages",
     "Words", "Characters", "CharactersWithSpaces", "Lines", "Paragraphs", "Slides", "Notes",
@@ -283,50 +234,56 @@ def _read(zin: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int = MAX_REWRITE)
 
 
 def _clean_core(data: bytes) -> bytes:
-    root = reveal.parse_xml(data)
+    root = xmlsafe.parse_xml(data)
     for el in [e for e in root if _local(e.tag) in CORE_DROP]:
         root.remove(el)
     return _xml_bytes(root)
 
 
 def _clean_app(data: bytes) -> bytes:
-    from lxml import etree  # noqa: PLC0415
-
-    root = reveal.parse_xml(data)
-    ns = root.tag.partition("}")[0] + "}" if root.tag.startswith("{") else ""
+    """Only the counts (pages, words) stay. The program that wrote the file is
+    left out, not replaced: naming one would be making it up."""
+    root = xmlsafe.parse_xml(data)
     for el in [e for e in root if _local(e.tag) not in APP_KEEP]:
         root.remove(el)
-    app = etree.Element(f"{ns}Application")
-    app.text = "Microsoft Office"
-    root.insert(0, app)
     return _xml_bytes(root)
 
 
 def _clean_content_types(data: bytes, dropped: set[str]) -> bytes:
-    root = reveal.parse_xml(data)
+    root = xmlsafe.parse_xml(data)
     for el in list(root):
         if _local(el.tag) == "Override" and (el.get("PartName") or "").lstrip("/") in dropped:
             root.remove(el)
     return _xml_bytes(root)
 
 
-def _clean_rels(name: str, data: bytes, dropped: set[str]) -> bytes:
-    root = reveal.parse_xml(data)
-    base = posixpath.dirname(posixpath.dirname(name))
+def _resolve(rels: str, target: str) -> str:
+    """The part a relationship in ``rels`` points at."""
+    base = posixpath.dirname(posixpath.dirname(rels))
+    return posixpath.normpath(
+        target.lstrip("/") if target.startswith("/") else posixpath.join(base, target)
+    )
+
+
+def _clean_rels(name: str, data: bytes, dropped: set[str], outside: set[str]) -> bytes:
+    """Delete the relationships to dropped parts and the ids in ``outside``."""
+    root = xmlsafe.parse_xml(data)
     for el in list(root):
-        target = el.get("Target") or ""
-        if _local(el.tag) != "Relationship" or el.get("TargetMode") == "External":
+        if _local(el.tag) != "Relationship":
             continue
-        resolved = posixpath.normpath(
-            target.lstrip("/") if target.startswith("/") else posixpath.join(base, target)
-        )
-        if resolved in dropped:
+        if el.get("Id") in outside:
+            root.remove(el)
+            continue
+        target = el.get("Target") or ""
+        if el.get("TargetMode") == "External":
+            continue
+        if _resolve(name, target) in dropped:
             root.remove(el)
     return _xml_bytes(root)
 
 
 def _parts_to_drop(names: list[str], fmt: str, params: dict[str, Any]) -> set[str]:
-    drop = {n for n in names if n == "docProps/custom.xml" or n.startswith("docProps/thumbnail.")}
+    drop = {n for n in names if ALWAYS_DROP.fullmatch(n)}
     if params.get("removeComments", True):
         drop |= {n for n in names if COMMENT_PARTS[fmt].fullmatch(n)}
     # A dropped part's own relationships go with it.
@@ -336,26 +293,74 @@ def _parts_to_drop(names: list[str], fmt: str, params: dict[str, Any]) -> set[st
     return drop
 
 
+def _source_of(rels: str) -> str:
+    """The part a ``.rels`` file belongs to (``""`` for the package itself)."""
+    directory, _, base = rels.rpartition("/")
+    directory = directory.removesuffix("_rels").rstrip("/")
+    name = base.removesuffix(".rels")
+    return f"{directory}/{name}" if directory and name else name
+
+
+class _Plan:
+    """What to change in one Office package, worked out before any part is written."""
+
+    def __init__(self, ctx: JobContext, zin: zipfile.ZipFile, infos: list[zipfile.ZipInfo],
+                 fmt: str, params: dict[str, Any]) -> None:  # fmt: skip
+        self.fmt = fmt
+        self.tick = ctx.check_cancelled
+        self.drop = _parts_to_drop([i.filename for i in infos], fmt, params)
+        self.strip_anchors = fmt == "docx" and bool(params.get("removeComments", True))
+        # External relationships other than plain web links: the template, a
+        # linked picture or file. They name the author's folders and servers.
+        self.outside_by_rels: dict[str, set[str]] = {}
+        self.outside_by_source: dict[str, set[str]] = {}
+        for info in infos:
+            ctx.check_cancelled()
+            name = info.filename
+            if (
+                not name.endswith(".rels")
+                or name in self.drop
+                or name.lower().startswith("xl/externallinks/")
+            ):
+                continue
+            ids = set()
+            for rel in xmlsafe.parse_xml(_read(zin, info)):
+                if _local(rel.tag) != "Relationship":
+                    continue
+                if (rel.get("TargetMode") or "").lower() != "external":
+                    # What refers to a dropped part (a sheet's printer settings, a
+                    # chart's embedded workbook) can't stay pointing at nothing.
+                    if _resolve(name, rel.get("Target") or "") in self.drop:
+                        ids.add(rel.get("Id") or "")
+                    continue
+                hyperlink = (rel.get("Type") or "").lower().endswith("/hyperlink")
+                if not (hyperlink and is_web_url(rel.get("Target") or "")):
+                    ids.add(rel.get("Id") or "")
+            if ids:
+                self.outside_by_rels[name] = ids
+                if source := _source_of(name):
+                    self.outside_by_source[source] = ids
+        self.outside = sum(len(v) for v in self.outside_by_rels.values())
+
+
 def clean_ooxml(ctx: JobContext, path: Path, out: Path, fmt: str, params: dict[str, Any]) -> None:
     try:
         with zipfile.ZipFile(path) as zin:
-            infos = zin.infolist()
+            infos = check_zip(zin, member_max=MAX_OFFICE_BYTES, total_max=MAX_OFFICE_BYTES)
             if len(infos) > MAX_ENTRIES:
                 raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "entries"})
-            if sum(i.file_size for i in infos) > MAX_OFFICE_BYTES:
-                raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "size"})
-            drop = _parts_to_drop([i.filename for i in infos], fmt, params)
-            strip_anchors = fmt == "docx" and bool(params.get("removeComments", True))
+            plan = _Plan(ctx, zin, infos, fmt, params)
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zout:
                 for info in infos:
                     ctx.check_cancelled()
                     name = info.filename
-                    if name in drop or name.endswith("/"):
+                    if name in plan.drop or name.endswith("/"):
                         continue
-                    zi = zipfile.ZipInfo(name, info.date_time)
+                    # Every part gets the same date: the ZIP records when each was saved.
+                    zi = zipfile.ZipInfo(name, reveal.FIXED_ZIP_DATE)
                     zi.compress_type = zipfile.ZIP_DEFLATED
                     zi.external_attr = info.external_attr
-                    new = _rewrite(zin, info, drop, strip_anchors)
+                    new = _rewrite(zin, info, plan)
                     if new is not None:
                         zout.writestr(zi, new)
                         continue
@@ -364,30 +369,131 @@ def clean_ooxml(ctx: JobContext, path: Path, out: Path, fmt: str, params: dict[s
                         zout.open(zi, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as dst,
                     ):
                         while chunk := src.read(CHUNK):
+                            ctx.check_cancelled()
                             dst.write(chunk)
     except (zipfile.BadZipFile, EOFError, NotImplementedError, RuntimeError):
         out.unlink(missing_ok=True)
         raise corrupt() from None
 
 
-def _rewrite(
-    zin: zipfile.ZipFile, info: zipfile.ZipInfo, drop: set[str], strip_anchors: bool
-) -> bytes | None:
+def _blank_tracked(data: bytes) -> bytes:
+    """Tracked changes keep their text but not who made them or when."""
+
+    def attribute(m: re.Match[bytes]) -> bytes:
+        if m.group(3) == b"author":
+            return m.group(1) + m.group(2) + b"author" + m.group(4) + b'"Author"'
+        return b""
+
+    return reveal.TRACKED_TAG.sub(
+        lambda tag: reveal.TRACKED_ATTR.sub(attribute, tag.group(0)), data
+    )
+
+
+def _without_attrs(tag: bytes, names: re.Pattern[bytes]) -> bytes:
+    """``tag`` (one whole start tag) without its attributes named by ``names``."""
+    return reveal.ATTR.sub(
+        lambda a: b"" if names.fullmatch(a.group(0).split(b"=", 1)[0].strip()) else a.group(0),
+        tag,
+    )
+
+
+def _strip_word_identity(data: bytes) -> bytes:
+    """Editing-session IDs, document variables and the names in permission
+    ranges, cut out of a Word part. Whole tags are matched, so text that looks
+    like an attribute is left alone."""
+    data = reveal.RSID_TAG.sub(lambda m: _without_attrs(m.group(0), IDENTITY_ATTRS), data)
+    data = reveal.RSID_ELEMENT.sub(b"", data)
+    data = reveal.DOCVARS.sub(b"", data)
+    return reveal.PERM_ED_TAG.sub(lambda m: _without_attrs(m.group(0), re.compile(rb"w:ed")), data)
+
+
+def _clean_workbook(data: bytes) -> bytes:
+    """The folder the workbook was saved from and the user name in its sharing
+    settings. Excel keeps the folder inside an ``AlternateContent`` wrapper, which
+    goes with it when nothing else is in there."""
+    root = xmlsafe.parse_xml(data, huge=True)
+    for el in [e for e in root.iter() if _local(e.tag) == "absPath"]:
+        parent = el.getparent()
+        parent.remove(el)
+        while len(parent) == 0 and _local(parent.tag) in ("Choice", "AlternateContent"):
+            up = parent.getparent()
+            up.remove(parent)
+            parent = up
+    for el in [e for e in root if _local(e.tag) == "fileSharing"]:
+        for key in ("userName", "reservationPassword", "algorithmName", "hashValue",
+                    "saltValue", "spinCount"):  # fmt: skip
+            el.attrib.pop(key, None)
+        if not el.attrib:
+            root.remove(el)
+    return _xml_bytes(root)
+
+
+def _clean_picture(data: bytes, tick: Any) -> bytes | None:
+    """A picture from ``media/`` without its metadata, or None if it isn't a
+    kind of picture that carries any. Identified by content, not by name."""
+    if (cleaned := clean_picture_bytes(data, tick)) is not None:
+        return cleaned
+    if data[:4] in (b"II*\x00", b"MM\x00*"):
+        return _clean_tiff_bytes(data)
+    return None
+
+
+def _clean_tiff_bytes(data: bytes) -> bytes:
+    from PIL import Image, ImageSequence  # noqa: PLC0415
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            check_pixels(img.width, img.height, int(getattr(img, "n_frames", 1)))
+            frames = [f.copy() for f in ImageSequence.Iterator(img)]
+            icc = img.info.get("icc_profile")
+        buf = io.BytesIO()
+        save: dict[str, Any] = {"compression": "tiff_lzw", "save_all": len(frames) > 1,
+                                "append_images": frames[1:]}  # fmt: skip
+        if icc:
+            save["icc_profile"] = icc
+        frames[0].save(buf, "TIFF", **save)
+    except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError):
+        raise corrupt() from None
+    return buf.getvalue()
+
+
+def _rewrite(zin: zipfile.ZipFile, info: zipfile.ZipInfo, plan: _Plan) -> bytes | None:
     """The new content of a part that changes, or None to copy it as it is."""
     name = info.filename
     if name == "docProps/core.xml":
         return _clean_core(_read(zin, info))
     if name == "docProps/app.xml":
         return _clean_app(_read(zin, info))
-    if name == "[Content_Types].xml" and drop:
-        return _clean_content_types(_read(zin, info), drop)
-    if name.endswith(".rels") and drop:
-        return _clean_rels(name, _read(zin, info), drop)
-    if strip_anchors and re.fullmatch(r"word/[^/]+\.xml", name) and info.file_size <= MAX_REWRITE:
-        data = _read(zin, info)
-        cleaned = COMMENT_ANCHORS.sub(b"", data)
-        return cleaned if cleaned != data else None
-    return None
+    if name == "xl/workbook.xml" and plan.fmt == "xlsx":
+        return _clean_workbook(_read(zin, info))
+    if name == "[Content_Types].xml" and plan.drop:
+        return _clean_content_types(_read(zin, info), plan.drop)
+    if name.endswith(".rels"):
+        outside = plan.outside_by_rels.get(name, set())
+        if plan.drop or outside:
+            return _clean_rels(name, _read(zin, info), plan.drop, outside)
+        return None
+    if reveal.MEDIA_PART.fullmatch(name):
+        if info.file_size > reveal.MAX_MEDIA_BYTES:
+            raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pictureSize"})
+        data = _read(zin, info, reveal.MAX_MEDIA_BYTES)
+        cleaned = _clean_picture(data, plan.tick)
+        return None if cleaned is None or cleaned == data else cleaned
+    is_word = plan.fmt == "docx" and re.fullmatch(r"word/[^/]+\.xml", name) is not None
+    outside = plan.outside_by_source.get(name, set())
+    if not (is_word or outside):
+        return None
+    data = _read(zin, info)
+    changed = data
+    if is_word:
+        if plan.strip_anchors:
+            changed = COMMENT_ANCHORS.sub(b"", changed)
+        changed = _strip_word_identity(_blank_tracked(changed))
+    if outside:
+        root = xmlsafe.parse_xml(changed, huge=True)
+        if neutralize_relationship_ids(root, outside):
+            changed = _xml_bytes(root)
+    return changed if changed != data else None
 
 
 # ---------------------------------------------------------------- adapter
@@ -412,7 +518,7 @@ class FileCleanAdapter(Adapter):
                 elif fmt in OFFICE:
                     try:
                         with zipfile.ZipFile(p) as z:
-                            z.namelist()
+                            check_zip(z, member_max=MAX_OFFICE_BYTES, total_max=MAX_OFFICE_BYTES)
                     except (zipfile.BadZipFile, OSError):
                         raise corrupt() from None
             except AdapterError as e:
@@ -479,9 +585,9 @@ class FileCleanAdapter(Adapter):
             data, again = clean_jpeg(ctx, path)
             flags["reencoded"] |= again
         elif fmt == "png":
-            data = clean_png_bytes(path.read_bytes())
+            data = clean_png_bytes(path.read_bytes(), ctx.check_cancelled)
         elif fmt == "webp":
-            data = clean_webp_bytes(path.read_bytes())
+            data = clean_webp_bytes(path.read_bytes(), ctx.check_cancelled)
         elif fmt in ("tiff", "avif"):
             data = reencode(ctx, path, fmt)
             flags["reencoded"] = True

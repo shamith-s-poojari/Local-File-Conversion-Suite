@@ -7,7 +7,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use converter_jobstore::{JobFailure, JobId, JobState, JobStore, Progress, Warning};
+use converter_jobstore::{
+    JobDirs, JobFailure, JobId, JobState, JobStore, Progress, Warning, WARN_LARGE_JOB,
+    WARN_PART_FAILED, WARN_UNKNOWN,
+};
 use converter_protocol::{Codec, Secrets};
 use converter_sniffer::Format;
 use serde_json::{json, Value};
@@ -21,7 +24,7 @@ use crate::worker::{
 
 /// Code shown for a worker warning that isn't in the catalog. The UI shows
 /// generic text for it; the original code is logged.
-pub const GENERIC_WARNING_CODE: &str = "W_UNKNOWN";
+pub const GENERIC_WARNING_CODE: &str = WARN_UNKNOWN;
 
 /// Longest worker `detail` kept, in bytes. Shown as plain text only.
 pub const MAX_DETAIL_BYTES: usize = 1000;
@@ -35,6 +38,8 @@ pub fn pool_for(adapter_id: &str, worker_class: &str) -> String {
         worker_class.to_owned()
     }
 }
+
+mod recheck;
 
 /// Everything needed to run one staged job.
 #[derive(Debug, Clone)]
@@ -64,6 +69,30 @@ pub struct JobPart {
     /// differ: a tool that keeps each file's format runs one part per
     /// format (ADR 0004).
     pub output_format: Format,
+    /// Set when this part's output must be re-checked by the core before the
+    /// job may succeed (ADR 0006).
+    pub recheck: Option<Recheck>,
+}
+
+/// A re-check of a part's outputs in a separate check job (ADR 0006).
+///
+/// The worker that made the output can't approve it: once its worker has
+/// exited, the runner copies the output into a folder of its own, starts a
+/// new worker there, and only a passing report from that one lets the job
+/// succeed. The check job is never recorded in the store, so it can't show
+/// up in a snapshot or an event.
+#[derive(Debug, Clone)]
+pub struct Recheck {
+    /// The check adapter (`output-check`).
+    pub adapter_id: String,
+    pub timeout_base_s: u32,
+    pub timeout_s_per_mb: f64,
+    pub no_progress_s: u32,
+    /// What to check, from the core: never anything the tool's worker said.
+    pub params: Value,
+    /// What the tool's job fails with if the check fails, can't run or
+    /// can't report.
+    pub failure_code: String,
 }
 
 impl JobSpec {
@@ -91,6 +120,7 @@ impl JobSpec {
                 params,
                 secrets,
                 output_format,
+                recheck: None,
             }],
         }
     }
@@ -173,7 +203,18 @@ impl Runner {
         let me = self.clone();
         thread::spawn(move || {
             let job = spec.job.clone();
-            match me.drive(&spec, &token) {
+            // A panic must end the job: this thread is the only thing that
+            // moves it to a final state, so unwinding past it would leave the
+            // job running forever. Unwinding also drops the worker (killing
+            // its tree) and the admission slot.
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.drive(&spec, &token)))
+                    .unwrap_or_else(|_| {
+                        // No payload in the log: it could carry document text.
+                        log::error!("a job driver panicked");
+                        Err(failure("E_INTERNAL"))
+                    });
+            match outcome {
                 Ok(()) => {}
                 Err(f) if f.code == "E_CANCELLED" => {
                     let _ = me.store.transition(&job, JobState::Cancelled);
@@ -182,6 +223,9 @@ impl Runner {
                     let _ = me.store.fail(&job, f);
                 }
             }
+            // A daemon that double-forked out of the worker's tree is still
+            // tagged with the job; nothing of the job may outlive it.
+            crate::tree::kill_job_strays(job.as_str());
             lock(&me.tokens).remove(&job);
         })
     }
@@ -200,7 +244,21 @@ impl Runner {
         found
     }
 
+    /// Runs the job's steps in order; each is a method below.
     fn drive(&self, spec: &JobSpec, token: &CancelToken) -> Result<(), JobFailure> {
+        let (dirs, plans) = self.plan(spec)?;
+        let mut events = EventForwarder::new(&self.store, &spec.job, self.config.progress_interval);
+        // Every part is checked before any runs, so a problem with the last
+        // file shows before minutes of work on the first.
+        check(token)?;
+        self.set_state(&spec.job, JobState::Validating)?;
+        let estimate = self.validate_parts(spec, &dirs, &plans, token, &mut events)?;
+        let done = self.execute_parts(spec, &dirs, &plans, estimate, token, &mut events)?;
+        self.verify_and_recheck(spec, &dirs, estimate, done, token)
+    }
+
+    /// Each part's input paths and watchdog, from the staged files.
+    fn plan(&self, spec: &JobSpec) -> Result<(JobDirs, Vec<PartPlan>), JobFailure> {
         let job = &spec.job;
         if spec.parts.is_empty() {
             return Err(failure("E_INTERNAL"));
@@ -238,23 +296,24 @@ impl Runner {
             );
             plans.push((inputs, watchdog));
         }
-        let launch = |part: &JobPart, memory_limit| LaunchSpec {
-            adapter_id: part.adapter_id.clone(),
-            job_id: job.clone(),
-            job_dir: dirs.root.clone(),
-            memory_limit,
-        };
-        let mut events = EventForwarder::new(&self.store, job, self.config.progress_interval);
+        Ok((dirs, plans))
+    }
 
-        // Every part is checked before any runs, so a problem with the last
-        // file shows before minutes of work on the first.
-        check(token)?;
-        self.set_state(job, JobState::Validating)?;
+    /// Validates and estimates every part, one worker each. Returns the
+    /// memory estimate that admission uses.
+    fn validate_parts(
+        &self,
+        spec: &JobSpec,
+        dirs: &JobDirs,
+        plans: &[PartPlan],
+        token: &CancelToken,
+        events: &mut EventForwarder<'_>,
+    ) -> Result<u64, JobFailure> {
         let mut estimate = 0u64;
-        for (part, (inputs, watchdog)) in spec.parts.iter().zip(&plans) {
+        for (part, (inputs, watchdog)) in spec.parts.iter().zip(plans) {
             let mut worker = Worker::spawn(
                 &*self.launcher,
-                &launch(part, None),
+                &launch_spec(&spec.job, dirs, part, None),
                 self.codec.clone(),
                 self.config.timing,
             )?;
@@ -286,26 +345,48 @@ impl Runner {
             // launched with the admitted memory limit.
             worker.shutdown();
         }
+        Ok(estimate)
+    }
 
-        let mut claimed: Vec<(Value, Format)> = Vec::new();
+    /// Queues, admits and executes every part, with the one memory retry
+    /// (spec 10.2) and the skipping of parts that fail on their own.
+    fn execute_parts(
+        &self,
+        spec: &JobSpec,
+        dirs: &JobDirs,
+        plans: &[PartPlan],
+        estimate: u64,
+        token: &CancelToken,
+        events: &mut EventForwarder<'_>,
+    ) -> Result<Executed, JobFailure> {
+        let job = &spec.job;
+        let mut done = Executed::default();
         let mut next = 0;
         let mut retry = false;
         let mut warned_large = false;
         while next < spec.parts.len() {
             self.set_state(job, JobState::Queued)?;
+            // The store empties `out/` for a retry; this is the check that it
+            // did, since a leftover would be read as the retry's own output.
+            if retry && !list_names(&dirs.out).is_empty() {
+                return Err(failure("E_INTERNAL"));
+            }
             let admission = self.admit(job, &spec.pool, estimate, retry, token)?;
             let slot = SlotGuard { runner: self, job };
             self.set_state(job, JobState::Running)?;
             if admission.large && !warned_large {
                 warned_large = true;
-                events.warning("W_LARGE_JOB", None);
+                events.warning(WARN_LARGE_JOB, None);
             }
             while next < spec.parts.len() {
                 let part = &spec.parts[next];
                 let (inputs, watchdog) = &plans[next];
+                // What earlier parts left in out/, to tell a failed part's
+                // half-written files from their outputs.
+                let kept = list_names(&dirs.out);
                 let mut worker = Worker::spawn(
                     &*self.launcher,
-                    &launch(part, Some(admission.hard_limit)),
+                    &launch_spec(job, dirs, part, Some(admission.hard_limit)),
                     self.codec.clone(),
                     self.config.timing,
                 )?;
@@ -325,7 +406,8 @@ impl Runner {
                             &result,
                             (spec.parts.len() > 1).then_some(next),
                         )?;
-                        claimed.extend(
+                        done.owners.extend(std::iter::repeat_n(next, taken.len()));
+                        done.claimed.extend(
                             taken
                                 .into_iter()
                                 .map(|o| (with_job_source(o, &part.inputs), part.output_format)),
@@ -336,7 +418,25 @@ impl Runner {
                     Err(f) if f.code == "E_RESOURCE_MEMORY" && !retry => {
                         drop(worker);
                         retry = true;
+                        // Re-queueing wipes out/ (store, spec 10.2), so every
+                        // part runs again and nothing from the first try may
+                        // stay listed, outputs or failures alike.
+                        next = 0;
+                        done = Executed::default();
+                        let _ = self.store.remove_warnings(job, WARN_PART_FAILED);
                         break;
+                    }
+                    Err(f) if spec.parts.len() > 1 && part_failure_is_isolated(&f.code) => {
+                        drop(worker);
+                        discard_part_files(&dirs.out, &dirs.work, &kept)?;
+                        // Codes and input numbers only: nothing from the
+                        // documents.
+                        events.warning(
+                            WARN_PART_FAILED,
+                            Some(&json!({ "code": f.code, "inputs": part.inputs })),
+                        );
+                        done.first_failure.get_or_insert(f);
+                        next += 1;
                     }
                     Err(f) => return Err(f),
                 }
@@ -344,14 +444,57 @@ impl Runner {
             // The budget is released only once the worker is gone.
             drop(slot);
         }
+        Ok(done)
+    }
 
+    /// Records and checks the outputs, runs each part's re-check, and ends the
+    /// job as `succeeded` or `partial`.
+    fn verify_and_recheck(
+        &self,
+        spec: &JobSpec,
+        dirs: &JobDirs,
+        estimate: u64,
+        done: Executed,
+        token: &CancelToken,
+    ) -> Result<(), JobFailure> {
+        let job = &spec.job;
+        let Executed {
+            claimed,
+            owners,
+            first_failure,
+        } = done;
         // Checked once every worker has exited, so none can change a file
         // after its check.
         check(token)?;
+        if claimed.is_empty() {
+            if let Some(f) = first_failure {
+                return Err(f);
+            }
+        }
         self.set_state(job, JobState::Verifying)?;
         verify_outputs(&self.store, job, &claimed)?;
-        self.set_state(job, JobState::Succeeded)?;
-        Ok(())
+        // After the claimed outputs are recorded and their worker is gone,
+        // and before the job may succeed (ADR 0006). A failure here fails
+        // the job, which deletes `out/`.
+        for (n, part) in spec.parts.iter().enumerate() {
+            let Some(rc) = &part.recheck else { continue };
+            let files: Vec<(std::path::PathBuf, &str, &str)> = claimed
+                .iter()
+                .zip(&owners)
+                .filter(|(_, &owner)| owner == n)
+                .filter_map(|((o, format), _)| {
+                    let rel = o["path"].as_str()?.strip_prefix("out/")?;
+                    Some((dirs.out.join(rel), format.as_str(), o["sha256"].as_str()?))
+                })
+                .collect();
+            self.recheck(&dirs.root, &spec.pool, estimate, rc, &files, token)?;
+        }
+        let end = if first_failure.is_some() {
+            JobState::Partial
+        } else {
+            JobState::Succeeded
+        };
+        self.set_state(job, end)
     }
 
     fn set_state(&self, job: &JobId, state: JobState) -> Result<(), JobFailure> {
@@ -415,6 +558,35 @@ impl Runner {
     }
 }
 
+/// A part's input paths and its watchdog.
+type PartPlan = (Vec<String>, Watchdog);
+
+/// What the executed parts produced.
+#[derive(Default)]
+struct Executed {
+    /// Each claimed output and the format it must sniff as.
+    claimed: Vec<(Value, Format)>,
+    /// The part each claimed output came from, to pick its re-check.
+    owners: Vec<usize>,
+    /// The first part that failed and was skipped (ADR 0004: parts are
+    /// independent, so one bad format needn't cost the others).
+    first_failure: Option<JobFailure>,
+}
+
+fn launch_spec(
+    job: &JobId,
+    dirs: &JobDirs,
+    part: &JobPart,
+    memory_limit: Option<u64>,
+) -> LaunchSpec {
+    LaunchSpec {
+        adapter_id: part.adapter_id.clone(),
+        job_id: job.clone(),
+        job_dir: dirs.root.clone(),
+        memory_limit,
+    }
+}
+
 /// Releases a running job's slot when dropped, and wakes queued jobs.
 struct SlotGuard<'a> {
     runner: &'a Runner,
@@ -426,6 +598,64 @@ impl Drop for SlotGuard<'_> {
         lock(&self.runner.shared).scheduler.finish(self.job);
         self.runner.wake.notify_all();
     }
+}
+
+/// Whether a part that failed with `code` leaves the next parts worth
+/// running. Not when the job was stopped (`E_CANCELLED`), when the machine
+/// can't run workers (`E_SANDBOX_UNAVAILABLE`, `E_INSTALL_CORRUPT`), when the
+/// failure is the core's own or an unexplained crash (`E_INTERNAL`), when the
+/// worker broke the protocol (`E_PROTOCOL`: don't trust what it wrote), or
+/// when memory or disk ran out, which the next part would meet too.
+/// Everything else is about that part's own files: corrupt or locked input,
+/// an unsupported feature, a timeout, an invalid output.
+fn part_failure_is_isolated(code: &str) -> bool {
+    !matches!(
+        code,
+        "E_CANCELLED"
+            | "E_SANDBOX_UNAVAILABLE"
+            | "E_INSTALL_CORRUPT"
+            | "E_INTERNAL"
+            | "E_PROTOCOL"
+            | "E_RESOURCE_MEMORY"
+            | "E_RESOURCE_DISK"
+    )
+}
+
+fn list_names(dir: &Path) -> HashSet<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect()
+}
+
+/// Deletes what a failed part left: everything in `work/`, and whatever is in
+/// `out/` besides `kept`. A file left in `out/` could be taken for the next
+/// part's output, since every worker numbers its outputs from 0, so failing
+/// to delete one fails the job.
+fn discard_part_files(
+    out: &Path,
+    work: &Path,
+    kept: &HashSet<std::ffi::OsString>,
+) -> Result<(), JobFailure> {
+    let remove = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(_) => Ok(()),
+    };
+    for entry in std::fs::read_dir(out)
+        .map_err(|_| failure("E_INTERNAL"))?
+        .flatten()
+    {
+        if !kept.contains(&entry.file_name()) {
+            remove(&entry.path()).map_err(|_| failure("E_INTERNAL"))?;
+        }
+    }
+    for entry in std::fs::read_dir(work).into_iter().flatten().flatten() {
+        let _ = remove(&entry.path());
+    }
+    Ok(())
 }
 
 fn check(token: &CancelToken) -> Result<(), JobFailure> {
@@ -576,7 +806,15 @@ mod tests {
     #[test]
     fn catalog_comes_from_the_schema() {
         assert!(warning_catalog().contains("TAGS_DROPPED"));
-        assert!(warning_catalog().contains("W_LARGE_JOB"));
+        // Every code the core raises itself is in the schema, but for the
+        // stand-in shown for codes that aren't.
+        for code in [
+            WARN_LARGE_JOB,
+            WARN_PART_FAILED,
+            converter_jobstore::WARNINGS_TRUNCATED,
+        ] {
+            assert!(warning_catalog().contains(code), "{code}");
+        }
         assert!(!warning_catalog().contains(GENERIC_WARNING_CODE));
     }
 

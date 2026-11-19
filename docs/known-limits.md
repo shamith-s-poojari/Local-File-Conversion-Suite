@@ -6,19 +6,36 @@ What the app can't do, or does only partly. Each tool's README has the details; 
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Sandbox | Works (Seatbelt) | Written (bubblewrap), not yet run on Linux | Written (AppContainer and Job Object), compile-checked only |
-| FFmpeg, LibreOffice | Found in Homebrew and `/Applications` | Found in the usual package paths | Found in WinGet, Scoop, Chocolatey and `Program Files` |
-| Installer | Not built yet | Not built yet | Not built yet |
+| Sandbox | Seatbelt | bubblewrap, with a seccomp deny-list (x86-64 and AArch64 only) | AppContainer and a Job Object |
+| Sandbox tests in CI | Pass | Pass (2026-11-18); need user namespaces, see [troubleshooting](troubleshooting.md#linux) | Pass on a hosted runner; not confirmed on real machines |
+| Office conversions (LibreOffice) in CI | Installed by the CI workflow; that change hasn't run yet | Run, and pass | Installed by the CI workflow; that change hasn't run yet |
+| FFmpeg, LibreOffice | Homebrew and `/Applications` | The usual package paths | WinGet, Scoop, Chocolatey and `Program Files` |
+| Installer | None built | None built | None built |
 
-Packaging, signing and notarization (T21) are not done, so the app only runs from a development checkout. FFmpeg and LibreOffice aren't bundled: conversions that need them show as unavailable, with the install command, until they're installed.
+Where each engine is looked for is on the [engines](engines.md) page.
+
+There is no installer yet, so the app only runs from a development checkout, in development mode: set `LFCS_DEV=1` or pass `lfcs --dev` (the core doesn't search the working directory for a runtime). `tools/bundle-runtime` builds the runtime folder a release app would carry, and `.github/workflows/release.yml` builds unsigned installers with it; neither has been run yet. Signing and notarization (REL-3) are not done. See the [release plan](release-plan.md). FFmpeg and LibreOffice aren't bundled: conversions that need them show as unavailable, with the install command, until they're installed.
 
 If the sandbox self-test fails on a system, processing stays off there. The app never runs a conversion unsandboxed.
+
+### What CI proves
+
+CI (`.github/workflows/ci.yml`) runs on all three systems with `CI=true`. Under it the sandbox, command-line, end-to-end and network tests, and the FFmpeg tests, fail instead of skipping. Python tests that skip anyway are counted: a run fails if it skips more than a recorded ceiling (`tools/check-skips.py`), which is how a runner whose FFmpeg or LibreOffice failed to install is noticed. Clippy runs on all three systems. Each job prints the FFmpeg and LibreOffice versions it used; they aren't pinned. Results below are from the run of 2026-11-18 on commit `7c93f30`, except where a different run is named; check the latest run before relying on them.
+
+- **macOS:** the sandbox, end-to-end and network tests pass. LibreOffice is now installed in CI, but the Office tests haven't run there yet: the run above was before that change.
+- **Linux:** the sandbox, seccomp, stray-process, command-line, end-to-end and network tests pass, and so do LibreOffice conversions inside the sandbox (24.2.7, from Ubuntu's packages). That is one run on GitHub's Ubuntu 24.04 with user namespaces opened up. It says nothing about other distributions, where bubblewrap or user namespaces may be blocked; the app then turns processing off.
+- **Windows:** the Rust and Python tests passed on a hosted Windows runner (run 44252855383, 2026-11-18; the run after it was cancelled on Windows). That includes the AppContainer sandbox tests. It has not been confirmed on a real machine. **LibreOffice inside the AppContainer doesn't work yet:** in the first CI run with LibreOffice installed (2026-11-18), an Office conversion in the sandbox never finished and was stopped by its time limit. On Windows, Office conversions fail with a timeout until this is fixed. The Rust job on Windows therefore doesn't install LibreOffice; the Python Office tests, which run LibreOffice outside the sandbox, still do.
+- **Network test on Windows:** the canary test's socket sampler reads `lsof` and the process tree, which exist on macOS and Linux only. On Windows `network.rs` prints "skipped" and exits successfully, even under `CI=true`, so the network test proves nothing on Windows. No packet capture is wired up for Windows either (`pktmon` is the plan).
+- **Packet capture** (`tools/network-test/capture.sh`, nightly): it has passed on macOS in the nightly job (for example 2026-11-17). The Linux nightly failed on 2026-11-15, 16 and 17 because `strace` couldn't write its trace file; the script is fixed, and it hasn't run since. It has never been run with `--app`.
+
+CI doesn't test installers, signing, updates or real-world machines, and it doesn't measure WebView traffic.
 
 ## Files
 
 - **Limits:** 5,000 pages per file and 200 files per selection.
 - **One open password per job.** Files with different open passwords must be unlocked one at a time first.
 - **Online-only files** (OneDrive, iCloud Drive and similar) are downloaded only after you agree.
+- A job cancelled at the moment it is created may stay in the store as cancelled.
 - **Repaired files:** a damaged PDF that can be repaired on opening may still be refused if the damage survives the rewrite (`E_INPUT_CORRUPT`).
 
 ## Conversions
@@ -28,6 +45,8 @@ If the sandbox self-test fails on a system, processing stays off there. The app 
 - **Best-effort conversions** (PDF to Word, PowerPoint or Excel, among others) rebuild structure from the page layout and are hidden until you ask for them. Check the result.
 - **Data files:** values inside values (a list in a JSON record) become JSON text in a spreadsheet cell; Excel formulas become their last saved values; YAML comments are dropped. Excel to Markdown isn't offered.
 - **Audio and video:** subtitles, data tracks and every audio track after the first are dropped when converting video (`STREAMS_DROPPED`). Converting to a lossy format (MP3, AAC, Opus, WebM) re-encodes, which loses a little quality each time.
+- **Ogg (Vorbis)** needs an FFmpeg with libvorbis. Homebrew's `ffmpeg` 9 leaves it out; use `ffmpeg-full`, which the app finds when started from the Finder or when no plain `ffmpeg` is earlier on `PATH` (see [engines](engines.md#ffmpeg)). Without it, making an Ogg file fails with `E_INSTALL_CORRUPT`. FFmpeg's own Vorbis encoder isn't used: it crashes re-encoding Vorbis audio.
+- **Repeat conversions to PDF** give the same file byte for byte with LibreOffice 24 and older. LibreOffice 25 and later embed fonts slightly differently each run, so the pages and text match but the files don't.
 - **Office documents** depend on the installed LibreOffice: fonts the system lacks are substituted, and complex layouts may shift.
 
 ## Tools for images, audio, video and data
@@ -42,6 +61,7 @@ If the sandbox self-test fails on a system, processing stays off there. The app 
 ## Safety, privacy and convenience (ADR 0005)
 
 - **Remove hidden details** doesn't touch pixels, text inside pictures, or tracked changes (`TRACKED_CHANGES_KEPT`). A JPEG with a rotation in its EXIF, and TIFF and AVIF files, are re-encoded once (`REENCODED`); an animated AVIF keeps its first frame. Signed PDFs lose their signature (`SIGNATURE_INVALIDATED`).
+- **Remove hidden details** always removes files embedded in Office documents (the workbook behind a chart, an inserted file); what they show on the page stays. JPEG ICC profile names and image attachments in Matroska files are not cleaned yet.
 - **Make safe to open** keeps what you see but removes interaction: forms with actions are flattened, link annotations whose action was removed stay as inert links, and formulas that used an external workbook keep their last values. Excel 4.0 macro sheets are detected but not removed, so such a file fails the check rather than passing. Legacy `.doc`, `.xls` and `.ppt` aren't accepted.
 - **Copy** puts any picture result (as an image, at most 4096 pixels on its longest side) or text result on the clipboard. Audio, video, PDF and Office results can't be copied; save them instead.
 - **Folders:** a folder is read up to eight levels deep, without following links or reading hidden files, and still up to 200 files. **Keep folder layout** puts each result next to where its input was; a result made from several files (a merge, a join, a contact sheet) goes in the top folder.
@@ -82,8 +102,9 @@ If the sandbox self-test fails on a system, processing stays off there. The app 
 - Embedded font subsets can reveal which characters a document used, though not where.
 - Content that is meaningful elsewhere, such as a name inside a chart image, isn't detected.
 - Redaction also removes all comments, form fields, attachments, hidden layers, document properties, and bookmarks that contain a term.
+- Under a box, words of three or more characters are tracked. A common short word in a term can also remove a bookmark or label that contains it.
 - Verification is reported as **"passed these checks"**, not a guarantee. If checks fail and you accept the fallback, affected pages become images and their text is lost.
-- Drawing boxes needs a pointer. Terms and whole-page redaction work by keyboard.
+- Boxes over pictures and other non-text areas need a pointer. Terms, words, lines and whole pages work by keyboard.
 
 ## Interface
 
@@ -100,4 +121,8 @@ The catalog has no code for an invalid parameter or a precondition, such as "the
 - Deleting a job's files is ordinary deletion, not secure erasure. See [Privacy](privacy.md).
 - WebView network traffic isn't measured yet (spike S4).
 - Sync-folder detection is best effort.
-- The packet-capture network test (`tools/network-test/capture.sh`) hasn't run yet; the canary test has, on macOS.
+- The packet-capture network test (`tools/network-test/capture.sh`) runs nightly and has passed on macOS; the Linux run is fixed but hasn't run since. There is no network test on Windows (see What CI proves).
+- Linux has a small seccomp deny-list (ptrace, mounts, namespaces, kernel modules, BPF and similar, refused with an error). It is built for x86-64 and AArch64 only; on another architecture the namespaces are all there is. Other calls are allowed.
+- macOS: after each job the scheduler looks for processes tagged with the job's id and stops them, so a worker can't leave a background process behind. Apple's own binaries hide their environment, so one of those started by a worker can't be found that way (Python workers are found). The process limit on macOS is a guard against fork bombs on your total, not a count per job.
+- Windows AppContainer permission entries on the app's folders aren't removed on uninstall, because there is no installer yet.
+- See the [threat model](threat-model.md) for what the sandbox does and doesn't cover.

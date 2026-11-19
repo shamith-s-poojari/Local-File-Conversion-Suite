@@ -29,18 +29,19 @@ from .adapter import (
     RenderedPage,
     ResourceEstimate,
     ValidationReport,
+    issue,
 )
 from .context import JobContext
 from .errors import AdapterError
+from .limits import MB, check_pixels, fit_scale, rendered_size
 from .protocol import ValidationIssue, WarningItem
+from .urls import is_web_url
 
 MAX_PAGES = 5000
 """Default page limit (blueprint section 6.2). Raising it is a core setting, not a param."""
 
 MAX_FIELD_WALK = 10_000
 """Bound on form fields visited while looking for signatures."""
-
-MB = 1024 * 1024
 
 # --------------------------------------------------------------- inspection
 
@@ -116,16 +117,12 @@ def field_names(pdf: pikepdf.Pdf) -> set[str]:
 
 
 def has_active_content(pdf: pikepdf.Pdf) -> bool:
-    """JavaScript, an automatic action, or attachments (warning ACTIVE_CONTENT_FOUND)."""
-    root = pdf.Root
-    names = root.get(Name.Names)
-    if isinstance(names, pikepdf.Dictionary) and (
-        Name.JavaScript in names or Name.EmbeddedFiles in names
-    ):
-        return True
-    if Name.OpenAction in root or Name.AA in root:
-        return True
-    return False
+    """Whether the file has anything ``active.pdf_active_findings`` reports
+    (warning ACTIVE_CONTENT_FOUND). The warning and the "what's in this file"
+    list use one detector, so they can't disagree."""
+    from . import active  # noqa: PLC0415 - active imports markup; keep this module's import light
+
+    return bool(active.pdf_active_findings(pdf))
 
 
 def encryption_state(ctx: JobContext, path: Path) -> str:
@@ -137,6 +134,14 @@ def encryption_state(ctx: JobContext, path: Path) -> str:
         return "openPassword"
     except pikepdf.PdfError:
         raise AdapterError("E_INPUT_CORRUPT") from None
+
+
+def warn_if_encrypted(ctx: JobContext, path: Path) -> None:
+    """For tools whose output isn't a PDF (pictures, documents) and so never
+    goes through ``save_pdf``: warn ``ENCRYPTION_REMOVED`` when the input had
+    a password or permission limits that the output doesn't carry."""
+    if encryption_state(ctx, path) != "none":
+        ctx.warn_encryption_removed()
 
 
 # -------------------------------------------------------------- page ranges
@@ -187,10 +192,8 @@ def pages_in(ranges: list[tuple[int, int]]) -> list[int]:
     return sorted({p for first, last in ranges for p in range(first, last + 1)})
 
 
-def param_issue(param: str, reason: str, **detail: Any) -> ValidationIssue:
-    """An invalid parameter. The catalog has no parameter error code yet, so
-    this uses ``E_INTERNAL`` with ``param`` set; the core and UI key on ``param``."""
-    return ValidationIssue(code="E_INTERNAL", param=param, detail={"reason": reason, **detail})
+param_issue = issue
+"""Old name of ``converter_sdk.adapter.issue``, kept for adapters not yet moved."""
 
 
 # ---------------------------------------------------------------- bookmarks
@@ -333,22 +336,46 @@ def save_pdf(
         recompress_flate=recompress_flate,
     )
     problems: list[str] | None
+    messages: list[str] = []
     try:
         with pikepdf.open(path, password=check_password) as written:
             problems = written.check_pdf_syntax()
+            messages = list(problems)
             pages = len(written.pages)
-    except pikepdf.PdfError:
+    except pikepdf.PdfError as e:
         problems, pages = None, 0
+        messages = [str(e)]
     # Only problem counts leave the worker: messages can quote document content
     # and paths.
     if problems is None or problems:
-        if repaired:
+        if repaired or _damage_came_from_input(pdf, messages):
             # qpdf had to repair this document on open and the damage survived
             # the rewrite: the input is at fault, not the adapter.
             raise AdapterError("E_INPUT_CORRUPT", {"reason": "damaged"})
         detail = {"reason": "unreadable"} if problems is None else {"problems": len(problems)}
         raise AdapterError("E_OUTPUT_INVALID", detail)
+    if encryption is None and ctx.opened_encrypted_pdf:
+        # The output has no password or permission limits although an input
+        # had them, whichever tool wrote the file.
+        ctx.warn_encryption_removed()
     return pages
+
+
+_STREAM_DAMAGE = ("decod", "flate", "inflate", "uncompress", "stream", "filter")
+
+
+def _damage_came_from_input(pdf: pikepdf.Pdf, messages: list[str]) -> bool:
+    """Whether the problems found in a saved output are damaged stream data
+    copied from the input. Streams are carried over without being decoded, so
+    a garbled page stream is only noticed when the output is checked; the
+    same check on the document in memory then fails the same way. Messages are
+    read here and never sent: they can name objects but not content."""
+    if not messages or not all(any(w in m.lower() for w in _STREAM_DAMAGE) for m in messages):
+        return False
+    try:
+        return bool(pdf.check_pdf_syntax())
+    except pikepdf.PdfError:
+        return True
 
 
 def copy_into(dst: pikepdf.Pdf, src: pikepdf.Pdf, obj: pikepdf.Object) -> pikepdf.Object:
@@ -368,8 +395,44 @@ def flatten_forms(pdf: pikepdf.Pdf) -> None:
 # ----------------------------------------------------------- hidden layers
 
 
+_AS_STATE_KEYS = {"/View": "/ViewState", "/Print": "/PrintState", "/Export": "/ExportState"}
+
+
+def _auto_off(default: pikepdf.Dictionary) -> set[tuple[int, int]]:
+    """Groups an auto-state (``/AS``) entry can switch off: a group listed in
+    one whose usage says OFF for that event's category. Listed groups are
+    turned on or off from their usage when a viewer fires the event, so the
+    ON list alone doesn't say what a viewer shows."""
+    off: set[tuple[int, int]] = set()
+    states = default.get(Name.AS)
+    if not isinstance(states, pikepdf.Array):
+        return off
+    for entry in list(states)[:1000]:
+        if not isinstance(entry, pikepdf.Dictionary):
+            continue
+        categories = entry.get(Name.Category)
+        groups = entry.get(Name.OCGs)
+        if not isinstance(categories, pikepdf.Array) or not isinstance(groups, pikepdf.Array):
+            continue
+        for group in groups:
+            usage = group.get(Name.Usage) if isinstance(group, pikepdf.Dictionary) else None
+            if not (group.is_indirect and isinstance(usage, pikepdf.Dictionary)):
+                continue
+            for category in categories:
+                state_key = _AS_STATE_KEYS.get(str(category))
+                sub = usage.get(str(category))
+                if (
+                    state_key is not None
+                    and isinstance(sub, pikepdf.Dictionary)
+                    and sub.get(state_key) == Name.OFF
+                ):
+                    off.add(group.objgen)
+    return off
+
+
 def hidden_ocgs(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
-    """Optional-content groups that are off in the default configuration."""
+    """Optional-content groups that are off in the default configuration, or
+    that an auto-state entry switches off."""
     props = pdf.Root.get(Name.OCProperties)
     if not isinstance(props, pikepdf.Dictionary):
         return set()
@@ -381,7 +444,7 @@ def hidden_ocgs(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
     if default.get(Name.BaseState) == Name.OFF:
         on = {o.objgen for o in default.get(Name.ON, pikepdf.Array()) if o.is_indirect}
         off |= every - on
-    return off
+    return off | _auto_off(default)
 
 
 def _is_hidden(oc: Any, hidden: set[tuple[int, int]]) -> bool:
@@ -483,7 +546,8 @@ _ACTION_KINDS = {
     "/Movie": "media",
     "/Hide": "hide",
 }
-"""Action types that never survive "make safe to open". ``SetOCGState`` stays."""
+"""Action types that never survive "make safe to open". ``SetOCGState`` stays.
+``/URI`` is decided per link in ``_Sweep.kind_of``: web links stay."""
 
 _ANNOT_KINDS = {
     "/FileAttachment": "embedded",
@@ -496,6 +560,15 @@ _ANNOT_KINDS = {
 
 MAX_ACTION_CHAIN = 64
 MAX_DIRECT_DEPTH = 64
+
+
+def _is_web_uri(value: Any) -> bool:
+    if not isinstance(value, pikepdf.String):
+        return False
+    try:
+        return is_web_url(str(value))
+    except (UnicodeDecodeError, ValueError):
+        return False
 
 
 class _Sweep:
@@ -529,8 +602,13 @@ class _Sweep:
         if not isinstance(action, pikepdf.Dictionary):
             return None
         s = str(action.get(Name.S, ""))
-        if s == "/URI" and self.remove_links:
-            return "links"
+        if s == "/URI":
+            if self.remove_links:
+                return "links"
+            # A link that isn't plain web (file:, smb:, javascript:, a relative
+            # reference that a /Base can turn into one, or no string at all) can
+            # open or run something. Counted as "remote": the detector reports that.
+            return None if _is_web_uri(action.get(Name.URI)) else "remote"
         return _ACTION_KINDS.get(s)
 
     def next_chain(self, action: pikepdf.Dictionary, form: bool, depth: int = 0) -> None:
@@ -835,7 +913,11 @@ class PdfAdapter(Adapter):
         try:
             if not 1 <= page <= len(doc):
                 raise AdapterError("E_INTERNAL", {"reason": "pageOutOfRange"}, retryable=False)
-            image = doc[page - 1].render(scale=dpi / 72).to_pil()
+            pdf_page = doc[page - 1]
+            width, height = pdf_page.get_size()
+            scale = fit_scale(width, height, dpi / 72)
+            check_pixels(*rendered_size(width, height, scale))
+            image = pdf_page.render(scale=scale).to_pil()
             out.parent.mkdir(parents=True, exist_ok=True)
             image.save(out, format="PNG")
             return RenderedPage(width_px=image.width, height_px=image.height)

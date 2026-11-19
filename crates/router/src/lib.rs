@@ -14,7 +14,7 @@ mod model;
 pub mod planner;
 
 pub use manifest::{
-    build_registry, AdapterEntry, Catalog, Manifest, OutputFormat, Problem, Registry,
+    build_registry, AdapterEntry, Catalog, Manifest, OutputFormat, Problem, RecheckKind, Registry,
 };
 pub use model::{Format, Level, Platform, Tier};
 pub use planner::{targets, Availability, Plan, Planner, Targets};
