@@ -17,6 +17,7 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter, issue, source_format
+from converter_sdk.limits import MB
 from converter_sdk.tables import (
     Table,
     csv_text,
@@ -28,7 +29,6 @@ from converter_sdk.tables import (
     write_xlsx,
 )
 
-MB = 1024 * 1024
 MAX_PARTS = 1000
 """More files than this from one input is almost certainly a mistake."""
 

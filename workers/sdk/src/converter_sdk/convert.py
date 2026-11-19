@@ -13,10 +13,9 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from .adapter import Adapter, ValidationReport
+from .adapter import Adapter, ValidationReport, issue
 from .context import JobContext, OutputFile
 from .errors import AdapterError
-from .protocol import ValidationIssue
 
 Tier = Literal["E", "H", "R", "L"]
 _RANK = {"E": 0, "H": 1, "R": 2, "L": 3}
@@ -25,10 +24,6 @@ _RANK = {"E": 0, "H": 1, "R": 2, "L": 3}
 def source_format(path: Path) -> str:
     """The sniffed format of a staged input, from its staged extension."""
     return path.suffix.lstrip(".").lower()
-
-
-def issue(param: str, reason: str) -> ValidationIssue:
-    return ValidationIssue(code="E_INTERNAL", param=param, detail={"reason": reason})
 
 
 def worst(tiers: list[Tier]) -> Tier:
@@ -154,6 +149,18 @@ class ConversionAdapter(Adapter):
         return f"{self.title(params, index)}{suffix}.{ext}"
 
 
+_RUN_SPECIFIC_XMP = (
+    "dc:date",  # LibreOffice 25+ stamps the export time here
+    "xmp:CreateDate",
+    "xmp:ModifyDate",
+    "xmp:MetadataDate",
+    "xmpMM:DocumentID",
+    "xmpMM:InstanceID",
+    "xmpMM:VersionID",
+    "xmpMM:History",
+)
+
+
 def pdf_bytes_to_output(ctx: JobContext, data: bytes, path: Path) -> int:
     """Write PDF bytes made by another engine (PyMuPDF, LibreOffice) under the
     shared saving rules (spec 13.2): full rewrite, deterministic /ID, checked.
@@ -166,9 +173,11 @@ def pdf_bytes_to_output(ctx: JobContext, data: bytes, path: Path) -> int:
     scratch.write_bytes(data)
     try:
         with pikepdf.open(scratch) as pdf:
-            # Engines stamp creation times; drop them so repeat runs match.
+            # Engines stamp creation times and fresh random document IDs
+            # (newer LibreOffice writes xmpMM:DocumentID/InstanceID UUIDs);
+            # drop them so repeat runs match.
             with pdf.open_metadata(set_pikepdf_as_editor=False, update_docinfo=False) as meta:
-                for key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
+                for key in _RUN_SPECIFIC_XMP:
                     if key in meta:
                         del meta[key]
             # The engine's random /ID (and LibreOffice's /DocChecksum of its

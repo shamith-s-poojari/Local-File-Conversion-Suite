@@ -253,10 +253,7 @@ def test_pdf_keeps_comments_when_asked(tmp_path: Path) -> None:
 
 def test_pdf_hidden_layers_option(tmp_path: Path) -> None:
     import pikepdf
-    from converter_sdk import pdf as sdkpdf
 
-    if not hasattr(sdkpdf, "remove_hidden_layers"):
-        pytest.skip("remove_hidden_layers is not in converter_sdk.pdf yet")
     src = tmp_path / "in.pdf"
     pdf = pikepdf.new()
     pdf.add_blank_page()
@@ -319,7 +316,8 @@ DOC_RELS = (
     '<?xml version="1.0" encoding="UTF-8"?>'
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
     '<Relationship Id="rId1" Type="t/comments" Target="comments.xml"/>'
-    '<Relationship Id="rId2" Type="t/link" Target="https://example.com" TargetMode="External"/>'
+    '<Relationship Id="rId2" Type="t/hyperlink" Target="https://example.com" '
+    'TargetMode="External"/>'
     "</Relationships>"
 )
 
@@ -373,12 +371,12 @@ def test_docx_properties_comments_and_order(tmp_path: Path) -> None:
         assert b"Ada" not in core
         assert b"Bob" not in core
         assert b"2024" not in core
-        assert b"Plans" in core
+        assert b"Plans" not in core  # the title is free text about the document too
         app = z.read("docProps/app.xml")
         for gone in (b"Acme", b"Eve", b"Normal.dotm", b"TotalTime", b"16.0"):
             assert gone not in app
         assert b"<Pages>1</Pages>" in app
-        assert b"Microsoft Office" in app
+        assert b"Application" not in app and b"Microsoft" not in app  # blank, not invented
     assert not leftovers(tmp_path, out) & (BAD | {"comments", "tags"})
 
 
@@ -433,3 +431,188 @@ def test_office_with_doctype_is_corrupt(tmp_path: Path) -> None:
     with pytest.raises(AdapterError) as e:
         run_in_process(ADAPTER, tmp_path / "job", [bad], {})
     assert e.value.code == "E_INPUT_CORRUPT"
+
+
+# ------------------------------------------------------- audit 2026-11-15
+
+OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+GPS_TEXT = "37.7749, -122.4194"
+
+
+def rels_for(*items: tuple[str, str, str, bool]) -> str:
+    body = "".join(
+        f'<Relationship Id="{i}" Type="{OFFICE_REL}/{t}" Target="{target}"'
+        + (' TargetMode="External"' if ext else "")
+        + "/>"
+        for i, t, target, ext in items
+    )
+    return f'<Relationships xmlns="{REL_NS}">{body}</Relationships>'
+
+
+def gps_jpeg() -> bytes:
+    buf = io.BytesIO()
+    picture().save(buf, "JPEG", exif=exif_bytes(), quality=90)
+    return buf.getvalue()
+
+
+def audit_docx(path: Path, media: dict[str, bytes] | None = None) -> Path:
+    body = (
+        '<w:ins w:id="5" w:author="Ada Lovelace" w:date="2024-05-01T10:00:00Z">'
+        "<w:r><w:t>new</w:t></w:r></w:ins>"
+        '<w:del w:id="6" w:author="Bob" w:date="2024-05-02T10:00:00Z">'
+        "<w:r><w:delText>old</w:delText></w:r></w:del>"
+        '<w:attachedTemplate xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'relationships" r:id="rId9"/>'
+    )
+    parts: dict[str, bytes | str] = {
+        "[Content_Types].xml": CT,
+        "_rels/.rels": ROOT_RELS,
+        "docProps/core.xml": CORE,
+        "docProps/app.xml": APP,
+        "word/document.xml": f"<w:document {W}><w:body><w:p>{body}</w:p></w:body></w:document>",
+        "word/_rels/document.xml.rels": rels_for(
+            ("rId1", "image", "media/image1.jpeg", False),
+            ("rId2", "hyperlink", "https://example.com/", True),
+            ("rId3", "hyperlink", "file:///C:/Users/ada/notes.docx", True),
+            ("rId9", "attachedTemplate", "file:///C:/Users/ada/Templates/t.dotm", True),
+            ("rId10", "image", "http://tracker.example/p.png", True),
+        ),
+    }
+    for name, data in (media or {"word/media/image1.jpeg": gps_jpeg()}).items():
+        parts[name] = data
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)  # dated today
+    return path
+
+
+def test_docx_with_gps_photo_template_link_and_tracked_changes(tmp_path: Path) -> None:
+    src = audit_docx(tmp_path / "in.docx")
+    before = reveal.findings(ctx_for(tmp_path), src, include_active=False)
+    assert {f.detail for f in before if f.kind == "location"} == {GPS_TEXT}
+    r = run(tmp_path, src)
+    out = r.outputs[0]
+    after = reveal.findings(ctx_for(tmp_path), out, include_active=True)
+    assert not {f.kind for f in after} & (BAD | {"externalLinks"}), after
+    assert "TRACKED_CHANGES_KEPT" in r.warnings  # the changes stay, their authors don't
+    assert "DETAILS_REMOVED" in r.warnings
+    with zipfile.ZipFile(out) as z:
+        assert {i.date_time for i in z.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+        blob = b"".join(z.read(n) for n in z.namelist())
+        for gone in (b"Ada", b"Bob", b"2024-05", b"Templates", b"tracker.example", b"ada/notes"):
+            assert gone not in blob, gone
+        assert b"Exif" not in z.read("word/media/image1.jpeg")
+        rel = z.read("word/_rels/document.xml.rels")
+        assert b"https://example.com/" in rel and b"media/image1.jpeg" in rel
+        document = z.read("word/document.xml")
+        assert b"<w:ins " in document and b"<w:del " in document
+        assert b"attachedTemplate" not in document and b"new" in document and b"old" in document
+    with (
+        Image.open(z_extract(out, "word/media/image1.jpeg", tmp_path)) as new,
+        Image.open(io.BytesIO(gps_jpeg())) as old,
+    ):
+        assert list(new.getdata()) == list(old.getdata())  # same pixels
+
+
+def z_extract(archive: Path, name: str, tmp_path: Path) -> Path:
+    target = tmp_path / Path(name).name
+    with zipfile.ZipFile(archive) as z:
+        target.write_bytes(z.read(name))
+    return target
+
+
+@pytest.mark.parametrize(
+    ("folder", "name"), [("xl", "in.xlsx"), ("ppt", "in.pptx")], ids=["xlsx", "pptx"]
+)
+def test_pictures_in_xlsx_and_pptx_media_are_cleaned(
+    tmp_path: Path, folder: str, name: str
+) -> None:
+    src = tmp_path / name
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("docProps/core.xml", CORE)
+        z.writestr(f"{folder}/media/image1.jpg", gps_jpeg())
+        png = io.BytesIO()
+        info = PngInfo()
+        info.add_text("Author", "Grace")
+        picture().save(png, "PNG", pnginfo=info)
+        z.writestr(f"{folder}/media/image2.png", png.getvalue())
+    assert "location" in {f.kind for f in reveal.findings(ctx_for(tmp_path), src)}
+    out = run(tmp_path, src).outputs[0]
+    assert not leftovers(tmp_path, out) & BAD
+    with zipfile.ZipFile(out) as z:
+        assert b"Exif" not in z.read(f"{folder}/media/image1.jpg")
+        assert b"Grace" not in z.read(f"{folder}/media/image2.png")
+
+
+def test_an_unclean_part_fails_the_job_instead_of_going_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The verifier reads the output again: break each cleaner and the job must fail.
+    import sys
+
+    cls = load_adapter_class(ADAPTER)
+    module = sys.modules[cls.__module__]
+    for attr, replacement in (
+        ("_blank_tracked", lambda data: data),
+        ("_clean_picture", lambda data, tick: None),
+    ):
+        monkeypatch.setattr(module, attr, replacement)
+        job, rel = make_job_dir(tmp_path / attr, [audit_docx(tmp_path / f"{attr}.docx")])
+        ctx, _ = context(job, rel)
+        with pytest.raises(AdapterError) as e:
+            cls().execute_conversion(ctx, {})
+        assert e.value.detail["reason"] == "detailsRemain"
+        monkeypatch.undo()
+
+
+def test_outside_links_stay_when_the_package_dates_were_the_only_change(tmp_path: Path) -> None:
+    src = audit_docx(tmp_path / "in.docx", media={})
+    out = run(tmp_path, src).outputs[0]
+    with zipfile.ZipFile(out) as z:
+        assert b"example.com" in z.read("word/_rels/document.xml.rels")
+
+
+def test_pdf_jpeg_metadata_is_dropped_and_pixels_kept(tmp_path: Path) -> None:
+    import pikepdf
+
+    jpeg = gps_jpeg()
+    for flate in (False, True):
+        src = tmp_path / f"in{flate}.pdf"
+        pdf = pikepdf.new()
+        pdf.add_blank_page()
+        data = __import__("zlib").compress(jpeg) if flate else jpeg
+        stream = pikepdf.Stream(pdf, data)
+        stream.Type, stream.Subtype = pikepdf.Name.XObject, pikepdf.Name.Image
+        stream.Width, stream.Height = 64, 48
+        stream.ColorSpace, stream.BitsPerComponent = pikepdf.Name.DeviceRGB, 8
+        stream.Filter = (
+            pikepdf.Array([pikepdf.Name.FlateDecode, pikepdf.Name.DCTDecode])
+            if flate
+            else pikepdf.Name.DCTDecode
+        )
+        pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=stream))
+        pdf.save(src)
+        assert "location" in leftovers(tmp_path, src)
+        r = run(tmp_path / str(flate), src)
+        assert not leftovers(tmp_path, r.outputs[0]) & BAD
+        with pikepdf.open(r.outputs[0]) as out:
+            image = out.pages[0].Resources.XObject.Im0
+            assert str(image.Filter) == "/DCTDecode"
+            raw = image.read_raw_bytes()
+            assert b"Exif" not in raw and raw[:2] == b"\xff\xd8"
+            with Image.open(io.BytesIO(raw)) as img:
+                assert list(img.getdata()) == list(Image.open(io.BytesIO(jpeg)).getdata())
+
+
+def test_a_zip_bomb_is_refused(tmp_path: Path) -> None:
+    src = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/media/big.bin", b"0" * (300 * 1024 * 1024))
+        z.writestr("docProps/core.xml", CORE)
+    try:
+        r = run_in_process(ADAPTER, tmp_path / "job", [src], {})
+    except AdapterError as e:
+        assert e.code == "E_LIMIT_EXCEEDED"
+    else:
+        assert [i.code for i in r.errors] == ["E_LIMIT_EXCEEDED"]

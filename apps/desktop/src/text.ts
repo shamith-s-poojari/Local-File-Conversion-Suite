@@ -5,6 +5,9 @@ export interface Message {
   what: string;
   why?: string;
   todo?: string;
+  /** The text asks the person to report the problem: offer "Copy
+   * diagnostics" beside it (audit U30). */
+  report?: boolean;
 }
 
 export const ERRORS: Record<string, Message> = {
@@ -22,9 +25,9 @@ export const ERRORS: Record<string, Message> = {
     todo: "Check it and try again. Passwords can't be recovered or guessed by this app.",
   },
   E_LIMIT_EXCEEDED: {
-    what: "This is larger than the app allows.",
-    why: "Limits protect your computer from files that would use too much memory or disk.",
-    todo: "Raise the limit in Settings, or split the file first.",
+    what: "This is larger or more complex than the app can handle safely.",
+    why: "Fixed limits protect your computer from files that would use too much memory or disk. They can't be changed.",
+    todo: "Try a smaller file, or split it into parts first.",
   },
   E_RESOURCE_MEMORY: {
     what: "Your computer ran out of memory for this job.",
@@ -44,10 +47,12 @@ export const ERRORS: Record<string, Message> = {
     what: "Something went wrong inside the app.",
     why: "A processing engine misbehaved and was stopped.",
     todo: "Try again. If it keeps happening, please report it.",
+    report: true,
   },
   E_OUTPUT_INVALID: {
     what: "The result didn't pass its checks, so it wasn't kept.",
     todo: "Try again. If it keeps happening, please report it.",
+    report: true,
   },
   E_SANDBOX_UNAVAILABLE: {
     what: "Processing is turned off.",
@@ -71,6 +76,7 @@ export const ERRORS: Record<string, Message> = {
   E_INTERNAL: {
     what: "Something unexpected went wrong.",
     todo: "Try again. If it keeps happening, please report it.",
+    report: true,
   },
   E_PARAMS_INVALID: {
     what: "Some settings aren't valid.",
@@ -78,7 +84,35 @@ export const ERRORS: Record<string, Message> = {
   },
   E_CONFIRM_OVERWRITE: { what: "Confirm replacing the original file." },
   E_BUSY: { what: "This job is busy. Try again in a moment." },
+  E_WRONG_STATE: {
+    what: "That can't be done at this step.",
+    why: "The job has moved on, or hasn't reached the step that action needs.",
+    todo: "Go back and try again.",
+  },
   E_UNKNOWN_JOB: { what: "This job no longer exists." },
+  E_USAGE: {
+    what: "That request isn't complete or isn't right.",
+    why: "Something it needs is missing, or isn't recognised.",
+    todo: "Check your choices and try again.",
+  },
+  E_NO_USABLE_FILES: {
+    what: "None of these files can be used.",
+    why: "They're missing, of a type the app doesn't handle, or couldn't be read.",
+    todo: "Check the files and try again.",
+  },
+  E_NO_ROUTE: {
+    what: "These files can't be made into that format.",
+    todo: "Choose a different format. The choices shown are what these files can become.",
+  },
+  E_PARTIAL: {
+    what: "Some files couldn't be done. The others are ready.",
+    todo: "The notes say which files failed and why.",
+  },
+  E_SAVE_FAILED: {
+    what: "The results couldn't be saved.",
+    why: "The folder may be read-only, full, or gone.",
+    todo: "Choose another folder and try again.",
+  },
   E_UNKNOWN_FILE: { what: "This file was removed." },
 };
 
@@ -118,6 +152,9 @@ export const WARNINGS: Record<string, string> = {
   EXTERNAL_LINKS_REMOVED: "Things the file loaded from outside (templates, pictures, linked objects) were removed.",
   DETAILS_REMOVED: "Hidden details such as location, camera, author and dates were removed.",
   TRACKED_CHANGES_KEPT: "The file still has tracked changes, which show earlier wording. Accept or reject them in your editor first.",
+  ENCRYPTION_REMOVED: "The original was password protected. This result isn't: protect it again if you need to.",
+  WARNINGS_TRUNCATED: "There were more notes than can be shown here.",
+  PART_FAILED: "Some files couldn't be done. The others are ready.",
   W_UNKNOWN: "The engine reported an unusual warning.",
 };
 
@@ -138,18 +175,63 @@ export function folderTruncatedText(count: number | undefined): string {
   return `${n} more file${n === 1 ? "" : "s"} in this folder weren't added: up to 200 files at once.`;
 }
 
-/** Reasons the paste, copy and skip commands give (CommandError.reason). */
-export const ACTION_ERRORS: Record<string, string> = {
-  emptyPaste: "There's nothing to paste.",
-  notAnImage: "Only PNG and JPEG pictures can be pasted.",
-  notText: "The pasted text couldn't be read.",
-  pasteTooLarge: "What you pasted is over 50 MB.",
-  tooManyFiles: "That's more than 200 files.",
-  allSkipped: "Every file is already in that format.",
-  notCopyable: "Only pictures and text results can be copied.",
-  tooLargeToCopy: "The result is too large to copy.",
-  clipboardUnavailable: "The clipboard isn't available.",
+/** Reasons a command gives (CommandError.reason) that a person can act on or
+ * should read about. A reason with no text here is in REASONS_USING_CODE_TEXT:
+ * the text of its code says enough (audit U5). */
+export const REASONS: Record<string, Message> = {
+  emptyPaste: { what: "There's nothing to paste." },
+  notAnImage: { what: "Only PNG and JPEG pictures can be pasted." },
+  notText: { what: "The pasted text couldn't be read." },
+  pasteTooLarge: { what: "What you pasted is over 50 MB." },
+  tooManyFiles: { what: "That's more than 200 files." },
+  allSkipped: {
+    what: "Every file is already in that format.",
+    todo: "Choose a different format, or turn off skipping files that are already in it.",
+  },
+  notCopyable: { what: "Only pictures and text results can be copied." },
+  tooLargeToCopy: { what: "The result is too large to copy." },
+  clipboardUnavailable: { what: "The clipboard isn't available." },
+  revealFailed: {
+    what: "The folder couldn't be shown.",
+    todo: "Open the folder you chose in your file manager.",
+  },
+  downloadFailed: {
+    what: "This file couldn't be downloaded.",
+    why: "It's stored online only, and your cloud service didn't send it.",
+    todo: "Check your connection and that the cloud app is running, then try again.",
+  },
+  engineMissing: {
+    what: "A program this needs isn't installed.",
+    todo: "Install it, then reopen the app.",
+  },
+  selfTestPending: {
+    what: "Checking the sandbox…",
+    todo: "The safety check is still running. Try again in a moment.",
+  },
+  passwordsDiffer: {
+    what: "These files need different passwords.",
+    todo: "Convert them separately, so each gets its own.",
+  },
+  officePassword: {
+    what: "This file is password protected.",
+    why: "Word, Excel and PowerPoint files can't be opened with a password here.",
+    todo: "Remove the password in the program that made the file, save it, then add it again.",
+  },
 };
+
+/** Reasons with no text of their own: they come with a code whose text fits
+ * (an internal mistake, a damaged install, a full disk), or the person
+ * can't do anything about them. The text test makes every reason the core
+ * can give be in REASONS or here. */
+export const REASONS_USING_CODE_TEXT = [
+  "appNotStarted", "badJobId", "badParamsSchema", "commandPanicked", "jobNotFinished", "multiHop",
+  "noFiles", "noOutputs", "noRoute", "nothingPending", "notACandidate", "notActionable",
+  "notAnObject", "notAnOperation", "notPreviewable", "orderMismatch", "passwordNotText",
+  "pasteFolder", "pasteName", "pasteWrite", "previewFolder", "selfTestFailed", "unknownAdapter",
+  "unknownFile", "unknownFormat", "unknownJob", "unknownOperation", "unknownOutput",
+  "unknownOutputFormat", "unknownPasteKind", "unreadable", "unreadableOutput", "unsupportedDpi",
+  "unsupportedInput", "worker", "workerStart", "wrongFileCount",
+];
 
 /** What each kind of finding is called in "Reveals: …" (ADR 0005). */
 export const FINDING_LABELS: Record<string, string> = {
@@ -175,16 +257,14 @@ export function errorMessage(code: string): Message {
   return ERRORS[code] ?? ERRORS.E_INTERNAL!;
 }
 
+/** The text for an error: its reason's when the app has one, else its code's. */
+export function reasonMessage(code: string, reason?: string | null): Message {
+  return (reason ? REASONS[reason] : undefined) ?? errorMessage(code);
+}
+
 export function warningText(code: string): string {
   return WARNINGS[code] ?? WARNINGS.W_UNKNOWN!;
 }
-
-export const TIER_LABELS: Record<string, string> = {
-  E: "Exact",
-  H: "High fidelity",
-  R: "Best effort",
-  L: "Lossy",
-};
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -195,10 +275,18 @@ export function formatBytes(n: number): string {
 /** How to install an engine the app looks for (ADR 0003), in this OS's
  * usual way. The app finds it on its next start. */
 export function installHint(engine: "ffmpeg" | "libreoffice", platform: string | undefined): string {
-  const name = engine === "ffmpeg" ? "FFmpeg" : "LibreOffice";
+  const name = ENGINE_NAMES[engine];
+  const cmd = installCommand(engine, platform);
+  return cmd ? `Needs ${name}: install it with \u201c${cmd}\u201d, then reopen the app.` : `Needs ${name}.`;
+}
+
+export const ENGINE_NAMES = { ffmpeg: "FFmpeg", libreoffice: "LibreOffice" } as const;
+
+/** The command alone, for showing as text a person can copy. */
+export function installCommand(engine: "ffmpeg" | "libreoffice", platform: string | undefined): string | undefined {
   const command: Record<string, Record<string, string>> = {
     ffmpeg: {
-      macos: "brew install ffmpeg",
+      macos: "brew install ffmpeg-full",
       windows: "winget install Gyan.FFmpeg",
       linux: "sudo apt install ffmpeg",
     },
@@ -208,6 +296,211 @@ export function installHint(engine: "ffmpeg" | "libreoffice", platform: string |
       linux: "sudo apt install libreoffice",
     },
   };
-  const cmd = platform ? command[engine]?.[platform] : undefined;
-  return cmd ? `Needs ${name}: install it with \u201c${cmd}\u201d, then reopen the app.` : `Needs ${name}.`;
+  return platform ? command[engine]?.[platform] : undefined;
 }
+
+/** Shown when files are dropped while a job is in progress (audit U2). */
+export const FINISH_FIRST = "Finish this first. The files you dropped weren't added: drop them again afterwards.";
+
+/** A conversion left some files out because they were already in the target format. */
+export function skippedText(count: number, formatLabel: string): string {
+  return `Skipped ${count} already in ${formatLabel}.`;
+}
+
+/** What the redaction checks (V1 to V8, `verified-V1` …) look for, in plain
+ * words. A check this list doesn't know is shown under its ID. */
+export const CHECK_NAMES: Record<string, string> = {
+  V1: "No text left under the covered areas",
+  V2: "Covered areas checked a second way",
+  V3: "Covered words gone from the page text",
+  V4: "Covered words gone from hidden file data",
+  V5: "No hidden extras (properties, attachments, scripts)",
+  V6: "Covered areas are solid",
+  V7: "No earlier version kept inside the file",
+  V8: "Page count unchanged",
+};
+
+export function checkName(id: string): string {
+  return CHECK_NAMES[id] ?? `Check ${id}`;
+}
+
+/** The sandbox self-test's checks, by the name Rust gives them. */
+export const SELFTEST_NAMES: Record<string, string> = {
+  runtime_readable: "Can read its own runtime",
+  read_sentinel: "Can't read files outside the job",
+  list_home: "Can't list your home folder",
+  read_other_job: "Can't read another job's files",
+  write_outside: "Can't write outside its own folder",
+  connect_external: "Has no internet access",
+  connect_loopback: "Can't reach services on this computer",
+  dns: "Can't look up web addresses",
+  spawn_shell: "Can't start a shell",
+  read_job: "Can read the job's files",
+  write_work: "Can write in its work folder",
+  nothing_written_outside: "Nothing was written outside the job",
+  memory_limit: "Is stopped when it uses too much memory",
+};
+
+export function selfTestName(name: string): string {
+  return SELFTEST_NAMES[name] ?? name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+/** What the "Needs: …" line under a disabled Convert button says. */
+export const NEEDS = {
+  prefix: "Needs:",
+  file: "a file",
+  choice: "a format or a tool",
+  loading: "the tool list to load",
+  confirmPassword: "confirm password",
+  passwordsMatch: "matching passwords",
+};
+
+/** Messages under a field the core (or the form) found invalid (audit U27). */
+export const FIELD_ERRORS = {
+  generic: "Check this setting.",
+  choice: "Choose one of the options.",
+  color: "Enter a colour like #1F6C9F.",
+  password: "Enter a password.",
+  mismatch: "The passwords don't match.",
+  number: "Enter a number.",
+  text: "Check this text.",
+  numberBetween: (min: number, max: number) => `Enter a number from ${min} to ${max}.`,
+  numberAtLeast: (min: number) => `Enter a number of ${min} or more.`,
+  numberAtMost: (max: number) => `Enter a number of ${max} or less.`,
+  textBetween: (min: number, max: number) => `Use between ${min} and ${max} characters.`,
+  textAtLeast: (min: number) => `Use at least ${min} characters.`,
+  textAtMost: (max: number) => `Use at most ${max} characters.`,
+};
+
+export const CONFIRM_LABEL = "Confirm password";
+
+/** Shown when the list of what the files can become couldn't be loaded. */
+export const TARGETS_FAILED = "Couldn't work out what these files can become.";
+
+/** The redaction canvas: drawing needs a pointer, but nothing else does. */
+export const REDACTION_KEYBOARD_HINT =
+  "Without a pointer: cover lines from “Text on this page”, use “Redact this whole page”, or add search terms, which are removed from the whole document.";
+
+/** What a screen reader says for the page image. */
+export const redactionSurfaceLabel = (page: number) =>
+  `Page ${page}. Drag to cover an area, or click a word. Without a pointer, use the list of text lines.`;
+
+export const PAGE_ORGANIZER = {
+  moved: (page: number, position: number, total: number) => `Page ${page} moved to position ${position} of ${total}.`,
+  rotated: (page: number, degrees: number) => `Page ${page} rotated to ${degrees}°.`,
+  duplicated: (page: number, total: number) => `Page ${page} duplicated. ${total} pages now.`,
+  deleted: (page: number, total: number) => `Page ${page} deleted. ${total} pages left.`,
+  reset: (total: number) => `Back to the original order. ${total} pages.`,
+};
+
+export const DIAGNOSTICS = {
+  copy: "Copy diagnostics",
+  copied: "Copied",
+  failed: "Couldn't copy. Select the text below and copy it yourself.",
+  note: "Version, system and test results only: no file names or contents.",
+};
+
+/** The Saved screen (audit U7). */
+export const SAVED = {
+  where: "Saved to",
+  show: "Show in folder",
+};
+
+/** Declining to replace an original when saving (audit S16). */
+export const OVERWRITE_KEEP = "Keep the original";
+
+/** A file in "Partly done" whose position the app can't match to a name. */
+export function unnamedFile(index: number): string {
+  return `File ${index + 1}`;
+}
+
+/** What a safe detail of a warning reads as. Only numbers and page lists
+ * are shown: other details can hold document text (audit U8). */
+export function warningDetailText(detail: unknown): string | null {
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof d.count === "number" && Number.isFinite(d.count)) parts.push(`${d.count} found.`);
+  if (Array.isArray(d.pages) && d.pages.length > 0 && d.pages.every((p) => Number.isInteger(p))) {
+    const shown = (d.pages as number[]).slice(0, 20).join(", ");
+    const more = d.pages.length > 20 ? ` and ${d.pages.length - 20} more` : "";
+    parts.push(`Pages: ${shown}${more}.`);
+  }
+  if (typeof d.maxSide === "number" && Number.isFinite(d.maxSide)) parts.push(`Longest side: ${d.maxSide} px.`);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/** Home banner when the core couldn't start at all (for example, a build
+ * with no worker runtime). It isn't a sandbox failure, so it doesn't use the
+ * E_SANDBOX_UNAVAILABLE heading; the core's own reason, written for
+ * developers, goes in a disclosure. */
+export const STARTUP_FAILED = {
+  what: "Part of the app is missing, so it can't open files.",
+  todo: "Reinstall the app. If it keeps happening, please report it with the details below.",
+  details: "Details",
+};
+
+/** Home, while the sandbox self-test is still running. Not an error: the
+ * result isn't in yet, so nothing is shown in the error colour. */
+export const SELF_TEST_RUNNING = {
+  what: "Checking that the sandbox works…",
+  why: "This takes a few seconds. You can add files as soon as it's done.",
+};
+
+/** The link to Settings, wherever a message sends people there. */
+export const OPEN_SETTINGS = "Open Settings";
+
+/** Where some formats are missing because a program isn't installed. */
+export const ENGINES_IN_SETTINGS = "Some choices need programs that aren't installed. Settings shows which ones.";
+
+/** Checking files (while each file is opened in its sandbox). */
+export const CHECKING = {
+  title: "Checking files…",
+  lede: "Each file is opened in its own sandbox to read its size, pages or length.",
+  cancel: "Cancel",
+};
+
+/** Cancelling while the job is being set up. */
+export const STARTING = { busy: "Starting…", cancel: "Cancel" };
+
+/** Asking first, when going on would lose work (audit UX-8). */
+export const CONFIRM = {
+  startOver: {
+    message: "Start over? The files and choices here will be cleared. Your original files aren't touched.",
+    confirm: "Start over",
+    keep: "Keep working",
+  },
+  adjust: {
+    message: "Change the settings? The result you have now will be thrown away and made again when you convert.",
+    confirm: "Change settings",
+    keep: "Keep this result",
+  },
+};
+
+/** The list of tools couldn't be loaded, so nothing can be configured. */
+export const REGISTRY_FAILED = {
+  what: "The list of tools couldn't be loaded.",
+  todo: "Without it nothing can be set up. Try again, and if it keeps failing, restart the app.",
+  retry: "Try again",
+};
+
+export const TARGETS_RETRY = "Try again";
+
+/** The redaction page's text lines: the way to cover text without a pointer. */
+export const REDACTION_LINES = {
+  heading: "Text on this page",
+  help: "Each line has a button that covers it. This works from the keyboard.",
+  none: "No text was found on this page. Use “Redact this whole page”, or draw an area with a pointer.",
+  loading: "Reading the page's text…",
+  cover: "Cover",
+  covered: "Covered",
+  coverLabel: (text: string) => `Cover this line: ${text}`,
+  coveredLabel: (text: string) => `Already covered: ${text}`,
+  added: (page: number, count: number) => `Area added on page ${page}. ${count} area${count === 1 ? "" : "s"} in all.`,
+  alreadyCovered: "That line is already covered.",
+  removed: (count: number) => `Area removed. ${count} area${count === 1 ? "" : "s"} left.`,
+  more: (shown: number, total: number) => `Showing the first ${shown} of ${total} lines on this page.`,
+};
+
+/** Page text a person can use as a label for something the app made. */
+export const UNKNOWN_TYPE = "Unknown type";

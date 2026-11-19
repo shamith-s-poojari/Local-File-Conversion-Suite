@@ -49,6 +49,11 @@ class ScriptedAdapter(Adapter):
                 time.sleep(0.01)
         if mode == "crash":
             raise ValueError(f"contains document text and {SECRET}")
+        if mode in ("efbig", "enospc"):
+            import errno  # noqa: PLC0415
+
+            code = errno.EFBIG if mode == "efbig" else errno.ENOSPC
+            raise OSError(code, "write failed for /secret/path.pdf")
         if mode == "fail":
             raise AdapterError("E_PASSWORD_WRONG", {"page": 3})
         if mode == "escape":
@@ -195,6 +200,17 @@ def test_crash_is_internal_and_leaks_nothing(job_dir: Path) -> None:
     raw = b"".join(h.out)
     assert SECRET.encode() not in raw
     assert b"document text" not in raw
+    h.finish()
+
+
+@pytest.mark.parametrize("mode", ["efbig", "enospc"])
+def test_full_disk_and_file_size_limit_are_resource_errors(job_dir: Path, mode: str) -> None:
+    """Python ignores SIGXFSZ, so hitting the file-size limit is an EFBIG error."""
+    h = Harness(job_dir)
+    h.send(execute({"mode": mode}))
+    e = h.wait_for("error")
+    assert e.code == "E_RESOURCE_DISK"
+    assert b"/secret/path" not in b"".join(h.out)
     h.finish()
 
 

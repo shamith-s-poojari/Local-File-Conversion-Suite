@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-job-inputs"
+description = "Enables the job_inputs command without any pre-configured scope."
+commands.allow = ["job_inputs"]
+
+[[permission]]
+identifier = "deny-job-inputs"
+description = "Denies the job_inputs command without any pre-configured scope."
+commands.deny = ["job_inputs"]

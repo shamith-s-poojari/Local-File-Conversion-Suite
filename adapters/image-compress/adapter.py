@@ -20,9 +20,9 @@ from converter_sdk import (
 )
 from converter_sdk.convert import ConversionAdapter, source_format
 from converter_sdk.images import Frames, encode, pixels, read_frames, to_palette
+from converter_sdk.limits import MB
 from PIL import Image
 
-MB = 1024 * 1024
 LOSSY = ("jpg", "webp", "avif")
 QUALITIES = [85, 75, 65, 55, 45, 35]
 """Tried from the top; the first that fits wins."""

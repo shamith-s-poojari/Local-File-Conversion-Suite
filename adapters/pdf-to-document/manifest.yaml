@@ -8,7 +8,7 @@ edges:
   - { from: [pdf], to: md, tier: R }
   - { from: [pdf], to: txt, tier: R }
   - { from: [pdf], to: xlsx, tier: R }
-fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, NO_TEXT_LAYER]
+fidelityNotes: [LAYOUT_APPROXIMATED, IMAGES_DROPPED, NO_TEXT_LAYER, ENCRYPTION_REMOVED]
 limits: { timeoutBaseS: 300, timeoutSPerMb: 60, noProgressS: 300, diskFactor: 4.0 }
 params: ./params.schema.json
 platforms: [windows, macos, linux]

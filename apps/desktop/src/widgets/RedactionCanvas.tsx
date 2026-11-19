@@ -1,25 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { previewUrl, type WordBox } from "../api";
+import { REDACTION_KEYBOARD_HINT, REDACTION_LINES, redactionSurfaceLabel } from "../text";
+import { groupLines, isCovered, lineBox, MAX_LINES, pad, type Box } from "./redactionLines";
+import { findMatches, SEARCH_PAGE_LIMIT } from "./redactionSearch";
 import type { WidgetProps } from "./types";
 
-/** Normalized 0..1 in displayed orientation, origin top-left (spec 13.8). */
-export interface Box {
-  page: number;
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-}
+export type { Box };
 
 const DPI = 96;
 /** A drag shorter than this (normalized) is a click: snap to the word under it. */
 const CLICK = 0.004;
-const SEARCH_PAGE_LIMIT = 500;
 
 /** `redactionCanvas` widget (spec 12.3): draw, select and remove boxes;
  * word snapping; term search with a results list; undo. Everything except
  * drawing is also reachable by keyboard: whole-page redaction and terms. */
-export function RedactionCanvas({ id, label, value, onChange, ctx, params, setParam }: WidgetProps<Box[]>) {
+export function RedactionCanvas({ id, label, value, onChange, ctx, params, setParam, invalid, errorId }: WidgetProps<Box[]>) {
   const boxes = value ?? [];
   const terms = (params.terms as string[] | undefined) ?? [];
   const [page, setPage] = useState(1);
@@ -30,12 +25,17 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   const [term, setTerm] = useState("");
   const [results, setResults] = useState<{ page: number; count: number }[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [status, setStatus] = useState("");
   const surface = useRef<HTMLDivElement>(null);
+  const searchControl = useRef<AbortController | null>(null);
   const total = Math.max(ctx.pages, 1);
 
   useEffect(() => {
     let live = true;
     setImg(null);
+    // The previous page's words would snap clicks and draw highlights on this
+    // page until its own arrive (audit U17).
+    setWords(null);
     ctx.api
       .requestPreview(ctx.reference, page, DPI)
       .then((p) => live && setImg({ src: previewUrl(p.path), w: p.widthPx, h: p.heightPx }))
@@ -49,13 +49,27 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
     };
   }, [ctx.api, ctx.reference, page]);
 
+  // A search still running when the widget goes away would set state on nothing.
+  useEffect(() => () => searchControl.current?.abort(), []);
+
   const commit = useCallback(
-    (next: Box[]) => {
+    (next: Box[], message?: string) => {
       setHistory((h) => [...h.slice(-49), boxes]);
       onChange(next);
+      setStatus(message ?? (next.length > boxes.length ? REDACTION_LINES.added(next[next.length - 1]!.page, next.length) : REDACTION_LINES.removed(next.length)));
     },
     [boxes, onChange],
   );
+  const lines = useMemo(() => (words ? groupLines(words.words) : []), [words]);
+  const coverLine = (line: ReturnType<typeof groupLines>[number]) => {
+    if (!words) return;
+    const box = lineBox(line, page, words.w, words.h);
+    if (isCovered(boxes, box)) {
+      setStatus(REDACTION_LINES.alreadyCovered);
+      return;
+    }
+    commit([...boxes, box]);
+  };
 
   const point = (e: PointerEvent) => {
     const r = surface.current!.getBoundingClientRect();
@@ -113,20 +127,21 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
 
   const search = async () => {
     if (terms.length === 0) return;
+    const control = new AbortController();
+    searchControl.current = control;
     setSearching(true);
-    const found: { page: number; count: number }[] = [];
-    const needles = terms.map((t) => t.toLowerCase().replace(/\s+/g, ""));
-    for (let p = 1; p <= Math.min(total, SEARCH_PAGE_LIMIT); p++) {
-      try {
-        const t = await ctx.api.getPageText(ctx.reference, p);
-        const text = t.words.map((w) => w.text).join("").toLowerCase();
-        const count = needles.reduce((n, needle) => n + text.split(needle).length - 1, 0);
-        if (count) found.push({ page: p, count });
-      } catch {
-        break;
-      }
-    }
+    const found = await findMatches({
+      total,
+      needles: terms,
+      signal: control.signal,
+      getText: (p) => ctx.api.getPageText(ctx.reference, p),
+    });
+    if (control.signal.aborted) return; // stopped: whoever stopped it has already reset the state
     setResults(found);
+    setSearching(false);
+  };
+  const stopSearch = () => {
+    searchControl.current?.abort();
     setSearching(false);
   };
 
@@ -138,7 +153,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   const ratio = img ? `${img.w} / ${img.h}` : words ? `${words.w} / ${words.h}` : "612 / 792";
 
   return (
-    <fieldset className="field redaction" id={id}>
+    <fieldset className="field redaction" id={id} aria-describedby={invalid ? errorId : undefined}>
       <legend>{label}</legend>
       <div className="redaction-layout">
         <div>
@@ -160,8 +175,10 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             onPointerDown={onDown}
             onPointerMove={onMove}
             onPointerUp={onUp}
+            // Another gesture took the pointer (a scroll, a system dialog): drop the half-drawn box.
+            onPointerCancel={() => setDrag(null)}
             role="img"
-            aria-label={`Page ${page}. Drag to cover an area, or click a word.`}
+            aria-label={redactionSurfaceLabel(page)}
           >
             {img ? <img src={img.src} alt="" draggable={false} /> : <div className="loading">Rendering page…</div>}
             <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
@@ -190,6 +207,42 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               )}
             </svg>
           </div>
+          <p className="hint">{REDACTION_KEYBOARD_HINT}</p>
+          <h3>{REDACTION_LINES.heading}</h3>
+          <p className="hint" id={`${id}-lines-help`}>
+            {REDACTION_LINES.help}
+          </p>
+          {words === null ? (
+            <p className="hint">{REDACTION_LINES.loading}</p>
+          ) : lines.length === 0 ? (
+            <p className="hint">{REDACTION_LINES.none}</p>
+          ) : (
+            <>
+              <ul className="line-list" aria-describedby={`${id}-lines-help`}>
+                {lines.slice(0, MAX_LINES).map((line, i) => {
+                  const done = isCovered(boxes, lineBox(line, page, words.w, words.h));
+                  return (
+                    <li key={i}>
+                      <span className="line-text">{line.text}</span>
+                      <button
+                        type="button"
+                        className="sm"
+                        aria-disabled={done || undefined}
+                        aria-label={done ? REDACTION_LINES.coveredLabel(line.text) : REDACTION_LINES.coverLabel(line.text)}
+                        onClick={() => coverLine(line)}
+                      >
+                        {done ? REDACTION_LINES.covered : REDACTION_LINES.cover}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+              {lines.length > MAX_LINES && <p className="hint">{REDACTION_LINES.more(MAX_LINES, lines.length)}</p>}
+            </>
+          )}
+          <p className="visually-hidden" role="status">
+            {status}
+          </p>
         </div>
         <div className="redaction-side">
           <div className="row">
@@ -200,14 +253,14 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               Undo
             </button>
           </div>
-          <h4>Areas ({boxes.length})</h4>
+          <h3>Areas ({boxes.length})</h3>
           {boxes.length === 0 ? (
             <p className="hint">Drag on the page to cover an area, or click a word.</p>
           ) : (
             <ul className="box-list">
               {boxes.map((b, i) => (
                 <li key={i}>
-                  <button type="button" className="link" onClick={() => setPage(b.page)}>
+                  <button type="button" className="link" onClick={() => setPage(b.page)} aria-label={`Page ${b.page}${b.x0 === 0 && b.y0 === 0 && b.x1 === 1 && b.y1 === 1 ? " (whole page)" : ""}, area ${i + 1}`}>
                     Page {b.page}
                     {b.x0 === 0 && b.y0 === 0 && b.x1 === 1 && b.y1 === 1 ? " (whole page)" : ""}
                   </button>
@@ -218,7 +271,7 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
               ))}
             </ul>
           )}
-          <h4>Search terms</h4>
+          <h3>Search terms</h3>
           <div className="row">
             <label htmlFor={`${id}-term`} className="visually-hidden">
               Term to redact everywhere
@@ -250,9 +303,16 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
             ))}
           </ul>
           {terms.length > 0 && (
-            <button type="button" onClick={search} disabled={searching}>
-              {searching ? "Searching…" : "Find matches"}
-            </button>
+            <div className="row">
+              <button type="button" onClick={search} disabled={searching}>
+                {searching ? "Searching…" : "Find matches"}
+              </button>
+              {searching && (
+                <button type="button" className="ghost" onClick={stopSearch}>
+                  Stop
+                </button>
+              )}
+            </div>
           )}
           {results && (
             <div aria-live="polite">
@@ -281,7 +341,3 @@ export function RedactionCanvas({ id, label, value, onChange, ctx, params, setPa
   );
 }
 
-function pad(b: Box): Box {
-  const d = 0.002;
-  return { page: b.page, x0: Math.max(0, b.x0 - d), y0: Math.max(0, b.y0 - d), x1: Math.min(1, b.x1 + d), y1: Math.min(1, b.y1 + d) };
-}

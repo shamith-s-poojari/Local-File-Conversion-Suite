@@ -11,7 +11,7 @@ from converter_conformance.validate import probe
 
 ADAPTER = Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.skipif(files.ffmpeg() is None, reason="FFmpeg isn't installed")
+pytestmark = pytest.mark.skipif(files.skip_ffmpeg(), reason="FFmpeg isn't installed")
 
 
 def _seconds(path: Path) -> float:

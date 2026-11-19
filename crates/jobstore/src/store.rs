@@ -1,4 +1,25 @@
 //! The authoritative job store (spec sections 10.1, 10.4 and 10.5).
+//!
+//! What the store keeps, and where:
+//!
+//! - Jobs live in memory only. On disk there is each job's private directory
+//!   (`<dataRoot>/jobs/<jobId>/`, mode `0700` on Unix) holding `.lease`,
+//!   `in/`, `work/` and `out/`; no job history is written anywhere.
+//! - Every state change is checked against the section 10.1 state machine
+//!   and numbered with the next `seq`. The returned [`JobEvent`] and the one
+//!   given to [`StoreConfig::on_event`] are the same event.
+//! - Events reach the sink in `seq` order, after the store's lock is
+//!   released, so a sink may call the store. See [`EventSink`].
+//! - Entering a terminal state cleans up: `succeeded` and `partial` delete
+//!   `work/`; `failed` and `cancelled` delete `in/`, `work/` and `out/`. A
+//!   deletion that is blocked is retried, then left for shutdown or the next
+//!   start (the sweep).
+//! - The one `running → queued` move (a memory retry) empties `work/` and
+//!   `out/`. If it can't, the move reports an error and the job must be
+//!   failed rather than run on a folder that holds the first try's files.
+//! - Worker-supplied text (stages, warning details, file names) is stored as
+//!   given. It is shown as plain text and cleaned only when a file is saved.
+//! - Errors never contain paths, file names or document content.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +33,7 @@ use crate::error::JobError;
 use crate::fsutil::{create_private_dir, normalize, remove_with_retry, RetryPolicy};
 use crate::id::JobId;
 use crate::lease::Lease;
+use crate::name::is_windows_device_name;
 use crate::sync::SyncRoots;
 
 /// Job states (spec section 10.1):
@@ -81,6 +103,27 @@ impl JobState {
     }
 }
 
+/// Most warnings one job keeps, counting the [`WARNINGS_TRUNCATED`] notice.
+pub const MAX_WARNINGS_PER_JOB: usize = 64;
+
+// The warning codes the core itself raises, in one place. Codes from workers
+// are checked against the protocol schema's catalog by the scheduler; these
+// are the ones the core adds, and `W_UNKNOWN` is what a worker's code outside
+// the catalog is shown as.
+
+/// Warning code added once when the cap dropped warnings.
+pub const WARNINGS_TRUNCATED: &str = "WARNINGS_TRUNCATED";
+
+/// A part of a multi-part job failed and was skipped. One per part, told
+/// apart by detail (codes and input numbers only).
+pub const WARN_PART_FAILED: &str = "PART_FAILED";
+
+/// The job is larger than the memory budget and runs alone.
+pub const WARN_LARGE_JOB: &str = "W_LARGE_JOB";
+
+/// Shown for a worker's warning code that isn't in the catalog.
+pub const WARN_UNKNOWN: &str = "W_UNKNOWN";
+
 /// A warning attached to a job. `detail` is worker text: the UI renders it as
 /// plain text only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -142,6 +185,12 @@ pub struct OutputFile {
     /// worker said so (ADR 0005).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<usize>,
+    /// SHA-256 of the file as verified, in lower-case hex. Saving hashes the
+    /// bytes it copies and refuses a file that differs, so an output can't
+    /// change between its check and the user's folder. `None` skips that
+    /// check (callers that have no hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// A job as the UI sees it after a reload (`get_snapshot`). Holds no paths.
@@ -188,8 +237,10 @@ pub struct JobDirs {
     pub out: PathBuf,
 }
 
-/// Receives every event as it happens, in `seq` order. Called with the store
-/// locked, so it must not call back into the store.
+/// Receives every event in `seq` order, one at a time, after the change that
+/// caused it is complete. The store isn't locked while it runs, so it may
+/// read the store (the UI forwarder does); an event a call makes from inside
+/// it is delivered once this one returns, not nested.
 pub type EventSink = Arc<dyn Fn(&JobEvent) + Send + Sync>;
 
 /// Job store settings.
@@ -277,6 +328,22 @@ pub struct JobStore {
     lease: Lease,
     pub(crate) config: StoreConfig,
     inner: Mutex<Inner>,
+    /// Events numbered but not yet given to the sink. Pushed while `inner` is
+    /// held (so in `seq` order) and drained by [`JobStore::flush_events`].
+    pending: Mutex<Vec<JobEvent>>,
+    /// Held while the sink runs, so two threads can't deliver out of order.
+    delivering: Mutex<()>,
+}
+
+/// Delivers pending events when dropped, so every exit path of a store method
+/// does it after the method's own locks are released (it's declared first and
+/// so dropped last).
+struct FlushOnDrop<'a>(&'a JobStore);
+
+impl Drop for FlushOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.flush_events();
+    }
 }
 
 impl std::fmt::Debug for JobStore {
@@ -307,6 +374,8 @@ impl JobStore {
                 jobs: BTreeMap::new(),
                 leftovers: Vec::new(),
             }),
+            pending: Mutex::new(Vec::new()),
+            delivering: Mutex::new(()),
         };
         Ok((store, report))
     }
@@ -324,6 +393,7 @@ impl JobStore {
     /// Creates a job and its private directory with `in/`, `work/`, `out/`
     /// and a lease.
     pub fn create_job(&self) -> Result<(JobId, JobEvent), JobError> {
+        let _flush = FlushOnDrop(self);
         let id = JobId::new_random();
         let dir = self.data_root.jobs_dir().join(id.as_str());
         create_private_dir(&dir).map_err(JobError::io("creating the job directory"))?;
@@ -386,6 +456,7 @@ impl JobStore {
             }
         }
 
+        let _flush = FlushOnDrop(self);
         let mut events = Vec::new();
         let dir = {
             let mut inner = self.lock();
@@ -399,6 +470,8 @@ impl JobStore {
             events.push(self.emit(seq, job, Vec::new()));
             job.dir.clone()
         };
+        // Copying can take a while: show "staging" now, not when it's done.
+        self.flush_events();
 
         let mut total: u64 = 0;
         for s in sources {
@@ -462,7 +535,8 @@ impl JobStore {
 
     /// Changes a job's state. Use [`JobStore::fail`] for failures, so the
     /// event carries a code. Entering a terminal state runs the section 10.5
-    /// cleanup.
+    /// cleanup. `running → queued` can fail after the state changed, when
+    /// `work/` or `out/` couldn't be emptied; fail the job then.
     pub fn transition(&self, id: &JobId, to: JobState) -> Result<JobEvent, JobError> {
         self.change_state(id, to, None)
     }
@@ -479,6 +553,7 @@ impl JobStore {
         to: JobState,
         failure: Option<JobFailure>,
     ) -> Result<JobEvent, JobError> {
+        let _flush = FlushOnDrop(self);
         let (event, cleanup, recreate) = {
             let mut inner = self.lock();
             let Inner { seq, jobs, .. } = &mut *inner;
@@ -517,10 +592,24 @@ impl JobStore {
             };
             (event, cleanup, recreate)
         };
+        // The event first, then the (possibly slow) cleanup.
+        self.flush_events();
+        let mut stale = false;
         for path in cleanup {
             if remove_with_retry(&path, self.config.retry).is_err() {
+                stale |= recreate.contains(&path);
                 self.lock().leftovers.push(path);
             }
+        }
+        // Fail closed: a retry that starts on a `work/` or `out/` it couldn't
+        // empty could take the first attempt's files for its own. The job is
+        // left queued for the caller to fail, which removes the folders again
+        // (and the shutdown sweep still has them in `leftovers`).
+        if stale {
+            return Err(JobError::Io {
+                context: "resetting a job directory",
+                source: std::io::Error::other("the folder could not be emptied"),
+            });
         }
         for path in recreate {
             if !path.exists() {
@@ -548,11 +637,45 @@ impl JobStore {
         })
     }
 
-    /// Adds a warning. The event carries just this warning.
+    /// Adds a warning. The event carries just this warning, or none if it
+    /// was dropped.
+    ///
+    /// A job keeps one warning per code (the first, with its detail) and at
+    /// most [`MAX_WARNINGS_PER_JOB`] in all, the last being
+    /// [`WARNINGS_TRUNCATED`]. [`WARN_PART_FAILED`] is the exception to the first
+    /// rule: each failed part gets its own, told apart by detail. A worker can send warnings without limit; the
+    /// list is shown to the user and held in memory, so the store bounds it
+    /// whoever the caller is.
     pub fn add_warning(&self, id: &JobId, warning: Warning) -> Result<JobEvent, JobError> {
         self.update_active(id, |job| {
-            job.warnings.push(warning.clone());
-            vec![warning]
+            let n = job.warnings.len();
+            let repeated = job.warnings.iter().any(|w| {
+                w.code == warning.code
+                    && (warning.code != WARN_PART_FAILED || w.detail == warning.detail)
+            });
+            if repeated || n >= MAX_WARNINGS_PER_JOB {
+                return Vec::new();
+            }
+            // Keep the last slot for the notice that some were dropped.
+            let kept = if n + 1 == MAX_WARNINGS_PER_JOB {
+                Warning {
+                    code: WARNINGS_TRUNCATED.to_owned(),
+                    detail: None,
+                }
+            } else {
+                warning
+            };
+            job.warnings.push(kept.clone());
+            vec![kept]
+        })
+    }
+
+    /// Removes every warning with `code`, for a job about to run again from
+    /// the start. Emits no warning event: events carry additions only.
+    pub fn remove_warnings(&self, id: &JobId, code: &str) -> Result<JobEvent, JobError> {
+        self.update_active(id, |job| {
+            job.warnings.retain(|w| w.code != code);
+            Vec::new()
         })
     }
 
@@ -561,6 +684,7 @@ impl JobStore {
         id: &JobId,
         f: impl FnOnce(&mut Job) -> Vec<Warning>,
     ) -> Result<JobEvent, JobError> {
+        let _flush = FlushOnDrop(self);
         let mut inner = self.lock();
         let Inner { seq, jobs, .. } = &mut *inner;
         let job = jobs
@@ -578,7 +702,8 @@ impl JobStore {
 
     /// Records a job's outputs while it's `verifying`. Each must be a
     /// regular file inside `out/`, reached without symlinks or reparse
-    /// points, with the claimed size (spec section 7.4).
+    /// points, with the claimed size (spec section 7.4). The hash in
+    /// [`OutputFile::sha256`] is not checked here; saving checks it.
     ///
     /// On error, the caller fails the job with [`JobError::code`]
     /// (`E_PROTOCOL`).
@@ -638,20 +763,19 @@ impl JobStore {
         let inner = self.lock();
         Snapshot {
             seq: inner.seq,
-            jobs: inner
-                .jobs
-                .values()
-                .map(|j| JobSnapshot {
-                    job_id: j.id.clone(),
-                    state: j.state,
-                    stage: j.stage.clone(),
-                    progress: j.progress,
-                    warnings: j.warnings.clone(),
-                    error: j.error.clone(),
-                    outputs: j.outputs.clone(),
-                })
-                .collect(),
+            jobs: inner.jobs.values().map(job_snapshot_of).collect(),
         }
+    }
+
+    /// One job's current state. Callers that need a single job use this
+    /// rather than cloning every job's warnings and outputs (audit R10).
+    pub fn job_snapshot(&self, id: &JobId) -> Result<JobSnapshot, JobError> {
+        let inner = self.lock();
+        inner
+            .jobs
+            .get(id)
+            .map(job_snapshot_of)
+            .ok_or_else(|| JobError::UnknownJob(id.clone()))
     }
 
     /// Deletes a finished job and its directory (spec section 10.5,
@@ -736,6 +860,9 @@ impl JobStore {
         }
     }
 
+    /// Numbers an event and queues it for the sink. Call with `inner` held,
+    /// which is what keeps queue order equal to `seq` order. Delivery happens
+    /// later, outside the lock.
     fn emit(&self, seq: &mut u64, job: &Job, warnings: Vec<Warning>) -> JobEvent {
         *seq += 1;
         let event = JobEvent {
@@ -747,10 +874,61 @@ impl JobStore {
             warnings,
             error: job.error.clone(),
         };
-        if let Some(sink) = &self.config.on_event {
-            sink(&event);
+        if self.config.on_event.is_some() {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event.clone());
         }
         event
+    }
+
+    /// Gives queued events to the sink, in order, with no store lock held. If
+    /// another thread (or this one, from inside the sink) is already
+    /// delivering, it picks these up before it stops.
+    fn flush_events(&self) {
+        let Some(sink) = &self.config.on_event else {
+            return;
+        };
+        loop {
+            if let Ok(_turn) = self.delivering.try_lock() {
+                loop {
+                    let batch = std::mem::take(
+                        &mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for event in &batch {
+                        sink(event);
+                    }
+                }
+            } else {
+                return;
+            }
+            // An event queued after the last look, while the turn was still
+            // held, would otherwise wait for the next change.
+            if self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+            {
+                return;
+            }
+        }
+    }
+}
+
+fn job_snapshot_of(j: &Job) -> JobSnapshot {
+    JobSnapshot {
+        job_id: j.id.clone(),
+        state: j.state,
+        stage: j.stage.clone(),
+        progress: j.progress,
+        warnings: j.warnings.clone(),
+        error: j.error.clone(),
+        outputs: j.outputs.clone(),
     }
 }
 
@@ -777,6 +955,10 @@ fn check_output(out: &Path, o: &OutputFile) -> Result<(), JobError> {
     // Every step must be a real directory or file, not a link.
     let mut current = out.to_path_buf();
     for c in rel.components() {
+        // Windows would open `NUL` or `CON.pdf` as a device, not the file.
+        if c.as_os_str().to_str().is_none_or(is_windows_device_name) {
+            return Err(JobError::InvalidOutput("output name is a device name"));
+        }
         current.push(c);
         let meta = std::fs::symlink_metadata(&current)
             .map_err(|_| JobError::InvalidOutput("output file is missing"))?;

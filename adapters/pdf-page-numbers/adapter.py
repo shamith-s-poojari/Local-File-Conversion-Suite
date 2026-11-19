@@ -10,14 +10,15 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import JobContext, OutputFile, run_main
+from converter_sdk.adapter import issue
 from converter_sdk.convert import ConversionAdapter
+from converter_sdk.limits import MB
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     RangeError,
     displayed_box,
     pages_in,
-    param_issue,
     parse_page_ranges,
     placement,
     save_pdf,
@@ -25,7 +26,6 @@ from converter_sdk.pdf import (
 from converter_sdk.protocol import ValidationIssue
 from pikepdf import Name
 
-MB = 1024 * 1024
 EDGE_Y = 28.0
 """Distance from the top or bottom edge to the text."""
 EDGE_X = 36.0
@@ -90,16 +90,16 @@ class PdfPageNumbersAdapter(PdfAdapter):
         self, ctx: JobContext, params: dict[str, Any], inputs: list[OpenedInput]
     ) -> list[ValidationIssue]:
         if len(inputs) != 1:
-            return [param_issue("inputs", "exactlyOne")]
+            return [issue("inputs", "exactlyOne")]
         if params.get("style", "pageNOfTotal") not in STYLES:
-            return [param_issue("style", "invalid")]
+            return [issue("style", "invalid")]
         if params.get("position", "bottomCenter") not in POSITIONS:
-            return [param_issue("position", "invalid")]
+            return [issue("position", "invalid")]
         if params.get("pages"):
             try:
                 parse_page_ranges(params["pages"], inputs[0].pages)
             except RangeError as e:
-                return [param_issue("pages", e.reason, pages=inputs[0].pages)]
+                return [issue("pages", e.reason, pages=inputs[0].pages)]
         return []
 
     def execute_conversion(self, ctx: JobContext, params: dict[str, Any]) -> list[OutputFile]:

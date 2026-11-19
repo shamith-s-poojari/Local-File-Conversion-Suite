@@ -7,7 +7,7 @@ use std::time::Duration;
 use converter_jobstore::{
     DataRoot, InputSource, JobError, JobEvent, JobFailure, JobId, JobState, JobStore, Lease,
     OutputFile, Progress, RetryPolicy, SaveDestination, SaveOptions, StoreConfig, SyncOs,
-    SyncProvider, SyncRoots, Warning,
+    SyncProvider, SyncRoots, Warning, MAX_WARNINGS_PER_JOB, WARNINGS_TRUNCATED,
 };
 use tempfile::TempDir;
 
@@ -95,6 +95,7 @@ impl Fixture {
                         extension: "pdf".into(),
                         size_bytes: bytes.len() as u64,
                         source: None,
+                        sha256: None,
                     })
                     .collect(),
             )
@@ -147,6 +148,7 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
                 extension: "pdf".into(),
                 size_bytes: 8,
                 source: None,
+                sha256: None,
             }],
         )
         .unwrap();
@@ -174,6 +176,24 @@ fn happy_path_events_are_sequential_and_cleanup_follows_the_table() {
     // The snapshot never carries paths.
     let json = serde_json::to_string(&snap).unwrap();
     assert!(!json.contains("input.pdf") && !json.contains(&*f.tmp.path().to_string_lossy()));
+}
+
+#[test]
+fn job_snapshot_returns_one_job_or_unknown() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "merged.pdf", b"%PDF out")]);
+    let (other, _) = f.store.create_job().unwrap();
+    let one = f.store.job_snapshot(&id).unwrap();
+    assert_eq!(one.job_id, id);
+    assert_eq!(one.state, JobState::Verifying);
+    assert_eq!(f.store.job_snapshot(&other).unwrap().job_id, other);
+    f.store.transition(&id, JobState::Succeeded).unwrap();
+    f.store.discard(&id).unwrap();
+    assert!(f.store.job_snapshot(&other).is_ok());
+    assert!(matches!(
+        f.store.job_snapshot(&id),
+        Err(converter_jobstore::JobError::UnknownJob(_))
+    ));
 }
 
 #[test]
@@ -314,6 +334,7 @@ fn record_outputs_distrusts_the_worker() {
         extension: "pdf".into(),
         size_bytes: size,
         source: None,
+        sha256: None,
     };
     for bad in [
         out("../escape.pdf", 1),
@@ -338,6 +359,165 @@ fn record_outputs_distrusts_the_worker() {
         assert_eq!(err.code(), Some("E_PROTOCOL"));
     }
     f.store.record_outputs(&id, vec![out("0.pdf", 5)]).unwrap();
+}
+
+#[test]
+fn record_outputs_refuses_device_names_and_non_regular_files() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[]);
+    let dirs = f.store.job_dirs(&id).unwrap();
+    let out = |path: &str| OutputFile {
+        path: path.into(),
+        suggested_name: "x.pdf".into(),
+        extension: "pdf".into(),
+        size_bytes: 1,
+        source: None,
+        sha256: None,
+    };
+    // The names are valid files on Unix, so only the name rule stops them.
+    for name in [
+        "NUL",
+        "con.pdf",
+        "Aux .pdf",
+        "COM1.pdf",
+        "lpt\u{B2}.pdf",
+        "CONOUT$",
+    ] {
+        std::fs::write(dirs.out.join(name), b"1").unwrap();
+        let err = f.store.record_outputs(&id, vec![out(name)]).unwrap_err();
+        assert_eq!(err.code(), Some("E_PROTOCOL"), "{name:?}");
+    }
+    // A directory with a device name hides whatever is inside it.
+    std::fs::create_dir(dirs.out.join("prn")).unwrap();
+    std::fs::write(dirs.out.join("prn").join("a.pdf"), b"1").unwrap();
+    assert!(f.store.record_outputs(&id, vec![out("prn/a.pdf")]).is_err());
+
+    std::fs::create_dir(dirs.out.join("dir.pdf")).unwrap();
+    assert!(f.store.record_outputs(&id, vec![out("dir.pdf")]).is_err());
+    #[cfg(unix)]
+    {
+        let fifo = dirs.out.join("fifo.pdf");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        let err = f
+            .store
+            .record_outputs(&id, vec![out("fifo.pdf")])
+            .unwrap_err();
+        assert_eq!(err.code(), Some("E_PROTOCOL"));
+        // A symlink to a directory is no better than one to a file.
+        std::os::unix::fs::symlink(&dirs.out, dirs.out.join("loop")).unwrap();
+        assert!(f.store.record_outputs(&id, vec![out("loop")]).is_err());
+    }
+    std::fs::write(dirs.out.join("console.pdf"), b"1").unwrap();
+    f.store
+        .record_outputs(&id, vec![out("console.pdf")])
+        .unwrap();
+}
+
+fn warn(code: &str, detail: &str) -> Warning {
+    Warning {
+        code: code.into(),
+        detail: Some(detail.into()),
+    }
+}
+
+#[test]
+fn warnings_are_deduplicated_by_code_keeping_the_first() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    f.store
+        .add_warning(&id, warn("TAGS_DROPPED", "first"))
+        .unwrap();
+    let dup = f
+        .store
+        .add_warning(&id, warn("TAGS_DROPPED", "second"))
+        .unwrap();
+    f.store.add_warning(&id, warn("OTHER", "x")).unwrap();
+    let w = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(w.len(), 2);
+    assert_eq!(w[0].detail.as_deref(), Some("first"));
+    // The dropped duplicate reaches nobody.
+    let json = serde_json::to_string(&dup).unwrap();
+    assert!(!json.contains("second"), "{json}");
+}
+
+#[test]
+fn warnings_are_capped_with_one_truncation_notice() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    // A hundred of the same code, then three hundred distinct ones.
+    for i in 0..100 {
+        f.store
+            .add_warning(&id, warn("SAME", &i.to_string()))
+            .unwrap();
+    }
+    assert_eq!(f.store.job_snapshot(&id).unwrap().warnings.len(), 1);
+    for i in 0..300 {
+        f.store
+            .add_warning(&id, warn(&format!("W_{i}"), "x"))
+            .unwrap();
+    }
+    let w = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(w.len(), MAX_WARNINGS_PER_JOB);
+    assert_eq!(w.iter().filter(|w| w.code == WARNINGS_TRUNCATED).count(), 1);
+    assert_eq!(w.last().unwrap().code, WARNINGS_TRUNCATED);
+    assert_eq!(w[0].detail.as_deref(), Some("0"));
+}
+
+#[test]
+fn each_failed_part_keeps_its_own_part_failed_warning() {
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    for detail in [
+        r#"{"code":"E_X","inputs":[1]}"#,
+        r#"{"code":"E_X","inputs":[2]}"#,
+    ] {
+        f.store
+            .add_warning(&id, warn("PART_FAILED", detail))
+            .unwrap();
+    }
+    f.store.add_warning(&id, warn("OTHER", "x")).unwrap();
+    f.store.remove_warnings(&id, "PART_FAILED").unwrap();
+    let left = f.store.job_snapshot(&id).unwrap().warnings;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].code, "OTHER");
+    f.store
+        .add_warning(&id, warn("PART_FAILED", r#"{"code":"E_X","inputs":[2]}"#))
+        .unwrap();
+    // The same part reported twice is still one warning.
+    f.store
+        .add_warning(&id, warn("PART_FAILED", r#"{"code":"E_X","inputs":[2]}"#))
+        .unwrap();
+    assert_eq!(f.store.job_snapshot(&id).unwrap().warnings.len(), 2);
+}
+
+#[test]
+fn a_partial_job_can_be_saved() {
+    let f = fixture();
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "a.pdf", b"%PDF a")]);
+    f.store
+        .record_outputs(
+            &id,
+            vec![OutputFile {
+                path: "0.pdf".into(),
+                suggested_name: "a.pdf".into(),
+                extension: "pdf".into(),
+                size_bytes: 6,
+                source: None,
+                sha256: None,
+            }],
+        )
+        .unwrap();
+    f.store.transition(&id, JobState::Partial).unwrap();
+    let dest = f.tmp.path().join("saved.pdf");
+    f.store
+        .save_outputs(
+            &id,
+            &SaveDestination::File(dest.clone()),
+            SaveOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF a");
 }
 
 #[test]
@@ -594,4 +774,152 @@ fn seq_is_shared_across_jobs() {
         [1, 2, 3, 4],
         "one counter for the whole app"
     );
+}
+
+/// SEC-1: the output was verified with its hash; the same number of bytes,
+/// but different ones, must not reach the user's folder.
+#[test]
+fn an_output_changed_after_its_hash_was_recorded_is_not_saved() {
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    let original = b"%PDF-1 original";
+    let (id, _) = f.run_to_verifying(&[("0.pdf", "a.pdf", original)]);
+    let hash: String = Sha256::digest(original)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    f.store
+        .record_outputs(
+            &id,
+            vec![OutputFile {
+                path: "0.pdf".into(),
+                suggested_name: "a.pdf".into(),
+                extension: "pdf".into(),
+                size_bytes: original.len() as u64,
+                source: None,
+                sha256: Some(hash),
+            }],
+        )
+        .unwrap();
+    f.store.transition(&id, JobState::Succeeded).unwrap();
+    // Same length, different bytes.
+    let dirs = f.store.job_dirs(&id).unwrap();
+    std::fs::write(dirs.out.join("0.pdf"), b"%PDF-1 tampered").unwrap();
+    assert_eq!(b"%PDF-1 tampered".len(), original.len());
+
+    let dest_dir = f.tmp.path().join("saves");
+    std::fs::create_dir(&dest_dir).unwrap();
+    for dest in [
+        SaveDestination::File(dest_dir.join("x.pdf")),
+        SaveDestination::Folder(dest_dir.clone()),
+    ] {
+        let err = f
+            .store
+            .save_outputs(&id, &dest, SaveOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, JobError::InvalidOutput(_)), "{err}");
+        assert_eq!(std::fs::read_dir(&dest_dir).unwrap().count(), 0);
+    }
+    // The job stays, so the user can try again.
+    assert_eq!(f.store.snapshot().jobs.len(), 1);
+}
+
+/// RS-6: if `out/` can't be emptied for the retry, the retry must not start
+/// on it. The transition reports the failure, and failing the job then
+/// removes what was left.
+#[cfg(unix)]
+#[test]
+fn a_retry_whose_out_folder_cannot_be_emptied_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let input = f.user_file("r.pdf", b"%PDF");
+    let (id, _) = f.store.create_job().unwrap();
+    f.store
+        .stage_inputs(
+            &id,
+            &[InputSource {
+                path: input,
+                extension: "pdf".into(),
+            }],
+            0.0,
+        )
+        .unwrap();
+    for s in [JobState::Validating, JobState::Queued, JobState::Running] {
+        f.store.transition(&id, s).unwrap();
+    }
+    let dirs = f.store.job_dirs(&id).unwrap();
+    let locked = dirs.out.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("stale.pdf"), b"stale").unwrap();
+    // A folder that can't be written to can't have its files unlinked.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // Root ignores permissions, so the cleanup would succeed there.
+    let can_block = std::fs::write(locked.join("probe"), b"").is_err();
+
+    let result = f.store.transition(&id, JobState::Queued);
+    if can_block {
+        assert!(result.is_err(), "the retry started on a stale out/");
+        assert!(locked.join("stale.pdf").exists());
+    } else {
+        result.unwrap();
+        assert_eq!(std::fs::read_dir(&dirs.out).unwrap().count(), 0);
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// RS-11: a listener may read the store. With events delivered under the
+/// store's lock this deadlocked, so the test runs on a thread with a deadline.
+#[test]
+fn an_event_listener_may_call_back_into_the_store() {
+    use std::sync::OnceLock;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = DataRoot::open(&tmp.path().join("data"), &SyncRoots::none()).unwrap();
+    let store: Arc<OnceLock<Arc<JobStore>>> = Arc::new(OnceLock::new());
+    let seen: Arc<Mutex<Vec<(u64, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (s2, seen2) = (store.clone(), seen.clone());
+    let config = StoreConfig {
+        on_event: Some(Arc::new(move |e: &JobEvent| {
+            // Reads, and also makes a change, from inside the listener.
+            let jobs = s2.get().map_or(0, |s| s.snapshot().jobs.len());
+            if e.seq == 1 {
+                if let Some(s) = s2.get() {
+                    let _ = s.set_stage(&e.job_id, "from-listener");
+                }
+            }
+            seen2.lock().unwrap().push((e.seq, jobs));
+        })),
+        ..StoreConfig::default()
+    };
+    let (opened, _) = JobStore::open(root, SyncRoots::none(), config).unwrap();
+    let opened = Arc::new(opened);
+    store.set(opened.clone()).ok().unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = opened.create_job().map(|_| ());
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(Duration::from_secs(60))
+        .expect("the store deadlocked on a listener that calls it")
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    // Created, then the listener's own change, in order and not nested.
+    assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(seen[0].1, 1, "the job is visible to the listener");
+}
+
+/// SEC-15: every job folder is private to the user.
+#[cfg(unix)]
+#[test]
+fn job_folders_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let (id, _) = f.store.create_job().unwrap();
+    let dirs = f.store.job_dirs(&id).unwrap();
+    for d in [&dirs.root, &dirs.input_dir, &dirs.work, &dirs.out] {
+        let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{d:?}");
+    }
+    let lease = std::fs::metadata(dirs.root.join(".lease")).unwrap();
+    assert_eq!(lease.permissions().mode() & 0o077, 0);
 }

@@ -1,0 +1,12 @@
+cases:
+  - name: clean-docx
+    inputs: [doc-docx]
+    params: { verifier: activeContent }
+    expect: { outputs: 1 }
+negative:
+  params: { verifier: activeContent }
+  inputs: [doc-docx]
+  bad: [corrupt-docx, truncated-docx]
+cancel:
+  inputs: [big]
+  params: { verifier: activeContent }

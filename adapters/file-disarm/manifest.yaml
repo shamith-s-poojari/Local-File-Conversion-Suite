@@ -9,6 +9,8 @@ fidelityNotes:
   [ACTIVE_CONTENT_REMOVED, MACROS_REMOVED, EXTERNAL_LINKS_REMOVED, FORMS_FLATTENED, SIGNATURE_INVALIDATED]
 # Two processes: the worker and its verifier.
 limits: { timeoutBaseS: 60, timeoutSPerMb: 3, noProgressS: 180, diskFactor: 3.0, processes: 2 }
+# The core re-checks the output in a separate job before the job may succeed (ADR 0006).
+recheck: activeContent
 params: ./params.schema.json
 platforms: [windows, macos, linux]
 requires: [pikepdf, lxml]

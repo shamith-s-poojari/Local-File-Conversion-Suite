@@ -8,54 +8,247 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run. Runs on main are not
+# cancelled: each commit on main keeps its own result.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The sandbox, CLI, end-to-end and network tests, and the FFmpeg and
+  # LibreOffice tests, must fail here when they can't run, not skip.
+  # (The tests read this; see docs/known-limits.md for what it covers today.)
+  CI: "true"
+  # Development mode: the checkout's .venv is the runtime (the core no longer
+  # looks for one on its own). Packaged builds never set this.
+  LFCS_DEV: "1"
+
+# Action versions are pinned to commit SHAs; the release is in the comment.
+# Dependabot (.github/dependabot.yml) proposes updates.
 
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
+  lint:
+    name: Lint, types and frontend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30 # 1 to 18 minutes so far, cold cache included
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --locked
+
+      # The same steps as `pnpm check`, minus the Rust and Python tests,
+      # which have their own jobs. Clippy runs in the Rust test jobs, on all
+      # three systems.
+      - name: Every manifest has the same version
+        run: uv run --no-sync python tools/check-versions.py
+      - name: Generated protocol code is current
+        run: pnpm --filter @converter/protocol check-generated
+      - name: Build frontend
+        run: pnpm --filter @converter/desktop build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: cargo fmt --all --check
+      - name: Adapter registry is current
+        run: cargo run -q -p converter-router --bin registry-gen -- --check --include-dev
+      - run: uv run ruff check .
+
+  rust-test:
+    name: Rust tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 6 to 14 minutes on Windows and macOS so far, plus clippy and LibreOffice.
+    # A Linux run that hung took 44 minutes; this stops it sooner.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-24.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Linux system packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf bubblewrap ffmpeg libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - name: Allow bubblewrap to create user namespaces (Ubuntu 24.04)
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor,
+          # which stops bubblewrap. A runner is a throwaway machine.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+          bwrap --unshare-all --ro-bind / / true
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        # Homebrew's ffmpeg 9 has no libvorbis (Ogg); ffmpeg-full does, and
+        # is keg-only, so its bin goes on PATH.
+        run: |
+          brew install ffmpeg-full
+          echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Install LibreOffice (macOS)
+        if: runner.os == 'macOS'
+        run: brew install --cask libreoffice
+
+      # Not on Windows yet: LibreOffice inside the AppContainer sandbox
+      # never finished a conversion (CI, 2026-11-18; see docs/known-limits.md).
+      # The Python tests, which run it unsandboxed, still install it there.
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
 
       - name: Install Rust toolchain
         run: rustup toolchain install
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - run: pnpm install --frozen-lockfile
+      # The Rust tests start the Python workers from the workspace's .venv.
       - run: uv sync --locked
+
+      # Which engines the tests ran against (they are not pinned), and a
+      # failure if LibreOffice isn't where the app looks for it.
+      - name: Engine versions
+        run: uv run --no-sync python tools/engine-versions.py --require ffmpeg ${{ runner.os != 'Windows' && '--require soffice' || '' }}
+        shell: bash
 
       - name: Build frontend
         run: pnpm --filter @converter/desktop build
 
-      - name: Check everything
-        run: pnpm check
+      # Clippy on every system: code behind cfg(windows) or cfg(target_os)
+      # is only compiled, and so only linted, there.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests, including sandbox, CLI, end-to-end and network
+        run: cargo test --workspace --no-fail-fast
 
       - name: Build the app (no installer)
         run: pnpm --filter @converter/desktop tauri build --no-bundle
+
+  python-test:
+    name: Python tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30 # 6 to 10 minutes so far, plus the LibreOffice install
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install FFmpeg and LibreOffice (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        # Homebrew's ffmpeg 9 has no libvorbis (Ogg); ffmpeg-full does, and
+        # is keg-only, so its bin goes on PATH.
+        run: |
+          brew install ffmpeg-full
+          echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Install LibreOffice (macOS)
+        if: runner.os == 'macOS'
+        run: brew install --cask libreoffice
+
+      - name: Install LibreOffice (Windows)
+        if: runner.os == 'Windows'
+        run: choco install libreoffice-fresh --no-progress -y
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      # Which engines the tests ran against (they are not pinned), and a
+      # failure if LibreOffice isn't where the app looks for it.
+      - name: Engine versions
+        run: uv run --no-sync python tools/engine-versions.py --require ffmpeg --require soffice
+        shell: bash
+
+      # pytest runs one test at a time, so LibreOffice is never started twice
+      # at once.
+      - name: Python tests
+        run: uv run pytest --junitxml=junit.xml
+
+      # With CI=true a missing engine fails its tests, but LibreOffice is
+      # enforced on Linux only. This catches a runner whose engines stopped
+      # installing: skips are counted and capped. Ceilings: the Linux run of
+      # 2026-11-18 skipped 352 (1206 passed); macOS and Windows skipped 410
+      # before LibreOffice was installed there, 58 more. Their ceiling, 370,
+      # is an estimate with room to spare until a run with LibreOffice shows
+      # the real count; it still catches LibreOffice going missing.
+      # Lower them when tests stop skipping; raise them only with a reason.
+      - name: Skipped tests stay under the ceiling
+        run: uv run --no-sync python tools/check-skips.py junit.xml --max ${{ runner.os == 'Linux' && 352 || 370 }}
+        shell: bash
+
+  cargo-deny:
+    name: Dependency licenses and advisories (Rust)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15 # under 1 minute with the cache; cargo install compiles cargo-deny without it
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.21.0
+      - run: cargo deny --all-features check
+
+  pip-audit:
+    name: Known vulnerabilities (Python)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10 # under 1 minute so far
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - name: Audit the locked dependencies
+        run: |
+          uv export --locked --all-groups --no-emit-workspace --no-hashes --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
+          uvx --from pip-audit==2.10.1 pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip

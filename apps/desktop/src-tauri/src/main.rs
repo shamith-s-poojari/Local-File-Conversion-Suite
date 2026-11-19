@@ -4,6 +4,7 @@
 mod commands;
 mod navigation;
 mod preview;
+mod tokens;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +13,8 @@ use converter_app_core::{App, AppConfig};
 use tauri::webview::NewWindowResponse;
 use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 
-use commands::{Core, PendingSaves};
+use commands::Core;
+use tokens::{PendingSaves, RevealTokens};
 
 /// Started as `<app> --sandbox-run …`, the executable is the worker runner
 /// (see `converter_sandbox::runner`), so releases ship no extra binary.
@@ -36,7 +38,14 @@ fn app_config(handle: &tauri::AppHandle) -> Result<AppConfig, String> {
     } else {
         handle.path().resource_dir().map_err(|e| e.to_string())?
     };
-    AppConfig::locate(Some(resources), runner, vec![RUNNER_FLAG.into()])
+    // A debug build is built from a checkout, so it may use the checkout's
+    // virtualenv; a release build never does (audit S1).
+    AppConfig::locate_with(
+        Some(resources),
+        runner,
+        vec![RUNNER_FLAG.into()],
+        cfg!(debug_assertions),
+    )
 }
 
 fn open_core(handle: &tauri::AppHandle, previews: Arc<preview::PreviewRegistry>) -> Core {
@@ -64,6 +73,7 @@ fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(previews.clone())
         .manage(Arc::new(PendingSaves::default()))
+        .manage(Arc::new(RevealTokens::default()))
         .register_uri_scheme_protocol("preview", |ctx, request| {
             preview::handle(
                 &ctx.app_handle().state::<Arc<preview::PreviewRegistry>>(),
@@ -89,7 +99,10 @@ fn run() {
             commands::get_page_text,
             commands::save_outputs,
             commands::confirm_save,
+            commands::cancel_save,
+            commands::reveal_saved,
             commands::can_keep_layout,
+            commands::job_inputs,
             commands::copy_output,
             commands::discard_job,
             commands::get_snapshot,

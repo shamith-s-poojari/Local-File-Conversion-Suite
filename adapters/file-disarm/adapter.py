@@ -16,11 +16,6 @@ The removal code is in ``converter_sdk.pdf`` (PDF) and ``converter_sdk.active``
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-import threading
-import time
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -35,12 +30,13 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.active import OOXML_FORMATS, active_findings, disarm_markup, disarm_ooxml
-from converter_sdk.convert import ConversionAdapter, issue, source_format
-from converter_sdk.engines import helper_env
+from converter_sdk.adapter import issue
+from converter_sdk.convert import ConversionAdapter, source_format
+from converter_sdk.limits import MB
 from converter_sdk.pdf import flatten_forms, is_signed, remove_active_content, save_pdf
 from converter_sdk.protocol import ValidationIssue
+from converter_sdk.verify import run_verifier
 
-MB = 1024 * 1024
 VERIFY = Path(__file__).resolve().with_name("verify.py")
 VERIFY_TIMEOUT_S = 300
 SAME_AS = {"docm": "docx", "xlsm": "xlsx", "pptm": "pptx"}
@@ -48,7 +44,7 @@ FORMATS = {"pdf", "svg", "html", *OOXML_FORMATS}
 
 # Which counts from the removers mean which warning.
 MACROS = {"macros", "macroButtons"}
-EXTERNAL = {"external", "fieldLinks", "workbookLinks", "links", "remote"}
+EXTERNAL = {"external", "fieldLinks", "workbookLinks", "links", "remote", "connections"}
 
 
 def output_format(fmt: str) -> str:
@@ -58,54 +54,22 @@ def output_format(fmt: str) -> str:
 # ------------------------------------------------------------ verifying
 
 
-def run_verifier(ctx: JobContext, output: Path) -> dict[str, Any]:
-    """Run ``verify.py`` in a fresh process. It sees only the output's
-    job-relative path, on stdin."""
-    env = helper_env()
-    request = json.dumps({"output": output.relative_to(ctx.job_dir.resolve()).as_posix()})
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv: our interpreter and our verifier
-        [sys.executable, "-I", str(VERIFY)],
-        cwd=ctx.job_dir,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        # Read and dropped, not DEVNULL: a Windows AppContainer is denied the
-        # null device. It can hold document text, so it's never kept.
-        stderr=subprocess.PIPE,
+def verify(ctx: JobContext, output: Path, remove_links: bool = False) -> dict[str, Any]:
+    """Run ``verify.py`` in a fresh process (``converter_sdk.verify``): it sees
+    only the output's job-relative path. A verifier that can't report, or
+    reports something that isn't a list of findings, is a failed verification,
+    never a pass."""
+    report = run_verifier(
+        ctx, VERIFY, output, {"removeLinks": remove_links}, timeout_s=VERIFY_TIMEOUT_S
     )
-    if proc.stdin is None or proc.stdout is None or proc.stderr is None:  # pragma: no cover
-        raise AdapterError("E_INTERNAL", {"reason": "verifierPipes"})
-    err = proc.stderr
-
-    def drop_stderr() -> None:
-        while err.read(65536):
-            pass
-
-    threading.Thread(target=drop_stderr, daemon=True).start()
-    proc.stdin.write(request.encode("utf-8"))
-    proc.stdin.close()
-    deadline = time.monotonic() + VERIFY_TIMEOUT_S
-    while proc.poll() is None:
-        if ctx.cancelled or time.monotonic() > deadline:
-            proc.kill()
-            proc.wait(5)
-            ctx.check_cancelled()
-            raise AdapterError("E_TIMEOUT", {"stage": "verify"})
-        time.sleep(0.05)
-    raw = proc.stdout.read()
-    try:
-        report = json.loads(raw)
-        if not isinstance(report.get("findings"), list):
-            raise ValueError("no findings")
-    except (ValueError, AttributeError):
-        # A verifier that can't report is a failed verification, never a pass.
+    if report is None or not isinstance(report.get("findings"), list):
         return {"error": "verifierFailed"}
     return report
 
 
-def check_output(ctx: JobContext, output: Path) -> None:
+def check_output(ctx: JobContext, output: Path, remove_links: bool = False) -> None:
     """Fail the job, and delete the output, unless the verifier finds nothing active."""
-    report = run_verifier(ctx, output)
+    report = verify(ctx, output, remove_links)
     if "error" in report:
         output.unlink(missing_ok=True)
         raise AdapterError("E_INTERNAL", {"reason": "verifierFailed"}, retryable=False)
@@ -203,7 +167,7 @@ class FileDisarmAdapter(Adapter):
         ctx.stage("verify", 2, 2)
         for k, output in enumerate(outputs):
             ctx.check_cancelled()
-            check_output(ctx, output.path)
+            check_output(ctx, output.path, remove_links)
             ctx.progress("verify", k + 1, n)
 
         self.warn(ctx, totals, flattened, signed)

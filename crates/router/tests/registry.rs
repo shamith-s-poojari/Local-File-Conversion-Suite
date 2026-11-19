@@ -4,7 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use converter_router::{build_registry, Catalog, Problem, Registry};
+use converter_router::manifest::Kind;
+use converter_router::{build_registry, Catalog, Problem, RecheckKind, Registry};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -317,4 +318,98 @@ fn all_problems_are_reported_together() {
     let p = s.problems();
     assert!(p.iter().any(|p| p.adapter.as_deref() == Some("a")));
     assert!(p.iter().any(|p| p.adapter.as_deref() == Some("b")));
+}
+
+// --------------------------------------------------- output re-checks (ADR 0006)
+
+const CHECK_MANIFEST: &str = "\
+id: output-check
+kind: check
+title: Output check
+workerClass: pdf
+inputs: { formats: [pdf], min: 1, max: 1 }
+outputs: { format: json, cardinality: one }
+fidelity: E
+fidelityNotes: []
+limits: { timeoutBaseS: 1, timeoutSPerMb: 1, noProgressS: 1, diskFactor: 1 }
+params: ./params.schema.json
+platforms: [linux]
+requires: [pikepdf]
+";
+
+/// A tool folder with a `verify.py`, as a `recheck` needs.
+fn tool_with_verifier(s: &Sandbox, recheck: &str) {
+    s.adapter(
+        "sample",
+        &GOOD_MANIFEST.replace("fidelity: E", &format!("fidelity: E\nrecheck: {recheck}")),
+        Some(GOOD_PARAMS),
+    );
+    fs::write(s.dir.join("sample/verify.py"), "").unwrap();
+}
+
+#[test]
+fn a_manifest_can_declare_a_recheck_and_the_registry_keeps_it() {
+    let s = Sandbox::new("recheck-ok");
+    tool_with_verifier(&s, "activeContent");
+    s.adapter("output-check", CHECK_MANIFEST, Some(GOOD_PARAMS));
+    let r = s.ok();
+    assert_eq!(
+        r.get("sample").unwrap().manifest.recheck,
+        Some(RecheckKind::ActiveContent)
+    );
+    assert_eq!(r.get("output-check").unwrap().manifest.kind, Kind::Check);
+    // And it survives the trip through the generated file the app reads.
+    let back: Registry = serde_json::from_str(&r.to_json()).unwrap();
+    assert_eq!(back, r);
+}
+
+#[test]
+fn an_unknown_recheck_is_refused() {
+    let s = Sandbox::new("recheck-unknown");
+    tool_with_verifier(&s, "mostly");
+    s.adapter("output-check", CHECK_MANIFEST, Some(GOOD_PARAMS));
+    assert_problem(&s.problems(), "manifest.yaml at /recheck");
+}
+
+#[test]
+fn a_recheck_needs_the_check_adapter() {
+    let s = Sandbox::new("recheck-no-checker");
+    tool_with_verifier(&s, "redaction");
+    assert_problem(&s.problems(), "no `output-check` adapter of kind check");
+}
+
+#[test]
+fn a_recheck_needs_a_verifier_in_the_tool_folder() {
+    let s = Sandbox::new("recheck-no-verifier");
+    tool_with_verifier(&s, "redaction");
+    fs::remove_file(s.dir.join("sample/verify.py")).unwrap();
+    s.adapter("output-check", CHECK_MANIFEST, Some(GOOD_PARAMS));
+    assert_problem(&s.problems(), "the adapter folder needs a verify.py");
+}
+
+#[test]
+fn only_output_check_may_be_of_kind_check() {
+    let s = Sandbox::new("only-checker");
+    s.adapter(
+        "sample",
+        &GOOD_MANIFEST.replace("kind: operation", "kind: check"),
+        Some(GOOD_PARAMS),
+    );
+    assert_problem(&s.problems(), "only `output-check` may be of kind check");
+}
+
+#[test]
+fn the_real_tools_declare_their_recheck() {
+    let r = build_registry(&repo_root().join("adapters"), &catalog(), false).unwrap();
+    assert_eq!(
+        r.get("pdf-redact").unwrap().manifest.recheck,
+        Some(RecheckKind::Redaction)
+    );
+    assert_eq!(
+        r.get("file-disarm").unwrap().manifest.recheck,
+        Some(RecheckKind::ActiveContent)
+    );
+    let checker = r.get("output-check").expect("the check adapter ships");
+    assert_eq!(checker.manifest.kind, Kind::Check);
+    assert!(!checker.manifest.dev_only);
 }

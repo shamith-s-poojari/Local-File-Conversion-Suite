@@ -10,7 +10,7 @@ edges:
   - { from: [pdf], to: svg, tier: H }
   - { from: [pdf], to: tiff, tier: H }
   - { from: [pdf], to: webp, tier: L }
-fidelityNotes: []
+fidelityNotes: [ENCRYPTION_REMOVED]
 limits: { timeoutBaseS: 60, timeoutSPerMb: 4, noProgressS: 120, diskFactor: 20.0 }
 params: ./params.schema.json
 platforms: [windows, macos, linux]

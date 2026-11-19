@@ -26,20 +26,21 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from converter_sdk import AdapterError, JobContext, OutputFile, ValidationReport, run_main
+from converter_sdk.adapter import issue
 from converter_sdk.convert import Tier, source_format
 from converter_sdk.errors import Cancelled
+from converter_sdk.limits import MB
 from converter_sdk.markup import escape_markdown, html_document
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
     RangeError,
     pages_in,
-    param_issue,
     parse_page_ranges,
+    warn_if_encrypted,
 )
 from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 TARGETS: dict[str, Tier] = {"docx": "R", "xlsx": "R", "md": "R", "html": "R", "txt": "R"}
 EDGES: dict[tuple[str, str], Tier] = {("pdf", to): tier for to, tier in TARGETS.items()}
 DOCX_CHUNK = 10
@@ -79,14 +80,14 @@ class PdfToDocumentAdapter(PdfAdapter):
     ) -> list[ValidationIssue]:
         to = str(params.get("to", ""))
         if to not in TARGETS or any(source_format(o.path) != "pdf" for o in inputs):
-            return [param_issue("to", "unsupportedConversion")]
+            return [issue("to", "unsupportedConversion")]
         ranges = str(params.get("pages", "") or "")
         if ranges.strip():
             for o in inputs:
                 try:
                     parse_page_ranges(ranges, o.pages)
                 except RangeError as e:
-                    return [param_issue("pages", e.reason)]
+                    return [issue("pages", e.reason)]
         return []
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
@@ -103,6 +104,7 @@ class PdfToDocumentAdapter(PdfAdapter):
         ranges = str(params.get("pages", "") or "")
         plans = []
         for path in ctx.inputs:
+            warn_if_encrypted(ctx, path)
             doc = self._open(ctx, path)
             count = len(doc)
             doc.close()

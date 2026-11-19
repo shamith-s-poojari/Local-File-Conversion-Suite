@@ -11,29 +11,25 @@ use std::process::{Command, ExitCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use converter_app_core::{App, AppConfig};
+use converter_app_core::App;
 use converter_jobstore::{JobId, JobState, SaveDestination};
 use serde_json::json;
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
+mod common;
+use common::skip_or_fail;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--sandbox-run") {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
-    let python = if cfg!(windows) {
-        repo().join(".venv/Scripts/python.exe")
-    } else {
-        repo().join(".venv/bin/python")
-    };
-    if !python.is_file() || !cfg!(any(target_os = "macos", windows)) {
-        println!("end_to_end: skipped (needs `uv sync`, and macOS or Windows until Linux CI proves bwrap)");
+    let python = common::python();
+    if !python.is_file() {
+        skip_or_fail("end_to_end", "needs `uv sync`");
+        return ExitCode::SUCCESS;
+    }
+    if !common::sandbox_os() {
+        skip_or_fail("end_to_end", "no sandbox backend on this OS");
         return ExitCode::SUCCESS;
     }
     scenario(&python);
@@ -90,16 +86,7 @@ fn scenario(python: &Path) {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let previews: Arc<Mutex<HashMap<String, PathBuf>>> = Arc::default();
-    let config = AppConfig {
-        data_root: Some(tmp.path().join("data")),
-        resources: repo(),
-        adapters_dir: repo().join("adapters"),
-        python: python.to_path_buf(),
-        runner: std::env::current_exe().unwrap(),
-        runner_args: vec!["--sandbox-run".into()],
-        user_memory_limit: None,
-        include_dev_adapters: false,
-    };
+    let config = common::test_config(python, tmp.path().join("data"));
     let app = {
         let events = events.clone();
         let reg = previews.clone();
@@ -214,7 +201,7 @@ fn scenario(python: &Path) {
     let saved = app
         .save_outputs(&job, &SaveDestination::File(dest.clone()), false)
         .unwrap();
-    assert_eq!(saved, 1);
+    assert_eq!(saved.saved, std::slice::from_ref(&dest));
     assert!(std::fs::read(&dest).unwrap().starts_with(b"%PDF"));
     assert!(app.get_snapshot().jobs.iter().all(|j| j.job_id != job));
 
@@ -570,7 +557,7 @@ fn safety_steps(app: &App, python: &Path, dir: &Path) {
 /// FFmpeg inside the sandbox: only adapters that list it get the grant.
 fn media_steps(app: &App, python: &Path, dir: &Path) {
     if !app.get_diagnostics().engines.iter().any(|e| e == "ffmpeg") {
-        println!("end_to_end: FFmpeg not installed, media steps skipped");
+        skip_or_fail("end_to_end media steps", "FFmpeg not installed");
         return;
     }
     let wav = dir.join("tone.wav");
@@ -697,7 +684,7 @@ fn media_steps(app: &App, python: &Path, dir: &Path) {
         }
         app.remove_file(&video).unwrap();
     } else {
-        println!("end_to_end: couldn't make a test video, mixed media step skipped");
+        skip_or_fail("end_to_end mixed media step", "couldn't make a test video");
     }
     app.remove_file(&id).unwrap();
 }
@@ -881,7 +868,13 @@ fn document_steps(app: &App, python: &Path, dir: &Path) {
         assert_eq!(convert(app, md, "docx", json!({})), ["notes.docx"]);
         assert_eq!(convert(app, pdf, "pptx", json!({})), ["letter.pptx"]);
     } else {
-        println!("end_to_end: LibreOffice not installed, office steps skipped");
+        // CI installs LibreOffice on Linux only (macOS and Windows runners
+        // don't), so only there is a skip a failure.
+        if cfg!(target_os = "linux") {
+            skip_or_fail("end_to_end office steps", "LibreOffice not installed");
+        } else {
+            println!("end_to_end: LibreOffice not installed, office steps skipped");
+        }
         assert!(!targets_of(app, docx).contains(&"pdf".to_owned()));
     }
     for id in &ids {

@@ -24,18 +24,21 @@ const pdf = (id: string, extra: Partial<FileDescriptor> = {}): FileResult => ({
     ...extra,
   },
 });
+type CreateInput = { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> };
+type Started = { jobId: string; skipped: number };
 const bad: FileResult = { displayName: "x.bin", error: "unreadable" };
 
 function start(
   opts: {
-    inspect?: (files: FileView[]) => FileView[];
-    createJob?: () => Promise<string>;
-    save?: (confirm: boolean) => Promise<SaveResult>;
+    inspect?: (files: FileView[]) => FileView[] | Promise<FileView[]>;
+    createJob?: (input: CreateInput) => Promise<Started>;
+    save?: (confirm: boolean, token?: string) => Promise<SaveResult>;
   } = {},
 ) {
   const effects = {
     cancelJob: vi.fn(),
     discardJob: vi.fn(),
+    cancelSave: vi.fn(),
     removeFile: vi.fn(),
     clearFiles: vi.fn(),
   };
@@ -44,9 +47,11 @@ function start(
       inspectAll: fromPromise(async ({ input }: { input: { files: FileView[] } }) =>
         (opts.inspect ?? ((f) => f))(input.files),
       ),
-      createJob: fromPromise(async () => (opts.createJob ?? (async () => "j_1"))()),
-      save: fromPromise(async ({ input }: { input: { jobId: string; confirm: boolean } }) =>
-        (opts.save ?? (async () => ({ status: "saved", count: 1 }) as SaveResult))(input.confirm),
+      createJob: fromPromise(async ({ input }: { input: CreateInput }) =>
+        (opts.createJob ?? (async () => ({ jobId: "j_1", skipped: 0 })))(input),
+      ),
+      save: fromPromise(async ({ input }: { input: { jobId: string; confirm: boolean; token?: string } }) =>
+        (opts.save ?? (async () => ({ status: "saved", count: 1 }) as SaveResult))(input.confirm, input.token),
       ),
       snapshotOutputs: fromPromise(async () => [
         { path: "0.pdf", suggestedName: "merged.pdf", extension: "pdf", sizeBytes: 5 },
@@ -55,6 +60,7 @@ function start(
     actions: {
       cancelJob: (_, p) => effects.cancelJob(p.jobId),
       discardJob: (_, p) => effects.discardJob(p.jobId),
+      cancelSave: (_, p) => effects.cancelSave(p.jobId, p.token),
       removeFile: (_, p) => effects.removeFile(p.fileId),
       clearFiles: (_, p) => effects.clearFiles(p.fileIds),
     },
@@ -179,20 +185,41 @@ describe("configuring", () => {
     expect(actor.getSnapshot().value).toBe("configuring");
   });
 
-  test("passwords are forgotten once the job is submitted, or fails to submit", async () => {
+  test("a password is forgotten once the job is created, and kept if creating it fails", async () => {
+    // Failing to create a job (a wrong page range, say) shouldn't make the
+    // user type the password, and its confirmation, again (audit U15).
     for (const fails of [false, true]) {
       const { actor } = await configured({
         createJob: async () => {
           if (fails) throw { code: "E_PARAMS_INVALID" };
-          return "j_1";
+          return { jobId: "j_1", skipped: 0 };
         },
       });
-      actor.send({ type: "SET_PARAMS", params: { mode: "protect", userPassword: "s3cret" } });
+      actor.send({ type: "SET_PARAMS", params: { mode: "protect", userPassword: "s3cret", userPasswordConfirm: "s3cret" } });
       actor.send({ type: "START" });
       await at(actor, fails ? "configuring" : "queued");
-      expect(actor.getSnapshot().context.params).toEqual({ mode: "protect" });
-      expect(JSON.stringify(actor.getSnapshot().context)).not.toContain("s3cret");
+      const { params } = actor.getSnapshot().context;
+      if (fails) {
+        expect(params).toEqual({ mode: "protect", userPassword: "s3cret", userPasswordConfirm: "s3cret" });
+      } else {
+        expect(params).toEqual({ mode: "protect" });
+        expect(JSON.stringify(actor.getSnapshot().context)).not.toContain("s3cret");
+      }
     }
+  });
+
+  test("the confirmation field is never sent with the job", async () => {
+    const inputs: CreateInput[] = [];
+    const { actor } = await configured({
+      createJob: async (input) => {
+        inputs.push(input);
+        return { jobId: "j_1", skipped: 0 };
+      },
+    });
+    actor.send({ type: "SET_PARAMS", params: { mode: "protect", userPassword: "pw", userPasswordConfirm: "pw" } });
+    actor.send({ type: "START" });
+    await at(actor, "queued");
+    expect(inputs[0]?.params).toEqual({ mode: "protect", userPassword: "pw" });
   });
 
   test("preflight failure goes back to the form with the error", async () => {
@@ -204,6 +231,17 @@ describe("configuring", () => {
     actor.send({ type: "START" });
     await at(actor, "configuring");
     expect(actor.getSnapshot().context.error?.code).toBe("E_PARAMS_INVALID");
+  });
+
+  test("the reason of a preflight failure is kept, so every-file-skipped can say so (E1/U1)", async () => {
+    const { actor } = await configured({
+      createJob: async () => {
+        throw { code: "E_PARAMS_INVALID", reason: "allSkipped" };
+      },
+    });
+    actor.send({ type: "START" });
+    await at(actor, "configuring");
+    expect(actor.getSnapshot().context.error?.reason).toBe("allSkipped");
   });
 });
 
@@ -296,7 +334,7 @@ describe("running", () => {
 });
 
 describe("result", () => {
-  async function previewing(save?: (confirm: boolean) => Promise<SaveResult>) {
+  async function previewing(save?: (confirm: boolean, token?: string) => Promise<SaveResult>) {
     const s = await running({ save });
     s.actor.send(job("succeeded"));
     await at(s.actor, { preview: "ready" });
@@ -332,6 +370,48 @@ describe("result", () => {
     await waitFor(actor, (s) => s.context.save?.status === "confirmOverwrite");
     actor.send({ type: "CONFIRM_OVERWRITE" });
     await at(actor, "saved");
+  });
+
+  test("confirming sends the token the shell gave, and drops it", async () => {
+    const tokens: (string | undefined)[] = [];
+    const { actor } = await previewing(async (confirm, token) => {
+      tokens.push(token);
+      return confirm
+        ? { status: "saved", count: 1 }
+        : { status: "confirmOverwrite", count: 0, confirmToken: "t-1" };
+    });
+    actor.send({ type: "SAVE" });
+    await waitFor(actor, (s) => s.context.save?.confirmToken === "t-1");
+    actor.send({ type: "CONFIRM_OVERWRITE" });
+    await at(actor, "saved");
+    expect(tokens).toEqual([undefined, "t-1"]);
+    expect(actor.getSnapshot().context.save?.confirmToken).toBeUndefined();
+  });
+
+  test("declining sends cancelSave with the token and forgets it", async () => {
+    const { actor, effects } = await previewing(async () => ({
+      status: "confirmOverwrite",
+      count: 0,
+      confirmToken: "t-2",
+    }));
+    actor.send({ type: "SAVE" });
+    await waitFor(actor, (s) => s.context.save?.confirmToken === "t-2");
+    actor.send({ type: "DECLINE_OVERWRITE" });
+    expect(effects.cancelSave).toHaveBeenCalledWith("j_1", "t-2");
+    expect(actor.getSnapshot().context.save).toBeNull();
+    expect(actor.getSnapshot().matches({ preview: "ready" })).toBe(true);
+  });
+
+  test("a failed confirmation drops the used-up token", async () => {
+    const { actor } = await previewing(async (confirm) => {
+      if (confirm) throw { code: "E_INTERNAL", reason: "nothingPending" };
+      return { status: "confirmOverwrite", count: 0, confirmToken: "t-3" };
+    });
+    actor.send({ type: "SAVE" });
+    await waitFor(actor, (s) => s.context.save?.confirmToken === "t-3");
+    actor.send({ type: "CONFIRM_OVERWRITE" });
+    await waitFor(actor, (s) => s.context.error?.reason === "nothingPending");
+    expect(actor.getSnapshot().context.save).toBeNull();
   });
 
   test("ADJUST and DISCARD_CONFIRMED", async () => {
@@ -378,7 +458,7 @@ describe("conversions (ADR 0003)", () => {
         inspectAll: fromPromise(async ({ input }: { input: { files: FileView[] } }) => input.files),
         createJob: fromPromise(async ({ input }: { input: { operation: string; to: Format | null; fileIds: string[]; params: Record<string, unknown> } }) => {
           inputs.push(input);
-          return "j_9";
+          return { jobId: "j_9", skipped: 0 };
         }),
       },
     });
@@ -394,5 +474,40 @@ describe("conversions (ADR 0003)", () => {
     actor.send({ type: "START" });
     await waitFor(actor, (s) => s.matches("queued"));
     expect(inputs[0]).toMatchObject({ operation: "pdf-to-image", to: "jpg", fileIds: ["a"] });
+  });
+});
+
+describe("leaving while it works (UX-7)", () => {
+  test("Cancel while files are being checked goes home and releases the files", async () => {
+    const { actor, effects } = start({ inspect: () => new Promise(() => {}) });
+    actor.send({ type: "FILES_ADDED", results: [pdf("a"), pdf("b")] });
+    expect(actor.getSnapshot().value).toBe("inspecting");
+    actor.send({ type: "CANCEL" });
+    expect(actor.getSnapshot().value).toBe("idle");
+    expect(effects.clearFiles).toHaveBeenCalledWith(["a", "b"]);
+  });
+
+  test("Cancel while the job is being set up goes back to the form, files and choices kept", async () => {
+    const { actor } = start({ createJob: () => new Promise(() => {}) });
+    actor.send({ type: "FILES_ADDED", results: [pdf("a")] });
+    await waitFor(actor, (s) => s.matches("configuring"));
+    actor.send({ type: "SELECT_OPERATION", operation: "pdf-compress", params: { level: 2 } });
+    actor.send({ type: "START" });
+    expect(actor.getSnapshot().value).toBe("preflight");
+    actor.send({ type: "CANCEL" });
+    const s = actor.getSnapshot();
+    expect(s.value).toBe("configuring");
+    expect(s.context.operation).toBe("pdf-compress");
+    expect(s.context.files).toHaveLength(1);
+  });
+});
+
+describe("Start over asks first only when work would be lost (UX-8)", () => {
+  test("choices or several files need a question; one fresh file doesn't", async () => {
+    const { startOverNeedsConfirm } = await import("./app");
+    const { context } = await import("../fixtures");
+    expect(startOverNeedsConfirm(context({ operation: "pdf-merge" }))).toBe(true);
+    expect(startOverNeedsConfirm(context({ files: [context().files[0]!, context().files[0]!] }))).toBe(true);
+    expect(startOverNeedsConfirm(context())).toBe(false);
   });
 });

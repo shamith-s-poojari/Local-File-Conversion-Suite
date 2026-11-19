@@ -20,14 +20,16 @@ from converter_sdk import (
     ValidationReport,
     run_main,
 )
-from converter_sdk.convert import ConversionAdapter, issue
+from converter_sdk.adapter import issue
+from converter_sdk.convert import ConversionAdapter
 from converter_sdk.engines import binary, run
-from converter_sdk.media import CORRUPT_MARKERS, duration_s, probe, video_streams
+from converter_sdk.limits import MB
+from converter_sdk.media import CORRUPT_MARKERS, duration_s, probe, validate_media
+from converter_sdk.protocol import ValidationIssue
 from converter_sdk.sheets import contact_sheet
 from converter_sdk.tables import file_name, unique
 from PIL import Image
 
-MB = 1024 * 1024
 MAX_FRAMES = 1000
 """Per video. More than this from one video is almost certainly a mistake."""
 SHEET_FRAMES = (4, 36)
@@ -102,23 +104,18 @@ class VideoFramesAdapter(Adapter):
     fidelity: ClassVar[Literal["E", "H", "R", "L"]] = "L"
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
-        durations, pixels = [], []
         sheet = params.get("layout", "separate") == "sheet"
-        for p in ctx.inputs:
-            ctx.check_cancelled()
-            info = probe(ctx, p)
-            video = video_streams(info)
-            if not video:
-                return ValidationReport(errors=[issue("inputs", "noVideo")])
-            seconds = duration_s(info)
-            if len(times(params, seconds)) > MAX_FRAMES:
-                return ValidationReport(errors=[issue("every", "tooManyFrames")])
-            if sheet and not SHEET_FRAMES[0] <= len(times(params, seconds)) <= SHEET_FRAMES[1]:
+
+        def check(info: dict[str, Any], seconds: float) -> ValidationIssue | None:
+            count = len(times(params, seconds))
+            if count > MAX_FRAMES:
+                return issue("every", "tooManyFrames")
+            if sheet and not SHEET_FRAMES[0] <= count <= SHEET_FRAMES[1]:
                 param = "every" if params.get("mode", "count") == "interval" else "count"
-                return ValidationReport(errors=[issue(param, "sheetFrames")])
-            durations.append(seconds)
-            pixels.append(int(video[0].get("width") or 0) * int(video[0].get("height") or 0))
-        return ValidationReport(metadata={"durations": durations, "pixels": pixels})
+                return issue(param, "sheetFrames")
+            return None
+
+        return validate_media(ctx, "video", check)
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]

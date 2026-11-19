@@ -1,4 +1,4 @@
-"""Redaction verifier (spec section 13.8, checks V1 to V9).
+"""Redaction verifier (spec section 13.8, checks V1 to V10).
 
 Runs in a **fresh process** started by ``adapter.py``. It sees only the
 output file and a JSON list of what to check, read from stdin, and prints a
@@ -226,6 +226,16 @@ def v5_structure(path: Path) -> list[str]:
             base_off = isinstance(d, pikepdf.Dictionary) and d.get("/BaseState") == "/OFF"
             if (isinstance(off, pikepdf.Array) and len(off) > 0) or base_off:
                 reasons.append("hiddenLayers")
+            # Auto-state arrays switch layers on or off by viewer event.
+            configs = props.get("/Configs")
+            every = [d] + (list(configs) if isinstance(configs, pikepdf.Array) else [])
+            if any(isinstance(c, pikepdf.Dictionary) and "/AS" in c for c in every):
+                reasons.append("layerStates")
+        for key in ("/StructTreeRoot", "/MarkInfo"):
+            if key in root:
+                reasons.append("tags")
+        if "/Threads" in root:
+            reasons.append("threads")
         for page in pdf.pages:
             annots = page.obj.get("/Annots")
             if isinstance(annots, pikepdf.Array) and len(annots) > 0:
@@ -247,6 +257,132 @@ def v5_structure(path: Path) -> list[str]:
             if obj.get("/Type") == "/Filespec" and "/EF" in obj:
                 reasons.append("attachments")
     return sorted(set(reasons))
+
+
+TEXT_KEYS = ("/ActualText", "/Alt", "/E", "/TU")
+NO_FOLLOW_TYPES = {"/Page", "/Pages", "/Catalog"}
+
+
+def pdf_string(obj: Any) -> str | None:
+    if not isinstance(obj, pikepdf.String):
+        return None
+    try:
+        return str(obj)
+    except (UnicodeDecodeError, ValueError):
+        return bytes(obj).decode("latin-1")
+
+
+def strings_below(start: Any, limit: int = 200_000) -> list[str]:
+    """Every string reachable from ``start`` without entering a page (outline
+    items, page labels and article beads all point at pages)."""
+    out: list[str] = []
+    seen: set[tuple[int, int]] = set()
+    stack = [start]
+    while stack and limit > 0:
+        limit -= 1
+        node = stack.pop()
+        if getattr(node, "is_indirect", False):
+            if node.objgen in seen:
+                continue
+            seen.add(node.objgen)
+        if isinstance(node, pikepdf.Dictionary):
+            if str(node.get("/Type", "")) in NO_FOLLOW_TYPES:
+                continue
+            stack.extend(node[k] for k in list(node.keys()))
+        elif isinstance(node, pikepdf.Array):
+            stack.extend(list(node))
+        else:
+            text = pdf_string(node)
+            if text is not None:
+                out.append(text)
+    return out
+
+
+def direct_dicts(obj: Any) -> list[Any]:
+    out: list[Any] = []
+    stack = [obj.stream_dict if isinstance(obj, pikepdf.Stream) else obj]
+    budget = 100_000
+    while stack and budget > 0:
+        budget -= 1
+        node = stack.pop()
+        if isinstance(node, pikepdf.Dictionary):
+            out.append(node)
+            children = [node[k] for k in list(node.keys())]
+        elif isinstance(node, pikepdf.Array):
+            children = list(node)
+        else:
+            continue
+        stack.extend(c for c in children if not getattr(c, "is_indirect", False))
+    return out
+
+
+def marked_content_strings(owner: Any) -> list[str] | None:
+    """Strings in inline property lists of one content stream; ``None`` when
+    it can't be read (a verifier that can't look must say so)."""
+    try:
+        data = owner.read_bytes() if isinstance(owner, pikepdf.Stream) else None
+        if data is not None and b"BDC" not in data and b"DP" not in data:
+            return []
+        out: list[str] = []
+        for operands, operator in pikepdf.parse_content_stream(owner):
+            if str(operator) in ("BDC", "DP") and operands:
+                for node in direct_dicts(operands[-1]):
+                    out += [t for k in node.keys() if (t := pdf_string(node[k])) is not None]
+        return out
+    except pikepdf.PdfError:
+        return None
+
+
+def v10_outside_page(path: Path, needles: list[str]) -> list[str]:
+    """Places outside the page text that still hold redacted text: kinds only."""
+    if not needles:
+        return []
+    places: set[str] = set()
+    with pikepdf.open(path) as pdf:
+        root = pdf.Root
+
+        def any_hit(texts: list[str]) -> bool:
+            return any(contains_any(t, needles) for t in texts)
+
+        if "/Outlines" in root and any_hit(strings_below(root.Outlines)):
+            places.add("outline")
+        if "/PageLabels" in root and any_hit(strings_below(root.PageLabels)):
+            places.add("pageLabel")
+        if "/Threads" in root and any_hit(strings_below(root.Threads)):
+            places.add("thread")
+        if "/StructTreeRoot" in root and any_hit(strings_below(root.StructTreeRoot)):
+            places.add("structure")
+        dests = root.get("/Dests")
+        if isinstance(dests, pikepdf.Dictionary) and any_hit([k.lstrip("/") for k in dests.keys()]):
+            places.add("destination")
+        names = root.get("/Names")
+        tree = names.get("/Dests") if isinstance(names, pikepdf.Dictionary) else None
+        if tree is not None:
+            try:
+                if any_hit(list(pikepdf.NameTree(tree).keys())):
+                    places.add("destination")
+            except Exception:  # noqa: BLE001 - a tree that can't be read can't be cleared
+                places.add("destination")
+        for obj in pdf.objects:
+            if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)):
+                continue
+            for node in direct_dicts(obj):
+                found = [t for k in TEXT_KEYS if (t := pdf_string(node.get(k))) is not None]
+                if any_hit(found):
+                    places.add("actualText")
+            if isinstance(obj, pikepdf.Stream) and obj.stream_dict.get("/Subtype") == "/Form":
+                texts = marked_content_strings(obj)
+                if texts is None:
+                    places.add("unreadableContent")
+                elif any_hit(texts):
+                    places.add("actualText")
+        for page in pdf.pages:
+            texts = marked_content_strings(page)
+            if texts is None:
+                places.add("unreadableContent")
+            elif any_hit(texts):
+                places.add("actualText")
+    return sorted(places)
 
 
 def v6_fill(doc: Any, regions: dict[int, list[dict[str, Any]]], fill: list[int]) -> list[int]:
@@ -338,6 +474,8 @@ def verify(job_dir: Path, request: dict[str, Any]) -> dict[str, Any]:
         check("V7", v7_single_revision(path))
         check("V8", len(doc) == int(request["expectedPages"]) == len(pdf))
         count, pages = v9_elsewhere(texts_a, captured)
+        places = v10_outside_page(path, [*terms, *captured])
+        check("V10", not places, places=places)
     finally:
         doc.close()
         pdf.close()

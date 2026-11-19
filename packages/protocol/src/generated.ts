@@ -167,7 +167,10 @@ export type WarningCode =
   | "MACROS_REMOVED"
   | "EXTERNAL_LINKS_REMOVED"
   | "DETAILS_REMOVED"
-  | "TRACKED_CHANGES_KEPT";
+  | "TRACKED_CHANGES_KEPT"
+  | "ENCRYPTION_REMOVED"
+  | "WARNINGS_TRUNCATED"
+  | "PART_FAILED";
 
 /**
  * One line of the worker protocol.

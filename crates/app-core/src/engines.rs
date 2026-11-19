@@ -7,8 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use converter_router::Registry;
 use converter_sandbox::Grant;
@@ -35,10 +37,21 @@ const PYTHON_ENGINES: &[(&str, &str)] = &[
 /// Where binaries are looked for, after `PATH`. Apps started from the
 /// Finder or a desktop launcher get a minimal `PATH`, so the usual install
 /// folders are listed explicitly.
+///
+/// Homebrew's `ffmpeg` 9 is built without libvorbis (no Ogg); `ffmpeg-full`
+/// has it but isn't linked into `bin`, so its own folder comes first.
 #[cfg(not(windows))]
-fn bin_dirs(_name: &str) -> Vec<PathBuf> {
-    ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-        .iter()
+fn bin_dirs(name: &str) -> Vec<PathBuf> {
+    let full: &[&str] = if name.starts_with("ff") {
+        &[
+            "/opt/homebrew/opt/ffmpeg-full/bin",
+            "/usr/local/opt/ffmpeg-full/bin",
+        ]
+    } else {
+        &[]
+    };
+    full.iter()
+        .chain(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
         .map(PathBuf::from)
         .collect()
 }
@@ -63,15 +76,10 @@ fn bin_dirs(name: &str) -> Vec<PathBuf> {
         dirs.push(scoop.join("apps").join(package).join(r"current\bin"));
         dirs.push(scoop.join("apps").join(package).join("current"));
     }
-    if let Some(data) = var("ProgramData") {
-        let lib = data.join(r"chocolatey\lib");
-        dirs.push(lib.join(package).join("tools").join(package).join("bin"));
-        dirs.push(
-            lib.join(format!("{package}-full"))
-                .join("tools")
-                .join(package)
-                .join("bin"),
-        );
+    if let Some(lib) = choco_root().map(|c| c.join("lib")) {
+        for pkg in [package.to_owned(), format!("{package}-full")] {
+            dirs.extend(choco_tool_dirs(&lib.join(pkg).join("tools"), package));
+        }
     }
     for root in [var("ProgramFiles"), Some(PathBuf::from(r"C:\"))]
         .into_iter()
@@ -80,6 +88,50 @@ fn bin_dirs(name: &str) -> Vec<PathBuf> {
         dirs.push(root.join(package).join("bin"));
     }
     dirs
+}
+
+/// Chocolatey's install folder (`%ChocolateyInstall%`, else the default).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn choco_root() -> Option<PathBuf> {
+    std::env::var_os("ChocolateyInstall")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join("chocolatey")))
+        .filter(|p| p.is_absolute())
+}
+
+/// The `bin` folders in a Chocolatey package's `tools`: the archive unpacks
+/// to a folder named after its version (`ffmpeg-8.0-essentials_build`), so
+/// every folder there is tried, then `tools/<package>/bin`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn choco_tool_dirs(tools: &Path, package: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(tools)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .map(|p| p.join("bin"))
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    let named = tools.join(package).join("bin");
+    if !dirs.contains(&named) {
+        dirs.push(named);
+    }
+    dirs
+}
+
+/// Chocolatey's shims (`<root>\bin\ffprobe.exe`) start the real binary as a
+/// second process from a folder the sandbox doesn't grant, and unlike
+/// Scoop's they don't say where it is. They're skipped; the package's own
+/// folder is found through [`bin_dirs`].
+fn is_choco_shim(path: &Path, choco: Option<&Path>) -> bool {
+    choco.is_some_and(|root| {
+        path.parent().is_some_and(|dir| {
+            dir.as_os_str()
+                .eq_ignore_ascii_case(root.join("bin").as_os_str())
+        })
+    })
 }
 
 /// LibreOffice's own binary, run directly: on Linux the `soffice` script
@@ -174,32 +226,32 @@ impl Engines {
         let mut e = Engines::default();
         e.installed.extend(python_modules(python));
         if let (Some(ffmpeg), Some(ffprobe)) = (find_bin("ffmpeg"), find_bin("ffprobe")) {
-            e.installed.insert("ffmpeg".into());
-            e.grants.insert(
-                "ffmpeg".into(),
-                binary_grant(&[("ffmpeg", &ffmpeg), ("ffprobe", &ffprobe)]),
-            );
+            // A binary whose install folder can't be shared safely is treated
+            // as not installed.
+            if let Some(grant) = binary_grant(&[("ffmpeg", &ffmpeg), ("ffprobe", &ffprobe)]) {
+                e.installed.insert("ffmpeg".into());
+                e.grants.insert("ffmpeg".into(), grant);
+            }
         }
         let soffice = soffice_candidates()
             .into_iter()
-            .find(|p| p.is_file())
-            .and_then(|p| p.canonicalize().ok());
-        if let Some(real) = soffice {
+            .filter(|p| p.is_file())
+            .filter_map(|p| p.canonicalize().ok())
+            .find(|p| trusted_binary(p));
+        if let Some(grant) =
+            soffice.and_then(|real| libreoffice_grant(&converter_sandbox::plain_path(&real)))
+        {
             e.installed.insert("libreoffice".into());
-            e.grants.insert(
-                "libreoffice".into(),
-                libreoffice_grant(&converter_sandbox::plain_path(&real)),
-            );
+            e.grants.insert("libreoffice".into(), grant);
         }
         let gs = if cfg!(windows) { "gswin64c" } else { "gs" };
         for (engine, env, bin) in [
             ("ghostscript", "gs", gs),
             ("tesseract", "tesseract", "tesseract"),
         ] {
-            if let Some(path) = find_bin(bin) {
+            if let Some(grant) = find_bin(bin).and_then(|path| binary_grant(&[(env, &path)])) {
                 e.installed.insert(engine.into());
-                e.grants
-                    .insert(engine.into(), binary_grant(&[(env, &path)]));
+                e.grants.insert(engine.into(), grant);
             }
         }
         e
@@ -233,21 +285,53 @@ impl Engines {
 /// the interpreter it starts.
 const PYTHON_PROCESSES: u32 = 2;
 
-/// Which engine modules the worker interpreter can import.
+/// How long the interpreter gets to list its modules. Startup waits on this;
+/// a broken or hung interpreter (a stuck network drive, a prompt) must not
+/// freeze the app.
+const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Which engine modules the worker interpreter can import. If it doesn't
+/// answer in time, none: the app then offers no Python conversions.
 fn python_modules(python: &Path) -> BTreeSet<String> {
+    python_modules_within(python, PYTHON_PROBE_TIMEOUT)
+}
+
+fn python_modules_within(python: &Path, timeout: Duration) -> BTreeSet<String> {
     let modules: Vec<&str> = PYTHON_ENGINES.iter().map(|(_, m)| *m).collect();
     let script = format!(
         "import importlib.util as u\nfor m in {modules:?}:\n    print(m, u.find_spec(m) is not None)"
     );
-    let Ok(out) = Command::new(python)
+    let Ok(mut child) = Command::new(python)
         .args(["-I", "-c", &script])
         .env_clear()
         .envs(converter_sandbox::base_env())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return BTreeSet::new();
     };
-    let found: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+    // The answer is a few hundred bytes, well under a pipe buffer, so waiting
+    // before reading can't block the child.
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return BTreeSet::new(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return BTreeSet::new();
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut text);
+    }
+    let found: BTreeSet<String> = text
         .lines()
         .filter_map(|l| l.strip_suffix(" True").map(str::to_owned))
         .collect();
@@ -263,17 +347,58 @@ fn python_modules(python: &Path) -> BTreeSet<String> {
 /// launcher, say) can't run in the sandbox and is skipped.
 fn find_bin(name: &str) -> Option<PathBuf> {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    path_dirs
+    let choco = if cfg!(windows) { choco_root() } else { None };
+    path_dirs(std::env::var_os("PATH").as_deref())
         .into_iter()
         .chain(bin_dirs(name))
         .map(|d| d.join(&file))
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() && !is_choco_shim(p, choco.as_deref()))
         .filter_map(|p| scoop_shim_target(&p).unwrap_or(p).canonicalize().ok())
         .map(|p| converter_sandbox::plain_path(&p))
-        .find(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(name)))
+        .filter(|p| p.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(name)))
+        .find(|p| trusted_binary(p))
+}
+
+/// Whether an engine binary may be granted to the sandbox: a regular file
+/// (the path is already canonical, so a link here means something changed),
+/// owned by root or by the user running the app, and writable by nobody
+/// else. A binary another account can replace would run as that account's
+/// choice with the engine's grants.
+///
+/// The folders above it aren't checked: Homebrew's own are group-writable
+/// by design, and the grant covers the install root read-only anyway.
+///
+/// Windows keeps the name-and-location rule only: ownership and ACLs don't
+/// map onto mode bits, and the places searched (Program Files, WinGet, Scoop,
+/// Chocolatey) are per-user or admin-only already.
+#[cfg(unix)]
+fn trusted_binary(path: &Path) -> bool {
+    // SAFETY: plain syscall with no arguments.
+    let uid = unsafe { libc::geteuid() };
+    std::fs::symlink_metadata(path).is_ok_and(|m| trusted_by(&m, uid))
+}
+
+#[cfg(not(unix))]
+fn trusted_binary(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+#[cfg(unix)]
+fn trusted_by(meta: &std::fs::Metadata, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.file_type().is_file() && (meta.uid() == 0 || meta.uid() == uid) && meta.mode() & 0o022 == 0
+}
+
+/// `PATH` entries that name one place. An empty entry or a relative one means
+/// "the current directory" to a shell, so a hostile folder the app happens to
+/// run from could supply the engine; both are ignored.
+fn path_dirs(path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    path.map(|p| {
+        std::env::split_paths(p)
+            .filter(|d| d.is_absolute())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Scoop's shims start the real binary named in `<name>.shim` beside them.
@@ -292,13 +417,15 @@ fn scoop_shim_target(path: &Path) -> Option<PathBuf> {
 }
 
 /// Read the binary's install (for Homebrew, every keg: dependencies live in
-/// sibling kegs), execute only the named binaries.
-fn binary_grant(bins: &[(&str, &Path)]) -> Grant {
+/// sibling kegs), execute only the named binaries. `None` when its install
+/// can't be shared safely (see [`install_root`]).
+fn binary_grant(bins: &[(&str, &Path)]) -> Option<Grant> {
     let mut g = Grant::default();
     for (name, path) in bins {
-        let root = install_root(path);
-        if !g.read.contains(&root) {
-            g.read.push(root);
+        for root in install_root(path)? {
+            if !g.read.contains(&root) {
+                g.read.push(root);
+            }
         }
         g.exec.push(path.to_path_buf());
         g.env.push((
@@ -308,31 +435,72 @@ fn binary_grant(bins: &[(&str, &Path)]) -> Grant {
     }
     // One at a time: FFmpeg, then FFprobe.
     g.processes = 1;
-    g
+    Some(g)
 }
 
-fn install_root(bin: &Path) -> PathBuf {
-    let s = bin.to_string_lossy();
-    if let Some(i) = s.find("/Cellar/") {
-        return PathBuf::from(&s[..i + "/Cellar".len()]);
-    }
-    // e.g. /usr/bin/ffmpeg → /usr (libraries live in /usr/lib), or
-    // C:\ffmpeg\bin\ffmpeg.exe → C:\ffmpeg.
-    bin.parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/"))
+/// Where Homebrew keeps kegs; the Cellar there holds every formula, and a
+/// binary's libraries live in sibling kegs.
+const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
+/// The folders to share read-only so `bin` can load its libraries, from a
+/// short list of known layouts: the Homebrew Cellar, `/usr`, `/opt/<name>`,
+/// `C:\Program Files\<name>` and an app bundle. Any other binary gets its own
+/// folder plus a sibling `lib`. `None` when that would be, or contain, the
+/// home folder or `/`: a `~/bin/ffmpeg` in `PATH` must not share the home
+/// folder with a sandboxed worker (a binary found that way is treated as not
+/// installed).
+fn install_root(bin: &Path) -> Option<Vec<PathBuf>> {
+    install_root_in(bin, converter_sandbox::home_dir().as_deref())
 }
 
-fn libreoffice_grant(soffice: &Path) -> Grant {
-    // …/LibreOffice.app/Contents/MacOS/soffice → …/LibreOffice.app
-    let app = soffice
+fn install_root_in(bin: &Path, home: Option<&Path>) -> Option<Vec<PathBuf>> {
+    let known = |dir: &str| bin.parent().is_some_and(|p| p == Path::new(dir));
+    let roots: Vec<PathBuf> = if let Some(cellar) = bin.ancestors().find(|a| {
+        a.file_name().is_some_and(|n| n == "Cellar")
+            && a.parent()
+                .is_some_and(|p| BREW_PREFIXES.iter().any(|b| p == Path::new(b)))
+    }) {
+        vec![cellar.to_path_buf()]
+    } else if let Some(app) = bin
         .ancestors()
         .find(|a| a.extension().is_some_and(|e| e == "app"))
-        .map(Path::to_path_buf);
-    let root = app.clone().unwrap_or_else(|| install_root(soffice));
+    {
+        vec![app.to_path_buf()]
+    } else if known("/usr/bin") || known("/usr/sbin") {
+        // Libraries live in /usr/lib.
+        vec![PathBuf::from("/usr")]
+    } else if known("/usr/local/bin") || known("/usr/local/sbin") {
+        vec![PathBuf::from("/usr/local")]
+    } else if let Some(opt) = bin.ancestors().find(|a| {
+        a.parent().is_some_and(|p| p == Path::new("/opt"))
+            && a.file_name().is_some_and(|n| n != "homebrew")
+    }) {
+        vec![opt.to_path_buf()]
+    } else if let Some(app) = bin.ancestors().find(|a| {
+        a.parent().and_then(Path::file_name).is_some_and(|n| {
+            n.eq_ignore_ascii_case("Program Files") || n.eq_ignore_ascii_case("Program Files (x86)")
+        })
+    }) {
+        vec![app.to_path_buf()]
+    } else {
+        let dir = bin.parent()?;
+        let mut v = vec![dir.to_path_buf()];
+        if let Some(lib) = dir.parent().map(|p| p.join("lib")).filter(|l| l.is_dir()) {
+            v.push(lib);
+        }
+        v
+    };
+    roots
+        .iter()
+        .all(|r| !converter_sandbox::too_broad(r, home))
+        .then_some(roots)
+}
+
+fn libreoffice_grant(soffice: &Path) -> Option<Grant> {
+    // …/LibreOffice.app/Contents/MacOS/soffice → …/LibreOffice.app
+    let read = install_root(soffice)?;
     let mut g = Grant {
-        read: vec![root],
+        read,
         exec: vec![soffice.parent().unwrap_or(soffice).to_path_buf()],
         env: vec![(
             "LFCS_BIN_SOFFICE".into(),
@@ -362,35 +530,271 @@ fn libreoffice_grant(soffice: &Path) -> Grant {
             }
         }
     }
-    g
+    Some(g)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const HOME: &str = "/Users/me";
+
+    #[cfg(unix)]
+    fn file_with_mode(dir: &Path, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(format!("engine{mode:o}"));
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_others_can_write_is_not_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        for ok in [0o755, 0o700, 0o555] {
+            assert!(trusted_binary(&file_with_mode(t.path(), ok)), "{ok:o}");
+        }
+        for bad in [0o775, 0o757, 0o777, 0o722] {
+            assert!(!trusted_binary(&file_with_mode(t.path(), bad)), "{bad:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_owned_by_someone_else_is_not_trusted() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let p = file_with_mode(t.path(), 0o755);
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        assert!(trusted_by(&meta, meta.uid()));
+        // Owned by neither root nor the "current" user. (Root owning it is
+        // the other accepted case, covered by /usr/bin on any machine.)
+        if meta.uid() != 0 {
+            assert!(!trusted_by(&meta, meta.uid().wrapping_add(1)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_directories_and_missing_files_are_not_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        let real = file_with_mode(t.path(), 0o755);
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!trusted_binary(&link));
+        assert!(!trusted_binary(t.path()));
+        assert!(!trusted_binary(&t.path().join("missing")));
+    }
+
+    #[cfg(unix)]
+    fn roots(bin: &str) -> Option<Vec<PathBuf>> {
+        install_root_in(Path::new(bin), Some(Path::new(HOME)))
+    }
+
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn homebrew_kegs_share_one_read_root() {
         assert_eq!(
-            install_root(Path::new("/opt/homebrew/Cellar/ffmpeg/7.1.1_4/bin/ffmpeg")),
-            Path::new("/opt/homebrew/Cellar")
+            roots("/opt/homebrew/Cellar/ffmpeg/7.1.1_4/bin/ffmpeg").unwrap(),
+            [PathBuf::from("/opt/homebrew/Cellar")]
         );
+        assert_eq!(roots("/usr/bin/ffmpeg").unwrap(), [PathBuf::from("/usr")]);
+        // A folder that merely calls itself Cellar isn't Homebrew's.
         assert_eq!(
-            install_root(Path::new("/usr/bin/ffmpeg")),
-            Path::new("/usr")
+            roots("/Users/me/Cellar/x/bin/x").unwrap(),
+            [PathBuf::from("/Users/me/Cellar/x/bin")]
         );
     }
 
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_in_the_home_folder_never_grants_home() {
+        // Typical: ~/bin is on PATH.
+        assert_eq!(
+            roots("/Users/me/bin/ffmpeg").unwrap(),
+            [PathBuf::from("/Users/me/bin")]
+        );
+        // Directly in home: the binary's folder would be home itself.
+        assert!(roots("/Users/me/ffmpeg").is_none());
+        // Directly under /: its folder is `/`.
+        assert!(roots("/ffmpeg").is_none());
+        // /Users/ffmpeg would grant every user's files.
+        assert!(roots("/Users/ffmpeg").is_none());
+        for bin in [
+            "/Users/me/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/libreoffice25.8/program/soffice.bin",
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ] {
+            for r in roots(bin).unwrap() {
+                assert!(
+                    !converter_sandbox::too_broad(&r, Some(Path::new(HOME))),
+                    "{r:?}"
+                );
+            }
+        }
+    }
+
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
+    #[test]
+    fn known_layouts_grant_their_install() {
+        assert_eq!(
+            roots("/usr/local/bin/gs").unwrap(),
+            [PathBuf::from("/usr/local")]
+        );
+        assert_eq!(
+            roots("/opt/libreoffice25.8/program/soffice.bin").unwrap(),
+            [PathBuf::from("/opt/libreoffice25.8")]
+        );
+        assert_eq!(
+            roots("/Applications/LibreOffice.app/Contents/MacOS/soffice").unwrap(),
+            [PathBuf::from("/Applications/LibreOffice.app")]
+        );
+        // Homebrew's own prefix isn't an /opt/<name> install: just the
+        // binary's folder and, if the machine has it, the sibling lib.
+        let r = roots("/opt/homebrew/bin/ffmpeg").unwrap();
+        assert_eq!(r[0], Path::new("/opt/homebrew/bin"));
+        assert!(r.len() == 1 || r[1] == Path::new("/opt/homebrew/lib"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_program_files_grants_the_app_folder() {
+        let r = install_root_in(
+            Path::new(r"C:\Program Files\LibreOffice\program\soffice.com"),
+            Some(Path::new(r"C:\Users\me")),
+        )
+        .unwrap();
+        assert_eq!(r, [PathBuf::from(r"C:\Program Files\LibreOffice")]);
+        assert!(install_root_in(
+            Path::new(r"C:\Users\me\ffmpeg.exe"),
+            Some(Path::new(r"C:\Users\me"))
+        )
+        .is_none());
+    }
+
+    // Unix layouts: these paths aren't absolute on Windows, which has its own.
+    #[cfg(unix)]
     #[test]
     fn grants_name_the_binaries() {
         let g = binary_grant(&[(
             "ffmpeg",
             Path::new("/opt/homebrew/Cellar/ffmpeg/7/bin/ffmpeg"),
-        )]);
+        )])
+        .unwrap();
         assert_eq!(
             g.exec,
             vec![PathBuf::from("/opt/homebrew/Cellar/ffmpeg/7/bin/ffmpeg")]
         );
         assert_eq!(g.env[0].0, "LFCS_BIN_FFMPEG");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn homebrew_ffmpeg_full_is_found_before_the_slim_ffmpeg() {
+        let dirs = bin_dirs("ffmpeg");
+        let full = dirs
+            .iter()
+            .position(|d| d == Path::new("/opt/homebrew/opt/ffmpeg-full/bin"))
+            .unwrap();
+        let slim = dirs
+            .iter()
+            .position(|d| d == Path::new("/opt/homebrew/bin"))
+            .unwrap();
+        assert!(full < slim);
+        assert!(bin_dirs("ffprobe").contains(&PathBuf::from("/opt/homebrew/opt/ffmpeg-full/bin")));
+        assert!(!bin_dirs("soffice")
+            .iter()
+            .any(|d| d.to_string_lossy().contains("ffmpeg")));
+    }
+
+    #[test]
+    fn chocolatey_versioned_tool_folders_are_searched() {
+        let t = tempfile::tempdir().unwrap();
+        let tools = t.path().join("tools");
+        std::fs::create_dir_all(tools.join("ffmpeg-8.0-essentials_build").join("bin")).unwrap();
+        std::fs::write(tools.join("ffmpeg-8.0-essentials_build.7z"), b"").unwrap();
+        let dirs = choco_tool_dirs(&tools, "ffmpeg");
+        assert_eq!(
+            dirs,
+            [
+                tools.join("ffmpeg-8.0-essentials_build").join("bin"),
+                tools.join("ffmpeg").join("bin"),
+            ]
+        );
+        assert_eq!(
+            choco_tool_dirs(&t.path().join("missing"), "ffmpeg").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn chocolatey_shims_are_skipped() {
+        let root = Path::new("/choco");
+        assert!(is_choco_shim(
+            &root.join("bin").join("ffprobe.exe"),
+            Some(root)
+        ));
+        assert!(!is_choco_shim(
+            &root.join("lib/ffmpeg/tools/x/bin/ffprobe.exe"),
+            Some(root)
+        ));
+        assert!(!is_choco_shim(&root.join("bin").join("ffprobe.exe"), None));
+    }
+
+    #[test]
+    fn path_entries_must_be_absolute() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let abs = if cfg!(windows) {
+            r"C:\tools"
+        } else {
+            "/usr/bin"
+        };
+        // Empty entries (leading, middle, trailing) and relative ones.
+        let value = format!("{sep}rel/bin{sep}{abs}{sep}{sep}.{sep}");
+        assert_eq!(
+            path_dirs(Some(std::ffi::OsStr::new(&value))),
+            [PathBuf::from(abs)]
+        );
+        assert!(path_dirs(None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_interpreter_reports_no_engines_instead_of_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let fake = t.path().join("python");
+        // exec: the sleep is the child, so killing it frees the pipe.
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        let found = python_modules_within(&fake, Duration::from_millis(300));
+        assert!(found.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_working_interpreter_is_still_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let fake = t.path().join("python");
+        std::fs::write(&fake, "#!/bin/sh\necho 'pikepdf True'\necho 'PIL False'\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = python_modules_within(&fake, Duration::from_secs(10));
+        assert_eq!(
+            found,
+            BTreeSet::from(["pikepdf".to_owned(), "qpdf".to_owned()])
+        );
     }
 }

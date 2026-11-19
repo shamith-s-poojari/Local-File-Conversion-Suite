@@ -28,10 +28,17 @@ pub(crate) struct Args {
     pub memory_limit: u64,
     pub job_id: String,
     /// Processes the worker may run at once, itself included. Windows
-    /// enforces it with the Job Object; macOS limits what may be executed
-    /// and Linux gives each worker its own PID namespace instead.
-    #[cfg_attr(unix, allow(dead_code))]
+    /// enforces it with the Job Object; Linux and macOS cap tasks with
+    /// `RLIMIT_NPROC` (see `task_cap`).
+    #[cfg_attr(
+        all(unix, not(any(target_os = "linux", target_os = "macos"))),
+        allow(dead_code)
+    )]
     pub max_processes: u32,
+    /// Linux: a descriptor number to fill with the seccomp program for
+    /// bubblewrap's `--seccomp` before starting the program.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub seccomp_fd: Option<i32>,
     pub program: Vec<String>,
 }
 
@@ -40,11 +47,13 @@ fn parse(args: Vec<String>) -> Option<Args> {
     let mut memory_limit = None;
     let mut job_id = None;
     let mut max_processes = 1;
+    let mut seccomp_fd = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--memory-limit" => memory_limit = args.next()?.parse().ok(),
             "--job-id" => job_id = args.next(),
             "--max-processes" => max_processes = args.next()?.parse().ok().filter(|n| *n >= 1)?,
+            "--seccomp-fd" => seccomp_fd = Some(args.next()?.parse().ok().filter(|n| *n > 2)?),
             "--" => break,
             _ => return None,
         }
@@ -63,6 +72,7 @@ fn parse(args: Vec<String>) -> Option<Args> {
         memory_limit: memory_limit?,
         job_id,
         max_processes,
+        seccomp_fd,
         program,
     })
 }
@@ -72,7 +82,7 @@ fn parse(args: Vec<String>) -> Option<Args> {
 pub fn main_with(args: Vec<String>) -> ExitCode {
     let Some(args) = parse(args) else {
         eprintln!(
-            "usage: converter-sandbox-run --memory-limit N --job-id ID [--max-processes N] -- PROGRAM ..."
+            "usage: converter-sandbox-run --memory-limit N --job-id ID [--max-processes N] [--seccomp-fd N] -- PROGRAM ..."
         );
         return ExitCode::from(EX_USAGE);
     };
@@ -114,10 +124,88 @@ mod unix {
 
     const POLL: Duration = Duration::from_millis(50);
 
+    /// `RLIMIT_NPROC` for a worker: what the user runs now, plus room per
+    /// permitted process. Linux counts tasks, threads included (ffmpeg and
+    /// LibreOffice start dozens); macOS counts processes. Either way the
+    /// limit is checked against all of the user's processes system-wide, not
+    /// the worker's own, so a small absolute number would break workers
+    /// outright, and a user starting many programs during a job eats the
+    /// headroom. The point is to stop a fork bomb, not to count processes:
+    /// the memory watchdog and (Linux) the PID namespace do the precise work.
+    /// Seatbelt has no process-count rule (it can only allow or deny
+    /// `process-fork` altogether), so this is the only cap macOS has.
+    /// Unix-wide so it can be tested anywhere.
+    pub(super) fn task_cap(tasks_now: u64, max_processes: u32) -> u64 {
+        tasks_now
+            .saturating_add(256)
+            .saturating_add(256 * u64::from(max_processes))
+    }
+
+    /// Kernel scheduling entities now: the fourth field of `/proc/loadavg`
+    /// (`running/total`).
+    #[cfg(target_os = "linux")]
+    fn tasks_now() -> u64 {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .nth(3)?
+                    .split('/')
+                    .nth(1)?
+                    .parse::<u64>()
+                    .ok()
+            })
+            // Unreadable /proc: a generous guess rather than no limit at all.
+            .unwrap_or(32768)
+    }
+
+    /// The user's processes now, from `proc_listpids` (bytes needed, four per pid).
+    #[cfg(target_os = "macos")]
+    fn tasks_now() -> u64 {
+        // PROC_UID_ONLY, <sys/proc_info.h>.
+        const PROC_UID_ONLY: u32 = 4;
+        // SAFETY: a null buffer asks only for the size.
+        let bytes =
+            unsafe { libc::proc_listpids(PROC_UID_ONLY, libc::geteuid(), std::ptr::null_mut(), 0) };
+        u64::try_from(bytes).map_or(2048, |b| b / 4)
+    }
+
+    /// A descriptor holding the seccomp program, for bwrap to read.
+    #[cfg(target_os = "linux")]
+    fn seccomp_file() -> std::io::Result<std::fs::File> {
+        use std::io::{Seek, Write};
+        use std::os::unix::io::FromRawFd;
+        let Some(arch) = crate::seccomp::host_arch() else {
+            return Err(std::io::Error::other(
+                "no seccomp table for this architecture",
+            ));
+        };
+        // SAFETY: memfd_create with a NUL-terminated name; MFD_CLOEXEC (1) so
+        // only the copy made for bwrap survives exec.
+        let fd = unsafe { libc::syscall(libc::SYS_memfd_create, c"lfcs-seccomp".as_ptr(), 1u32) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a fresh descriptor we own.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd as i32) };
+        file.write_all(&crate::seccomp::program(arch))?;
+        file.rewind()?;
+        Ok(file)
+    }
+
     pub fn main(args: Args) -> ExitCode {
         let mut cmd = Command::new(&args.program[0]);
         cmd.args(&args.program[1..]);
         let limit = args.memory_limit;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let nproc = task_cap(tasks_now(), args.max_processes) as libc::rlim_t;
+        // Asked for, so never start without it.
+        #[cfg(target_os = "linux")]
+        let seccomp = match args.seccomp_fd.map(|fd| seccomp_file().map(|f| (f, fd))) {
+            Some(Ok(pair)) => Some(pair),
+            Some(Err(_)) => return ExitCode::from(EX_UNAVAILABLE),
+            None => None,
+        };
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
             cmd.pre_exec(move || {
@@ -136,6 +224,39 @@ mod unix {
                         rlim_max: cap,
                     };
                     libc::setrlimit(libc::RLIMIT_AS, &lim);
+                    let procs = libc::rlimit {
+                        rlim_cur: nproc,
+                        rlim_max: nproc,
+                    };
+                    libc::setrlimit(libc::RLIMIT_NPROC, &procs);
+                    if let Some((file, fd)) = &seccomp {
+                        use std::os::unix::io::AsRawFd;
+                        let from = file.as_raw_fd();
+                        // dup2 gives the copy no close-on-exec flag; if the
+                        // descriptor already is the wanted number, clear it.
+                        if from == *fd {
+                            libc::fcntl(from, libc::F_SETFD, 0);
+                        } else if libc::dup2(from, *fd) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    // The hard limit can't be raised again, so it also caps
+                    // what descendants set. Never above what the system allows.
+                    let mut cur: libc::rlimit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(libc::RLIMIT_NPROC, &mut cur) == 0 {
+                        let cap = nproc.min(cur.rlim_max);
+                        let procs = libc::rlimit {
+                            rlim_cur: cap,
+                            rlim_max: cap,
+                        };
+                        libc::setrlimit(libc::RLIMIT_NPROC, &procs);
+                    }
                 }
                 let _ = limit;
                 Ok(())
@@ -264,5 +385,17 @@ mod unix {
                     .and_then(|r| r.parse::<u64>().ok())
             })
             .map_or(0, |pages| pages * page)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::unix::task_cap;
+
+    #[test]
+    fn the_task_cap_leaves_room_but_is_finite() {
+        assert_eq!(task_cap(1000, 1), 1000 + 256 + 256);
+        assert_eq!(task_cap(0, 3), 256 + 768);
+        assert_eq!(task_cap(u64::MAX, 3), u64::MAX);
     }
 }

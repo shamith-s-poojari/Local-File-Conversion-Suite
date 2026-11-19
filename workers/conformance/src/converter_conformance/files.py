@@ -17,9 +17,11 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import wave
 import zipfile
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -50,6 +52,22 @@ def soffice() -> str | None:
         if not found and Path(candidate).exists():
             found = candidate
     return found
+
+
+def in_ci() -> bool:
+    """CI sets ``CI=true``. There a missing engine is a broken setup, not a reason to skip."""
+    return bool(os.environ.get("CI"))
+
+
+def skip_ffmpeg() -> bool:
+    """Skip FFmpeg tests only when it's missing and this isn't CI."""
+    return ffmpeg() is None and not in_ci()
+
+
+def skip_soffice() -> bool:
+    """Skip LibreOffice tests only when it's missing, except on Linux CI, where
+    CI installs it and a missing one must fail."""
+    return soffice() is None and not (in_ci() and sys.platform.startswith("linux"))
 
 
 def engine_env() -> dict[str, str]:
@@ -472,6 +490,122 @@ def truncated(path: Path, fmt: str, make: Callable[[Path], Path]) -> Path:
     return path
 
 
+# --------------------------------------------------------- hostile inputs
+
+TEXT_SENTINEL = "DOCTEXT-sentinel-4b7e91"
+"""Text inside the sentinel documents. It must never reach an error, a
+warning or a log line: those can be shown, stored and shared."""
+
+BOMB_BYTES = 1100 * 1024 * 1024
+"""Unpacked size of the zip bomb: over every unpacked-size limit the tools set."""
+
+
+def sentinel_file(path: Path, fmt: str) -> Path:
+    """A small document whose text, title and name fields hold ``TEXT_SENTINEL``."""
+    body = {
+        "txt": f"{TEXT_SENTINEL}\n\nSecond paragraph {TEXT_SENTINEL}\n",
+        "md": f"# {TEXT_SENTINEL}\n\nBody {TEXT_SENTINEL}\n",
+        "html": f"<html><head><title>{TEXT_SENTINEL}</title></head>"
+        f"<body><p>{TEXT_SENTINEL}</p></body></html>",
+        "csv": f"{TEXT_SENTINEL},b\n1,2\n",
+    }[fmt]
+    path.write_text(body, "utf-8")
+    return path
+
+
+def sentinel_pdf(path: Path, truncate: bool = False) -> Path:
+    import pikepdf  # noqa: PLC0415
+
+    from . import corpus  # noqa: PLC0415
+
+    full = path.with_name("full-" + path.name)
+    corpus.text_pdf(full, 3, title=TEXT_SENTINEL)
+    with pikepdf.open(full, allow_overwriting_input=True) as pdf:
+        pdf.pages[0].contents_add(
+            pdf.make_stream(f"BT /F1 12 Tf 72 700 Td ({TEXT_SENTINEL}) Tj ET\n".encode("ascii"))
+        )
+        pdf.save(full)
+    data = full.read_bytes()
+    full.unlink()
+    path.write_bytes(data[: len(data) // 2] if truncate else data)
+    return path
+
+
+def zip_bomb(path: Path, fmt: str) -> Path:
+    """A small zip whose one member unpacks to ``BOMB_BYTES`` of zeros, in the
+    wrapper a ``docx``, ``xlsx``, ``pptx`` or ``epub`` expects."""
+    chunk = bytes(1024 * 1024)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+        if fmt == "epub":
+            z.writestr(
+                zipfile.ZipInfo("mimetype"),
+                "application/epub+zip",
+                compress_type=zipfile.ZIP_STORED,
+            )
+        else:
+            z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="x"/>')
+        with z.open("payload/bomb.bin", "w", force_zip64=True) as member:
+            for _ in range(BOMB_BYTES // len(chunk)):
+                member.write(chunk)
+    return path
+
+
+def deep_xml(path: Path, fmt: str, depth: int = 200_000) -> Path:
+    """Elements nested ``depth`` deep: a recursive parser or walker overflows its stack."""
+    nest = "<g>" * depth + "</g>" * depth
+    if fmt == "svg":
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg">{nest}</svg>', "utf-8")
+    elif fmt == "html":
+        path.write_text(
+            "<html><body>" + "<div>" * depth + "x" + "</div>" * depth + "</body></html>", "utf-8"
+        )
+    else:  # docx
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="x"/>')
+            body = "<w:p>" * depth + "</w:p>" * depth
+            z.writestr(
+                "word/document.xml",
+                f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>',
+            )
+    return path
+
+
+def huge_image_header(path: Path, fmt: str) -> Path:
+    """A header declaring billions of pixels, with almost no data behind it."""
+    if fmt == "gif":
+        buf = io.BytesIO()
+        Image.new("P", (1, 1)).save(buf, "GIF")
+        data = bytearray(buf.getvalue())
+        data[6:10] = struct.pack("<HH", 65535, 65535)
+        path.write_bytes(bytes(data))
+        return path
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 40_000, 40_000, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b""))
+        + chunk(b"IEND", b"")
+    )
+    return path
+
+
+def long_css(path: Path, fmt: str, size: int = 4 * 1024 * 1024) -> Path:
+    """One huge, unbalanced CSS string: a scanner that backtracks never finishes."""
+    css = "@import url(" + "(" * size + "a{" + 'b:url("' * (size // 8)
+    if fmt == "svg":
+        path.write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg"><style>{css}</style></svg>', "utf-8"
+        )
+    else:
+        path.write_text(f"<html><head><style>{css}</style></head><body>x</body></html>", "utf-8")
+    return path
+
+
 # ------------------------------------------------------------------ registry
 
 IMAGE_FORMATS = ["png", "jpg", "webp", "heic", "gif", "bmp", "tiff", "avif", "ico", "svg"]
@@ -530,6 +664,24 @@ BUILDERS["truncated-xlsx"] = ("xlsx", lambda p: truncated(p, "xlsx", xlsx_file))
 BUILDERS["truncated-epub"] = ("epub", lambda p: truncated(p, "epub", epub_file))
 
 
+for _f in ["docx", "xlsx", "pptx", "epub"]:
+    BUILDERS[f"hostile-zipbomb-{_f}"] = (_f, lambda p, f=_f: zip_bomb(p, f))
+for _f in ["svg", "html", "docx"]:
+    BUILDERS[f"hostile-deep-xml-{_f}"] = (_f, lambda p, f=_f: deep_xml(p, f))
+for _f in ["png", "gif"]:
+    BUILDERS[f"hostile-huge-{_f}"] = (_f, lambda p, f=_f: huge_image_header(p, f))
+for _f in ["svg", "html"]:
+    BUILDERS[f"hostile-css-{_f}"] = (_f, lambda p, f=_f: long_css(p, f))
+for _f in ["txt", "md", "html", "csv"]:
+    BUILDERS[f"sentinel-{_f}"] = (_f, lambda p, f=_f: sentinel_file(p, f))
+BUILDERS["sentinel-pdf"] = ("pdf", sentinel_pdf)
+BUILDERS["sentinel-truncated-pdf"] = ("pdf", lambda p: sentinel_pdf(p, truncate=True))
+
+
+def hostile_names() -> list[str]:
+    return sorted(n for n in BUILDERS if n.startswith("hostile-"))
+
+
 def build(name: str, directory: Path) -> Path:
     ext, make = BUILDERS[name]
     path = directory / f"{name}.{ext}"
@@ -550,4 +702,14 @@ def needs_ffmpeg(name: str) -> bool:
     )
 
 
-__all__ = ["BUILDERS", "build", "engine_env", "ffmpeg", "needs_ffmpeg", "needs_soffice", "soffice"]
+__all__ = [
+    "BUILDERS",
+    "TEXT_SENTINEL",
+    "hostile_names",
+    "build",
+    "engine_env",
+    "ffmpeg",
+    "needs_ffmpeg",
+    "needs_soffice",
+    "soffice",
+]

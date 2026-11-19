@@ -20,6 +20,7 @@ from converter_sdk import (
 )
 from converter_sdk.convert import ConversionAdapter, issue, source_format
 from converter_sdk.images import pixels, read_frames
+from converter_sdk.limits import MB, check_pixels, rendered_size
 from converter_sdk.protocol import ValidationIssue
 from converter_sdk.sheets import (
     cell_px_for_width,
@@ -31,7 +32,6 @@ from converter_sdk.sheets import (
 )
 from PIL import Image
 
-MB = 1024 * 1024
 MAX_PDF_PAGES = 500
 """Per PDF."""
 MAX_CELLS = 2000
@@ -293,6 +293,7 @@ class _Pages:
             w, h = p.get_size()
             fit = min(cell_px / w, cell_px / h)
             scale = max(0.05, min(1.0, fit * 1.5))  # up to 72 dpi
+            check_pixels(*rendered_size(w, h, scale))
             return shrink(p.render(scale=scale).to_pil(), (cell_px, cell_px))
         finally:
             p.close()

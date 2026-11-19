@@ -1,0 +1,149 @@
+name: Release
+
+# Builds unsigned installers on the three systems from a tag (v*), or by hand
+# from any branch to try it. Each system uploads its installer, the runtime
+# manifest and a SHA256SUMS file as a workflow artifact.
+#
+# What this does not do: sign or notarize anything (no certificates exist,
+# REL-3), create a GitHub release, or publish. Installers are for testing
+# until the release plan's other blockers are done (docs/release-plan.md).
+# This workflow has not run yet; its first run is the first evidence.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Action versions are pinned to commit SHAs; the release is in the comment.
+
+jobs:
+  bundle:
+    name: Unsigned bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: dmg
+          - os: ubuntu-24.04
+            bundles: deb
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf bubblewrap
+          # The smoke test runs the sandbox. Ubuntu 24.04 restricts
+          # unprivileged user namespaces; a runner is a throwaway machine.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Every manifest has the same version (and the tag's)
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            uv run --no-project python tools/check-versions.py --tag "$GITHUB_REF_NAME"
+          else
+            uv run --no-project python tools/check-versions.py
+          fi
+
+      - run: pnpm install --frozen-lockfile
+
+      # The worker runtime: a pinned CPython, the locked packages, the
+      # adapters and the engine catalog, in the layout app-core expects.
+      - name: Build the worker runtime
+        shell: bash
+        run: uv run --no-project python tools/bundle-runtime/bundle_runtime.py
+
+      - name: Build the command line
+        run: cargo build --release -p lfcs
+
+      # The generated config adds the runtime folders as bundle resources.
+      - name: Build the installer (unsigned)
+        shell: bash
+        run: |
+          pnpm --filter @converter/desktop tauri build \
+            --config "$GITHUB_WORKSPACE/target/bundle-runtime/tauri.resources.conf.json" \
+            --bundles ${{ matrix.bundles }}
+
+      # 1. The runtime as built. 2. The resources inside the finished
+      # package, so what Tauri copied is what is tested: the .app's
+      # Resources folder, the unpacked .deb, or the unpacked installer.
+      - name: Smoke test, bundled runtime
+        shell: bash
+        run: |
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          tools/bundle-runtime/smoke.sh "target/release/lfcs$exe" "$PWD/target/bundle-runtime"
+
+      - name: Smoke test, inside the package
+        shell: bash
+        run: |
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          tmp="$RUNNER_TEMP"; [ "$RUNNER_OS" = Windows ] && tmp="$(cygpath -u "$RUNNER_TEMP")"
+          case "$RUNNER_OS" in
+            macOS)
+              app="$(ls -d target/release/bundle/macos/*.app | head -1)"
+              res="$app/Contents/Resources"
+              ;;
+            Linux)
+              mkdir "$tmp/unpacked"
+              dpkg-deb -x target/release/bundle/deb/*.deb "$tmp/unpacked"
+              py="$(find "$tmp/unpacked" -path '*/python/bin/python3' | head -1)"
+              res="$(dirname "$(dirname "$py")")"
+              ;;
+            Windows)
+              7z x target/release/bundle/nsis/*-setup.exe -o"$(cygpath -m "$tmp")/unpacked" -y > /dev/null
+              py="$(find "$tmp/unpacked" -path '*/python/python.exe' | head -1)"
+              res="$(dirname "$(dirname "$py")")"
+              ;;
+          esac
+          echo "resources: $res"
+          tools/bundle-runtime/smoke.sh "target/release/lfcs$exe" "$res"
+
+      - name: Collect the installer and its checksums
+        shell: bash
+        run: |
+          mkdir release-out
+          cp target/release/bundle/${{ matrix.bundles }}/* release-out/
+          cp target/bundle-runtime/BUNDLE-MANIFEST.txt "release-out/BUNDLE-MANIFEST-$RUNNER_OS.txt"
+          cd release-out
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -- * > SHA256SUMS
+          else
+            shasum -a 256 -- * > SHA256SUMS
+          fi
+          cat SHA256SUMS
+
+      - name: Upload (unsigned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-${{ matrix.os }}
+          path: release-out/
+          if-no-files-found: error

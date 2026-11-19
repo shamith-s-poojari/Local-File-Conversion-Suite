@@ -25,7 +25,7 @@ Removes the content under boxes the user draws and every match of search terms, 
    - Info keeps only a neutral Producer.
    - Removing form fields and annotations must be stated to the user *before* running (the `FORMS_FLATTENED` warning is raised).
 5. **Fill and rewrite (pikepdf):** fill rectangles are drawn in PDF space from the CropBox and /Rotate, then the file is fully rewritten. The rewrite drops unreferenced objects and leaves one revision.
-6. **Verify (`verify.py`, fresh process):** checks V1 to V9 on the output file alone.
+6. **Verify (`verify.py`, fresh process):** checks V1 to V10 on the output file alone.
 
 ## Verification
 
@@ -40,6 +40,7 @@ Removes the content under boxes the user draws and every match of search terms, 
 | V7 | One `startxref`, one `%%EOF`, no `/Prev` | raw bytes |
 | V8 | Page count unchanged | both |
 | V9 | Text captured under boxes found elsewhere: **warning** `REDACTED_TEXT_REMAINS_ELSEWHERE` with count and pages | PyMuPDF |
+| V10 | Search terms and text captured under boxes absent from alternative text, the structure tree, bookmarks, page labels and named destinations: **fail**, with the kinds of place only | pikepdf |
 
 Passed checks are reported as stages named `verified-V1` … `verified-V8`. **The UI should say "passed these checks", never "guaranteed".**
 

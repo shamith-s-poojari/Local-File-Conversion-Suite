@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::{CommandError, CommandResult};
+use crate::{CommandError, CommandResult, Reason};
 
 /// Folders deeper than this below the dropped one are not entered.
 pub const MAX_DEPTH: usize = 8;
@@ -175,18 +175,21 @@ pub struct Pasted {
 /// UTF-8 text.
 pub fn paste(dir: &Path, kind: PasteKind, bytes: &[u8]) -> CommandResult<Pasted> {
     if bytes.is_empty() {
-        return Err(CommandError::new("E_INPUT_CORRUPT", "emptyPaste"));
+        return Err(CommandError::with("E_INPUT_CORRUPT", Reason::EmptyPaste));
     }
     if bytes.len() > MAX_PASTE_BYTES {
-        return Err(CommandError::new("E_LIMIT_EXCEEDED", "pasteTooLarge"));
+        return Err(CommandError::with(
+            "E_LIMIT_EXCEEDED",
+            Reason::PasteTooLarge,
+        ));
     }
     let (ext, display_name) = match kind {
         PasteKind::Image if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => ("png", "pasted-image.png"),
         PasteKind::Image if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => ("jpg", "pasted-image.jpg"),
-        PasteKind::Image => return Err(CommandError::new("E_INPUT_CORRUPT", "notAnImage")),
+        PasteKind::Image => return Err(CommandError::with("E_INPUT_CORRUPT", Reason::NotAnImage)),
         PasteKind::Table | PasteKind::Text => {
             if std::str::from_utf8(bytes).is_err() {
-                return Err(CommandError::new("E_INPUT_CORRUPT", "notText"));
+                return Err(CommandError::with("E_INPUT_CORRUPT", Reason::NotText));
             }
             match kind {
                 PasteKind::Table => ("csv", "pasted-table.csv"),
@@ -195,7 +198,7 @@ pub fn paste(dir: &Path, kind: PasteKind, bytes: &[u8]) -> CommandResult<Pasted>
         }
     };
     std::fs::create_dir_all(dir)
-        .map_err(|_| CommandError::new("E_RESOURCE_DISK", "pasteFolder"))?;
+        .map_err(|_| CommandError::with("E_RESOURCE_DISK", Reason::PasteFolder))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -212,7 +215,7 @@ pub fn paste(dir: &Path, kind: PasteKind, bytes: &[u8]) -> CommandResult<Pasted>
                 if f.write_all(bytes).and_then(|()| f.flush()).is_err() {
                     drop(f);
                     let _ = std::fs::remove_file(&path);
-                    return Err(CommandError::new("E_RESOURCE_DISK", "pasteWrite"));
+                    return Err(CommandError::with("E_RESOURCE_DISK", Reason::PasteWrite));
                 }
                 return Ok(Pasted {
                     path,
@@ -220,10 +223,10 @@ pub fn paste(dir: &Path, kind: PasteKind, bytes: &[u8]) -> CommandResult<Pasted>
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(CommandError::new("E_RESOURCE_DISK", "pasteWrite")),
+            Err(_) => return Err(CommandError::with("E_RESOURCE_DISK", Reason::PasteWrite)),
         }
     }
-    Err(CommandError::new("E_INTERNAL", "pasteName"))
+    Err(CommandError::with("E_INTERNAL", Reason::PasteName))
 }
 
 /// 128 random bits as hex, from the std hasher's per-instance random keys.

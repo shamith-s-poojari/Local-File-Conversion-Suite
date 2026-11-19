@@ -29,6 +29,7 @@ from . import protocol
 from .adapter import Adapter
 from .context import JobContext, OutputFile, resolve_job_path
 from .errors import AdapterError, Cancelled
+from .failures import map_exception
 from .protocol import (
     Cancel,
     Estimate,
@@ -198,14 +199,20 @@ class Worker:
         except MemoryError:
             self._error("E_RESOURCE_MEMORY", None, True)
         except OSError as e:
-            if e.errno == errno.ENOSPC:
+            # EFBIG: the file-size limit was hit. Python ignores SIGXFSZ, so the
+            # write fails with an error instead of killing the worker.
+            if e.errno in (errno.ENOSPC, errno.EFBIG):
                 self._error("E_RESOURCE_DISK", None, True)
             else:
                 # Only the type and errno: messages can contain file paths.
                 self._error("E_INTERNAL", {"exception": type(e).__name__, "errno": e.errno}, True)
         except Exception as e:
-            # Never the message: it may contain document text.
-            self._error("E_INTERNAL", {"exception": type(e).__name__}, True)
+            mapped = map_exception(e)
+            if mapped is not None:
+                self._error(mapped.code, mapped.detail, mapped.retryable)
+            else:
+                # Never the message: it may contain document text.
+                self._error("E_INTERNAL", {"exception": type(e).__name__}, True)
 
     # ------------------------------------------------------------- handlers
 

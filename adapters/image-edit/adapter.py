@@ -16,9 +16,9 @@ from converter_sdk import (
 )
 from converter_sdk.convert import ConversionAdapter, issue, source_format
 from converter_sdk.images import Frames, encode, pixels, read_frames
+from converter_sdk.limits import MAX_PIXELS, MB
 from PIL import Image, ImageOps
 
-MB = 1024 * 1024
 TRANSPOSE = {
     90: Image.Transpose.ROTATE_270,  # Pillow's rotations are anticlockwise
     180: Image.Transpose.ROTATE_180,
@@ -28,7 +28,7 @@ FLIP = {
     "horizontal": Image.Transpose.FLIP_LEFT_RIGHT,
     "vertical": Image.Transpose.FLIP_TOP_BOTTOM,
 }
-MAX_OUTPUT_PIXELS = 200_000_000
+MAX_OUTPUT_PIXELS = MAX_PIXELS
 
 
 def new_size(size: tuple[int, int], params: dict[str, Any]) -> tuple[int, int]:

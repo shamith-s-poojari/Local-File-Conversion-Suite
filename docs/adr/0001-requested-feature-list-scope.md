@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed |
+| **Status** | Accepted; partly superseded by [ADR 0003](0003-all-format-conversion.md) (the format list, "no audio or video", the 12-format sniffer) and [ADR 0004](0004-tools-for-every-kind-of-file.md) (`pdf-compress` and more tools) |
 | **Date** | 2026-11-08 |
 | **Deciders** | Team (all stream owners) |
 | **Affects** | [Blueprint](../architecture/blueprint.md) sections 3.2, 8 and 10; [Phase 1 spec](../specs/phase-1.md) section 1 |

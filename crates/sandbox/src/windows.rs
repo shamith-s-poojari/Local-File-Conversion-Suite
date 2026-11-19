@@ -19,6 +19,18 @@
 //! - **Start.** The worker is created suspended and is in the job before it
 //!   runs anything; it inherits only the three standard handles.
 //!
+//! **Known gap (audit S14): granted ACEs are never removed.** [`prepare`]
+//! adds an inheritable `ALL APPLICATION PACKAGES` read ACE to the runtime
+//! and engine folders, and each job adds one for its own container SID to its
+//! job directory. Neither is taken back: the first is meant to persist (every
+//! AppContainer needs it, and Program Files already carries it); the
+//! per-job SID is unreachable once its profile is deleted (the ACE is
+//! then an orphan SID in a folder we delete anyway). Removing the shared
+//! ACE would need an uninstaller step: the app can't tell whether another
+//! program relies on it, and a folder outside the install (a development
+//! checkout, a per-user Python) isn't ours to rewrite on exit. So the
+//! installer owns it: it grants at install and revokes at uninstall.
+//!
 //! **Compile-checked only so far:** the probe (`self_test`) must pass on a
 //! Windows machine or the Windows CI job before this is relied on.
 

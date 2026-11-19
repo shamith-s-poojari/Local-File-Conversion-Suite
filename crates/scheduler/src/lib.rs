@@ -8,6 +8,8 @@
 //!   job ID, message rate, the watchdog, cancel, and killing the whole
 //!   process tree.
 //! - [`verify_outputs`] re-checks every output a worker claims.
+//! - [`Recheck`] makes the core re-check an output in a separate check job
+//!   before the job may succeed (ADR 0006).
 //! - [`Runner`] drives a staged job through validate, estimate, admission,
 //!   execute and verification, recording every step in the job store.
 
@@ -23,10 +25,11 @@ pub use queue::{
     hard_limit, phase1_pools, Admission, Scheduler, Ticket, MIN_HARD_LIMIT, STARVATION_AFTER,
 };
 pub use runner::{
-    pool_for, warning_catalog, JobPart, JobSpec, Runner, RunnerConfig, GENERIC_WARNING_CODE,
-    MAX_DETAIL_BYTES,
+    pool_for, warning_catalog, JobPart, JobSpec, Recheck, Runner, RunnerConfig,
+    GENERIC_WARNING_CODE, MAX_DETAIL_BYTES,
 };
-pub use verify::verify_outputs;
+pub use tree::kill_job_strays;
+pub use verify::{open_regular, verify_outputs};
 pub use worker::{
     retryable, CancelToken, LaunchSpec, Launcher, RequestKind, Timing, Watchdog, Worker,
     WorkerEvent, MAX_MESSAGES_PER_SECOND, STDERR_BUFFER_BYTES,

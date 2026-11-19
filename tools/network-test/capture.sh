@@ -38,6 +38,10 @@ fi
 user="${SUDO_USER:-$(logname)}"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
+# mktemp -d makes the folder 0700 and owned by root, but strace runs as the
+# user and writes its trace here ("strace: Can't fopen ... Permission
+# denied", nightly CI-2). The user may enter and write; nobody else may.
+chown "$user" "$out"
 fail=0
 
 # Our processes, by name. Anything else on the machine is ignored here.
@@ -111,6 +115,13 @@ Linux)
     | grep -oE '"executable":"[^"]*network-[0-9a-f]+"' | tail -1 | cut -d'"' -f4)"
   as_user strace -f -qq -e trace=connect,sendto,sendmsg -o "$out/trace" "$bin" || fail=1
   kill "$cap"; wait "$cap" 2>/dev/null || true
+  # The test connects to its own canary on loopback, so a working trace is
+  # never empty. An empty or missing one would make "no internet connections"
+  # true of nothing, so it fails.
+  if ! grep -qs 'connect(' "$out"/trace*; then
+    echo "FAIL: strace recorded no connect() calls at all, so the trace can't be trusted"
+    fail=1
+  fi
   # Internet addresses other than loopback, from any traced process.
   grep -hE 'sa_family=AF_INET6?' "$out"/trace* 2>/dev/null \
     | grep -vE 'inet_addr\("127\.0\.0\.1"\)|inet_pton\(AF_INET6, "::1"' > "$out/ours.txt" || true

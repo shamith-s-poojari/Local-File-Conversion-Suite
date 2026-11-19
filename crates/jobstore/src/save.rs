@@ -4,10 +4,11 @@
 //! path it returns. The renderer never sees or supplies a path.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::error::JobError;
@@ -373,7 +374,34 @@ fn parent_folder(dest: &Path) -> Result<&Path, JobError> {
     Ok(folder)
 }
 
+/// Opens an output for reading without following a link or blocking on a
+/// FIFO, and refuses anything that isn't a regular file. The open is the
+/// check that can't be raced; the metadata check before it only gives a
+/// clearer error.
+fn open_output(path: &Path) -> Result<File, JobError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let src = options
+        .open(path)
+        .map_err(JobError::io("reading an output"))?;
+    let meta = src.metadata().map_err(JobError::io("reading an output"))?;
+    if !meta.is_file() {
+        return Err(JobError::InvalidOutput("output is not a regular file"));
+    }
+    Ok(src)
+}
+
 /// Copies one output into a new temporary file in `folder`, flushed to disk.
+///
+/// The bytes are hashed as they are copied, so the file that lands in the
+/// user's folder is exactly the one that was verified: a worker's leftover
+/// process, or anything else running as the user, can't swap it in between.
+/// On a mismatch the temporary file is deleted (it's dropped here).
 fn copy_to_temp(out: &Path, output: &OutputFile, folder: &Path) -> Result<NamedTempFile, JobError> {
     let src_path = out.join(&output.path);
     // record_outputs checked the path; refuse a link swapped in since then.
@@ -381,7 +409,9 @@ fn copy_to_temp(out: &Path, output: &OutputFile, folder: &Path) -> Result<NamedT
     if !meta.is_file() {
         return Err(JobError::InvalidOutput("output is not a regular file"));
     }
-    let mut src = File::open(&src_path).map_err(JobError::io("reading an output"))?;
+    // One byte past the claim is enough to tell it grew; no need to copy a
+    // file that became huge.
+    let mut src = open_output(&src_path)?.take(output.size_bytes.saturating_add(1));
     let mut builder = tempfile::Builder::new();
     builder.prefix(".lfcs-").suffix(".tmp");
     // A saved result is the user's file: give it the permissions any new
@@ -394,10 +424,34 @@ fn copy_to_temp(out: &Path, output: &OutputFile, folder: &Path) -> Result<NamedT
     let mut tmp = builder
         .tempfile_in(folder)
         .map_err(JobError::io("creating a file in the save folder"))?;
-    let copied =
-        io::copy(&mut src, tmp.as_file_mut()).map_err(JobError::io("writing the saved file"))?;
+    let mut hasher = Sha256::new();
+    let mut copied = 0u64;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(JobError::io("reading an output")(e)),
+        };
+        hasher.update(&buf[..n]);
+        tmp.as_file_mut()
+            .write_all(&buf[..n])
+            .map_err(JobError::io("writing the saved file"))?;
+        copied += n as u64;
+    }
     if copied != output.size_bytes {
         return Err(JobError::InvalidOutput("output changed after verification"));
+    }
+    if let Some(expected) = &output.sha256 {
+        let actual: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(JobError::InvalidOutput("output changed after verification"));
+        }
     }
     tmp.as_file_mut()
         .flush()

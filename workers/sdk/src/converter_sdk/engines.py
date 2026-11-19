@@ -32,6 +32,24 @@ def helper_env() -> dict[str, str]:
     return {k: os.environ[k] for k in HELPER_ENV if k in os.environ}
 
 
+# What an engine (FFmpeg, LibreOffice) gets besides the helper variables:
+# the work folder the sandbox made HOME and TMPDIR, and system directories
+# only on PATH (LibreOffice's launcher script on Linux calls ``uname`` and
+# ``sed``). Nothing else from the worker's environment: an engine parses
+# hostile files, and must not be able to read a variable that was never meant
+# for it.
+ENGINE_ENV = (*HELPER_ENV, "HOME", "TMPDIR")
+_SYSTEM_PATH = "/usr/bin:/bin"
+
+
+def engine_env() -> dict[str, str]:
+    """A minimal environment for an engine process."""
+    env = {k: os.environ[k] for k in ENGINE_ENV if k in os.environ}
+    if sys.platform != "win32":
+        env["PATH"] = _SYSTEM_PATH
+    return env
+
+
 def binary(name: str) -> Path:
     """The granted path of an engine binary, e.g. ``binary("ffmpeg")``."""
     value = os.environ.get(f"LFCS_BIN_{name.upper().replace('-', '_')}")
@@ -63,7 +81,7 @@ def run(
     process group on macOS and Linux, a Job Object on Windows.
     Returns the exit code and the last 8 KB of stderr.
     """
-    full_env = dict(os.environ)
+    full_env = engine_env()
     if env:
         full_env.update(env)
     # A finished job's work/ is gone, but preview workers still run engines

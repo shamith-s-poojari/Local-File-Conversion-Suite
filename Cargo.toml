@@ -21,5 +21,6 @@ license = "AGPL-3.0-only"
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+# No `panic = "abort"`: the scheduler, the worker pool and the Tauri commands
+# catch a panic and fail that one job or call; aborting would close the app.
 strip = true

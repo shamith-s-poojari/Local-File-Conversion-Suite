@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Literal
 
 import pikepdf
 from converter_sdk import JobContext, OutputFile, run_main
+from converter_sdk.adapter import issue
 from converter_sdk.pdf import (
     OpenedInput,
     PdfAdapter,
@@ -14,7 +15,6 @@ from converter_sdk.pdf import (
     field_names,
     flatten_forms,
     is_tagged,
-    param_issue,
     save_pdf,
 )
 from converter_sdk.protocol import ValidationIssue
@@ -32,15 +32,15 @@ class PdfMergeAdapter(PdfAdapter):
     ) -> list[ValidationIssue]:
         issues = []
         if params.get("bookmarks", "perFile") not in BOOKMARK_MODES:
-            issues.append(param_issue("bookmarks", "invalid"))
+            issues.append(issue("bookmarks", "invalid"))
         source = params.get("metadataFrom", 0)
         if not isinstance(source, int) or not -1 <= source < len(inputs):
-            issues.append(param_issue("metadataFrom", "outOfBounds"))
+            issues.append(issue("metadataFrom", "outOfBounds"))
         titles = params.get("fileTitles")
         if titles is not None and (not isinstance(titles, list) or len(titles) > len(inputs)):
-            issues.append(param_issue("fileTitles", "tooMany"))
+            issues.append(issue("fileTitles", "tooMany"))
         if len(inputs) < 2:
-            issues.append(param_issue("inputs", "tooFew", min=2))
+            issues.append(issue("inputs", "tooFew", min=2))
         if sum(i.pages for i in inputs) > self.max_pages * 10:
             issues.append(ValidationIssue(code="E_LIMIT_EXCEEDED", detail={"limit": "pages"}))
         return issues

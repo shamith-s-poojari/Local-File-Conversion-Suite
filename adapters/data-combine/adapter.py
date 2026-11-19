@@ -20,6 +20,7 @@ from converter_sdk import (
     run_main,
 )
 from converter_sdk.convert import ConversionAdapter
+from converter_sdk.limits import MB
 from converter_sdk.tables import (
     MAX_CELLS,
     Table,
@@ -29,7 +30,6 @@ from converter_sdk.tables import (
     write_xlsx,
 )
 
-MB = 1024 * 1024
 SOURCE_COLUMN = "Source file"
 
 

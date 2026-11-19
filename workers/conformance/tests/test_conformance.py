@@ -56,6 +56,16 @@ def _adapter(adapter_id: str) -> Path:
     return ADAPTERS / adapter_id / "adapter.py"
 
 
+def _is_encrypted(path: Path) -> bool:
+    import pikepdf  # noqa: PLC0415
+
+    try:
+        with pikepdf.open(path) as pdf:
+            return pdf.is_encrypted
+    except pikepdf.PasswordError:
+        return True
+
+
 def _files(job_dir: Path) -> set[str]:
     return {p.relative_to(job_dir).as_posix() for p in job_dir.rglob("*") if p.is_file()}
 
@@ -81,6 +91,24 @@ def _output_format(manifest: dict[str, Any], params: dict[str, Any], path: str) 
     return fmt
 
 
+def _check_suggested_name(name: str, fmt: str, case: str) -> None:
+    assert name and name == name.strip(), f"{case}: empty or padded name {name!r}"
+    assert not any(c in name for c in '/\\:*?"<>|'), (
+        f"{case}: separator or reserved char in {name!r}"
+    )
+    assert not any(ord(c) < 32 or ord(c) == 127 for c in name), f"{case}: control character"
+    assert not name.startswith("."), f"{case}: hidden name {name!r}"
+    ext = name.rpartition(".")[2].lower()
+    allowed = {fmt, "jpeg"} if fmt == "jpg" else {fmt}
+    assert ext in allowed, f"{case}: {name!r} doesn't end in .{fmt}"
+
+
+def _accepted_formats(manifest: dict[str, Any]) -> set[str]:
+    if manifest["kind"] == "conversion":
+        return {f for e in manifest["edges"] for f in e["from"]}
+    return set(manifest["inputs"]["formats"])
+
+
 def _reads_pdf(manifest: dict[str, Any]) -> bool:
     if manifest["kind"] == "conversion":
         return any("pdf" in e["from"] for e in manifest["edges"])
@@ -104,8 +132,20 @@ def _needs_missing_engine(names: list[str], manifest: dict[str, Any]) -> str | N
 
 
 def _skip_without_engines(names: list[str], manifest: dict[str, Any]) -> None:
-    if missing := _needs_missing_engine(names, manifest):
-        pytest.skip(f"{missing} isn't installed")
+    """A missing engine skips locally. In CI (``CI`` set) it fails, except
+    LibreOffice off Linux, which CI doesn't install."""
+    missing = _needs_missing_engine(names, manifest)
+    if not missing:
+        return
+    if files.in_ci() and (missing == "ffmpeg" or sys.platform.startswith("linux")):
+        pytest.fail(f"{missing} isn't installed, but CI installs it")
+    pytest.skip(f"{missing} isn't installed")
+
+
+def test_ffmpeg_is_found_in_ci() -> None:
+    if not files.in_ci():
+        pytest.skip("only checked in CI")
+    assert files.ffmpeg() is not None
 
 
 @pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
@@ -157,6 +197,14 @@ def test_cases_produce_valid_contained_outputs(
             assert pages == expect["pages"], case["name"]
         if "outputs" in expect:
             assert len(result.outputs) == expect["outputs"], case["name"]
+
+        # Suggested names: safe to offer, the right extension, and distinct.
+        names = [o.suggestedName for o in result.outputs]
+        for out in result.outputs:
+            _check_suggested_name(
+                out.suggestedName, _output_format(manifest, case["params"], out.path), case["name"]
+            )
+        assert len({n.casefold() for n in names}) == len(names), f"{case['name']}: {names}"
 
         # Warnings: in the catalog and declared by the manifest.
         for w in r.of("warning"):
@@ -242,7 +290,19 @@ def test_secret_never_leaves_the_worker(
     secrets = {**case.get("secrets", {}), "password": corpus.SENTINEL_PASSWORD}
     params = cases.get("encrypted", {}).get("params", case["params"])
     r = run_job(_adapter(adapter_id), job_dir, rel, params, secrets)
-    assert r.last("executeResult") is not None or r.of("error") or r.last("validateResult")
+    # The password must have been tried: a run that stops at "password
+    # required" or "wrong password" never exercised the code that holds it.
+    validate = r.last("validateResult")
+    codes = [e.code for e in validate.errors] if validate is not None else []
+    codes += [e.code for e in r.of("error")]
+    assert validate is not None, "the worker never answered the validate request"
+    assert not {"E_PASSWORD_REQUIRED", "E_PASSWORD_WRONG"} & set(codes), codes
+    # An unencrypted PDF written from it says so (P6).
+    result = r.last("executeResult")
+    if result is not None and manifest.get("outputs", {}).get("format") == "pdf":
+        outputs = [job_dir / o.path for o in result.outputs]
+        if outputs and not any(_is_encrypted(p) for p in outputs):
+            assert "ENCRYPTION_REMOVED" in [w.code for w in r.of("warning")]
     assert sentinel not in b"".join(r.lines)
     assert sentinel not in r.stderr
     for path in job_dir.rglob("*"):
@@ -277,13 +337,13 @@ def test_cancel_within_2_seconds(
         )
         first = w.wait_for("progress", "executeResult", "error", timeout=60)
         if first.type != "progress":
-            pytest.skip("finished before it could be cancelled; make the cancel case longer")
+            pytest.fail("finished before it could be cancelled: lengthen the cancel fixture")
         started = time.monotonic()
         w.send({"type": "cancel"})
         end = w.wait_for("error", "executeResult", timeout=10)
         elapsed = time.monotonic() - started
         if end.type == "executeResult":
-            pytest.skip("finished before cancel arrived; make the cancel case longer")
+            pytest.fail("finished before cancel arrived: lengthen the cancel fixture")
         assert end.code == "E_CANCELLED"
         assert elapsed < CANCEL_LIMIT_S, f"{elapsed:.2f}s"
     finally:
@@ -346,3 +406,96 @@ def test_kit_covers_every_shipping_adapter() -> None:
         "contact-sheet",
     }
     assert sys.version_info >= (3, 12)
+
+
+@pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
+def test_document_text_never_appears_in_errors_or_warnings(
+    adapter_id, manifest, cases, tmp_path: Path, corpus_dir: Path
+) -> None:
+    """Messages can be shown, stored and shared; the text of the user's
+    document must never be in one, however the job ends."""
+    sentinel = files.TEXT_SENTINEL.encode("utf-8")
+    accepted = _accepted_formats(manifest)
+    case = cases["cases"][0]
+    candidates = [n for n in ("sentinel-pdf", "sentinel-truncated-pdf", "sentinel-txt",
+                              "sentinel-md", "sentinel-html", "sentinel-csv")
+                  if n.rpartition("-")[2] in accepted]  # fmt: skip
+    if not candidates:
+        pytest.skip("reads no text formats")
+    for n, name in enumerate(candidates):
+        ext = "pdf" if name.endswith("pdf") else name.rpartition("-")[2]
+        params = dict(case["params"])
+        if manifest["kind"] == "conversion":
+            params["to"] = next(e["to"] for e in manifest["edges"] if ext in e["from"])
+        _skip_without_engines([name], manifest)
+        job_dir, rel = _job(tmp_path / str(n), corpus_dir, _replace_first(case["inputs"], name))
+        r = run_job(_adapter(adapter_id), job_dir, rel, params, case.get("secrets"))
+        for line in r.lines:
+            kind = json.loads(line).get("type")
+            if kind in ("error", "warning", "validateResult"):
+                assert sentinel not in line, f"{name}: document text in a {kind} message"
+        assert sentinel not in r.stderr, f"{name}: document text on stderr"
+
+
+@pytest.fixture(scope="session")
+def hostile_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("hostile")
+
+
+@pytest.mark.parametrize("hostile", files.hostile_names())
+@pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
+def test_hostile_input_fails_safely_or_gives_a_valid_output(
+    adapter_id, manifest, cases, hostile, tmp_path: Path, hostile_dir: Path
+) -> None:
+    """A zip bomb, a deeply nested XML tree, an image header declaring billions
+    of pixels, a huge CSS string: each ends in a structured error or a valid
+    output, quickly and without exhausting memory."""
+    ext = files.BUILDERS[hostile][0]
+    if ext not in _accepted_formats(manifest):
+        pytest.skip(f"doesn't read {ext}")
+    params = dict(cases["negative"]["params"])
+    if manifest["kind"] == "conversion":
+        params["to"] = next(e["to"] for e in manifest["edges"] if ext in e["from"])
+    _skip_without_engines([hostile], manifest)
+    job_dir, rel = make_job_dir(tmp_path / "job", [files.build(hostile, hostile_dir)])
+    started = time.monotonic()
+    r = run_job(
+        _adapter(adapter_id), job_dir, rel, params, cases["negative"].get("secrets"), timeout=90
+    )
+    assert time.monotonic() - started < 90
+    issues = list(r.of("error"))
+    validate = r.last("validateResult")
+    if validate is not None:
+        issues += validate.errors
+    bad = [
+        i.code
+        for i in issues
+        if i.code not in (STRUCTURED_INPUT_ERRORS | {"E_NO_TEXT"})
+        and not (i.code == "E_INTERNAL" and getattr(i, "param", None))
+    ]
+    assert not bad, f"{hostile}: {bad}"
+    result = r.last("executeResult")
+    if not issues:
+        assert result is not None, f"{hostile}: no result and no error"
+        for out in result.outputs:
+            output_check.check(job_dir / out.path, _output_format(manifest, params, out.path))
+    if r.peak_rss_bytes is not None:
+        assert r.peak_rss_bytes < 2 * 1024**3, f"{hostile}: {r.peak_rss_bytes >> 20} MB"
+
+
+SDK_SRC = ROOT / "workers" / "sdk" / "src" / "converter_sdk"
+
+
+@pytest.mark.parametrize(("adapter_id", "manifest", "cases"), ADAPTER_LIST, ids=IDS)
+def test_every_fidelity_note_can_be_emitted(adapter_id, manifest, cases) -> None:
+    """A code listed in ``fidelityNotes`` that no code can send tells the user
+    nothing and hides a note that was dropped. Looks for the code as a string in
+    the adapter and the SDK (the shared PDF rules send some)."""
+    sources = "".join(
+        p.read_text("utf-8")
+        for folder in (ADAPTERS / adapter_id, SDK_SRC)
+        for p in folder.glob("*.py")
+        if p.name != "_generated.py"
+    )
+    never = [c for c in manifest["fidelityNotes"] if f'"{c}"' not in sources]
+    assert not never, f"listed but never emitted: {never}"

@@ -8,13 +8,16 @@ from typing import Any, ClassVar, Literal
 
 from converter_sdk import (
     Adapter,
+    AdapterError,
     JobContext,
     OutputFile,
     ResourceEstimate,
     ValidationReport,
     run_main,
 )
-from converter_sdk.convert import ConversionAdapter, issue, source_format
+from converter_sdk.adapter import issue
+from converter_sdk.convert import ConversionAdapter, source_format
+from converter_sdk.limits import MB
 from converter_sdk.media import (
     MUXER,
     atempo,
@@ -24,10 +27,36 @@ from converter_sdk.media import (
     ffmpeg,
     has_extra_streams,
     probe,
+    validate_media,
 )
+from converter_sdk.protocol import ValidationIssue
 
-MB = 1024 * 1024
 BITRATES = [96, 128, 160, 192, 256, 320]
+# The values params.schema.json allows; see video-edit for why they're repeated.
+VOLUMES = (-12, -6, -3, 0, 3, 6, 12)
+FADES = (0, 1, 2, 3, 5, 10)
+SPEEDS = (0.5, 0.75, 1, 1.25, 1.5, 2)
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def check_params(params: dict[str, Any]) -> ValidationIssue | None:
+    """The first parameter outside its allowed values, as an issue."""
+    for name, allowed in (
+        ("volume", VOLUMES),
+        ("fadeIn", FADES),
+        ("fadeOut", FADES),
+        ("speed", SPEEDS),
+    ):
+        value = params.get(name)
+        if value is not None and not (_number(value) and value in allowed):
+            return issue(name, "invalid")
+    normalize = params.get("normalize")
+    if normalize is not None and not isinstance(normalize, bool):
+        return issue("normalize", "invalid")
+    return None
 
 
 def changes(params: dict[str, Any]) -> bool:
@@ -74,16 +103,11 @@ class AudioEditAdapter(Adapter):
     fidelity: ClassVar[Literal["E", "H", "R", "L"]] = "L"
 
     def validate_input(self, ctx: JobContext, params: dict[str, Any]) -> ValidationReport:
+        if (problem := check_params(params)) is not None:
+            return ValidationReport(errors=[problem])
         if not changes(params):
             return ValidationReport(errors=[issue("volume", "nothingToChange")])
-        durations = []
-        for p in ctx.inputs:
-            ctx.check_cancelled()
-            info = probe(ctx, p)
-            if not audio_streams(info):
-                return ValidationReport(errors=[issue("inputs", "noAudio")])
-            durations.append(duration_s(info))
-        return ValidationReport(metadata={"durations": durations})
+        return validate_media(ctx, "audio")
 
     def estimate_memory(
         self, ctx: JobContext, params: dict[str, Any], metadata: dict[str, Any]
@@ -96,6 +120,8 @@ class AudioEditAdapter(Adapter):
         )
 
     def execute_conversion(self, ctx: JobContext, params: dict[str, Any]) -> list[OutputFile]:
+        if (problem := check_params(params)) is not None:
+            raise AdapterError("E_INTERNAL", {"param": problem.param, "reason": "invalid"})
         outputs = []
         dropped = False
         speed = float(params.get("speed") or 1)

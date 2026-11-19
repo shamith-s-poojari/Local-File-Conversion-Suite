@@ -17,9 +17,12 @@ from PIL import Image, ImageOps, ImageSequence, UnidentifiedImageError
 from .context import JobContext
 from .convert import source_format
 from .errors import AdapterError
+from .limits import MAX_PIXELS, check_pixels
 
-MAX_PIXELS = 200_000_000
-"""Larger images fail with E_LIMIT_EXCEEDED."""
+# Pillow warns above this and fails above twice it. open_image turns the
+# warning into a failure, so MAX_PIXELS is the real limit, not Pillow's
+# default of about 89 million.
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP",
@@ -31,7 +34,8 @@ WHITE = (255, 255, 255)
 
 
 def open_image(path: Path) -> Image.Image:
-    """Open a staged image, refusing decompression bombs."""
+    """Open a staged image, refusing decompression bombs, too many frames and
+    animations too large to hold in memory (``limits.check_pixels``)."""
     if source_format(path) == "heic":
         try:
             import pillow_heif  # noqa: PLC0415 - optional engine
@@ -43,14 +47,17 @@ def open_image(path: Path) -> Image.Image:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             img = Image.open(path)
-        if img.width * img.height > MAX_PIXELS:
-            raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"})
+        try:
+            check_pixels(img.width, img.height, int(getattr(img, "n_frames", 1)))
+        except BaseException:
+            img.close()
+            raise
         return img
     except AdapterError:
         raise
     except (Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise AdapterError("E_LIMIT_EXCEEDED", {"reason": "pixels"}) from None
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError, EOFError):
         raise AdapterError("E_INPUT_CORRUPT") from None
 
 

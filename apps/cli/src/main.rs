@@ -1,11 +1,14 @@
 //! `lfcs`: the converter from a terminal. It reuses `converter-app-core`, so
 //! files take the same router, per-job sandbox and output checks as the app.
 //!
-//! Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable.
+//! Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable,
+//! 130 stopped by Ctrl-C.
 
 mod args;
 mod commands;
-mod files;
+mod secret;
+mod signal;
+mod text;
 
 use std::process::ExitCode;
 
@@ -18,15 +21,18 @@ USAGE
   lfcs doctor
   lfcs inspect FILE...
   lfcs targets FILE...
-  lfcs convert FILE|DIR... --to FORMAT [--out DIR] [--set KEY=VALUE]... [--params JSON] [--keep-folders]
-  lfcs run TOOL FILE|DIR... [--set KEY=VALUE]... [--params JSON] [--out PATH] [--force]
+  lfcs convert FILE|DIR... --to FORMAT [--out DIR] [--set KEY=VALUE]... [--params JSON]
+                [--skip-same] [--keep-folders]
+  lfcs run TOOL FILE|DIR... [--set KEY=VALUE]... [--params JSON] [--out PATH]
+              [--force] [--keep-folders]
 
 COMMANDS
   doctor    Run the sandbox self-test and list the engines found.
   inspect   Show format, size, and what a file reveals or could do.
   targets   Show the conversions and tools available for these files.
   convert   Convert every file to FORMAT, saving into --out (default: here).
-  run       Run a tool (such as pdf-merge) on the files.
+  run       Run a tool (such as pdf-merge) on the files, saving into --out
+            (default: here).
 
 OPTIONS
   --to FORMAT       Target format for convert (see `lfcs targets`)
@@ -35,18 +41,32 @@ OPTIONS
   --set KEY=VALUE   A parameter; VALUE is JSON when it parses (80, true, [1,2]),
                     else text. Repeatable; wins over --params
   --params JSON     Parameters as a JSON object
-  --keep-folders    Save results in the folder layout of any folder given
+  --skip-same       convert: leave out files already in the target format
+                    (it is an error if that leaves none)
+  --keep-folders    Save results in the folder layout of any folder given,
+                    under --out (convert and run; --out is then a folder)
   --force           Allow replacing an existing --out file
   --json            Machine-readable output on stdout
   -q, --quiet       No progress on stderr
+  --password-stdin  Read a password from the first line of standard input (on a
+                    terminal, asked for with typing hidden): it opens
+                    encrypted files and is the password a tool such as
+                    pdf-protect sets. LFCS_PASSWORD does the same. There is no
+                    --password: arguments are visible to other programs
   --resources DIR   Folder holding adapters/, engines/ and the Python runtime
-                    (default: the repository around this program)
+                    (an installed app's resources folder)
+  --dev             Use the repository checkout and its .venv as the runtime
+                    (or set LFCS_DEV=1). Without it a checkout is not used
   --data-dir DIR    Working folder for jobs (default: the app's data folder)
   -h, --help        This text
-  --version         Version
+  -V, --version     Version
 
-Nothing is ever overwritten: results get a numeric suffix when a name is taken.
-Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable.
+Nothing is overwritten: results get a numeric suffix when a name is taken
+(only --force replaces a single-file --out).
+With --json, a failure is {ok: false, error: {code, reason, message}}.
+Ctrl-C stops the job and removes its files; press it twice to leave at once.
+Exit codes: 0 ok, 1 a job failed, 2 usage error, 3 sandbox unavailable,
+130 stopped by Ctrl-C.
 ";
 
 fn main() -> ExitCode {
@@ -55,9 +75,11 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some(RUNNER_FLAG) {
         return converter_sandbox::runner::main_with(args[2..].to_vec());
     }
+    // A bad command line still answers `--json` callers in JSON.
+    let wants_json = args.iter().skip(1).any(|a| a == "--json");
     let opts = match args::parse(args.into_iter().skip(1)) {
         Ok(o) => o,
-        Err(e) => return usage(&e),
+        Err(e) => return commands::report(e.into(), wants_json),
     };
     if opts.help {
         print!("{USAGE}");
@@ -67,22 +89,9 @@ fn main() -> ExitCode {
         println!("lfcs {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    signal::install();
     match commands::dispatch(&opts) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            if !e.message.is_empty() {
-                eprintln!("lfcs: {}", e.message);
-            }
-            if e.code == 2 {
-                eprintln!("try `lfcs --help`");
-            }
-            ExitCode::from(e.code)
-        }
+        Err(e) => commands::report(e, opts.json),
     }
-}
-
-fn usage(message: &str) -> ExitCode {
-    eprintln!("lfcs: {message}");
-    eprintln!("try `lfcs --help`");
-    ExitCode::from(2)
 }
