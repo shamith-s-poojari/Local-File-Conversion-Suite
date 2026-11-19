@@ -1,50 +1,200 @@
-# Contributing
+# Contributing to Local File Conversion Suite
 
-Thanks for helping. This is a privacy-first app, so a few rules are firmer than usual.
+Thank you for your interest in contributing! This project benefits from contributions of all kinds — bug reports, feature suggestions, documentation improvements, new adapters, and code fixes.
 
-## Rules that don't bend
+## Code of Conduct
 
-- **No network code.** No update checks, telemetry, crash reports or downloads, in the app or in a worker. See [Privacy](docs/privacy.md).
-- **Every parser of untrusted input runs in the per-job sandbox.** The core never opens, parses or decodes a user's file itself. Don't add a fallback that runs an engine without the sandbox.
-- **Don't log file names, document text or passwords.**
-- **No new dependencies without a decision.** Open an issue first. A new engine needs its license reviewed against AGPL-3.0-only and an entry in `engines/engines.yaml`.
-- **Licence:** the project is AGPL-3.0-only. Your contribution is under the same licence.
-- **Report security problems privately**, not in an issue. See [SECURITY.md](SECURITY.md).
+By participating in this project, you agree to maintain a respectful and constructive environment. Be kind, be patient, and assume good intentions.
 
-## Setting up
+## Reporting Bugs
 
-You need Rust (via rustup), Node.js 22 or newer, pnpm and uv. See the [README](README.md#prerequisites).
+**Found a bug?** Please [open a GitHub Issue](https://github.com/shamith-s-poojari/Local-File-Conversion-Suite/issues/new) with:
+
+- A clear, descriptive title
+- Steps to reproduce the problem
+- What you expected to happen vs. what actually happened
+- Your operating system and version
+- The file format(s) involved (if applicable — do **not** attach files containing sensitive data)
+- Any error codes or warning codes shown by the app
+
+**Security vulnerabilities** should be reported privately — see [SECURITY.md](SECURITY.md).
+
+## Suggesting Features
+
+Feature ideas are welcome as GitHub Issues. Please include:
+
+- A clear description of the problem you're trying to solve
+- How you envision the solution working
+- Whether you're willing to help implement it
+
+## Development Setup
+
+### Prerequisites
+
+| Tool | Version | Install |
+|---|---|---|
+| Rust | See `rust-toolchain.toml` | [rustup.rs](https://rustup.rs/) |
+| Node.js | 22 or newer | [nodejs.org](https://nodejs.org/) |
+| pnpm | See `packageManager` in `package.json` | [pnpm.io](https://pnpm.io/) |
+| uv | Latest | [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
+
+**macOS:** Install Xcode Command Line Tools (`xcode-select --install`).
+
+### Getting Started
 
 ```bash
+# Clone the repository
+git clone https://github.com/shamith-s-poojari/Local-File-Conversion-Suite.git
+cd Local-File-Conversion-Suite
+
+# Install JavaScript dependencies
 pnpm install
+
+# Install Python dependencies
 uv sync
+
+# Start the development server
+pnpm dev
 ```
 
-Don't clone into OneDrive, Dropbox, iCloud Drive or Google Drive.
+### Running All Checks
 
-From a checkout, the app and `lfcs` need development mode: set `LFCS_DEV=1` (see the README).
-
-## Checks
-
-Run before you open a pull request:
+Before submitting a pull request, run the full check suite:
 
 ```bash
 pnpm check
 ```
 
-It runs the generated-code check, type checks, frontend tests, `cargo fmt`, `clippy`, the Rust tests, the registry check, `ruff` and `pytest`. CI runs the same checks, split into lint, Rust tests and Python tests, on macOS, Windows and Linux, plus `cargo-deny` and `pip-audit`.
+This executes, in order:
 
-Some tests need FFmpeg, LibreOffice or (on Linux) bubblewrap. The README says how to install them. Where the program isn't installed, locally those tests skip; in CI (`CI=true`) they fail. A skipped test proves nothing, so say in your pull request which ones didn't run on your machine.
+1. Protocol schema validation (`pnpm --filter @converter/protocol check-generated`)
+2. TypeScript type checking (`pnpm -r typecheck`)
+3. JavaScript tests (`pnpm -r test`)
+4. Rust formatting (`cargo fmt --all --check`)
+5. Rust linting (`cargo clippy --workspace --all-targets -- -D warnings`)
+6. Rust tests (`cargo test --workspace --no-fail-fast`)
+7. Adapter registry validation (`registry-gen --check --include-dev`)
+8. Python linting (`uv run ruff check .`)
+9. Python tests (`uv run pytest`)
 
-## Making a change
+All checks must pass for a pull request to be merged.
 
-- **Keep a change small and focused.** Add or update tests with it.
-- **Generated files** (`packages/protocol`, the adapter registry) come from `pnpm generate` and `pnpm registry`. Edit the source and regenerate; CI fails on a stale copy.
-- **Adapters** live in `adapters/<name>/` with a manifest, a README and tests. The conformance kit in `workers/conformance/` runs on every adapter. Declare only the engines and warnings the adapter uses.
-- **User-visible text** is plain and short. Every error code needs a text in `apps/desktop/src/text.ts`.
-- **Docs:** if you change what the app does with files, update [Privacy](docs/privacy.md) and [Known limits](docs/known-limits.md) in the same pull request. Don't claim what a test doesn't prove.
-- **Decisions** that change scope, add an engine or change the security model get an ADR in `docs/adr/` with the next free number.
+## How to Contribute
 
-## Pull requests
+### Adding a New Adapter (The Main Contribution Path)
 
-Describe what changed and why, and what you ran. Say which platforms you tested on. Pull requests need a green CI and a review from the code owner (`.github/CODEOWNERS`).
+Adapters are the most impactful way to contribute. Each adapter is a **self-contained Python module** — adding one requires **no changes to any shared file**. The registry is auto-generated from adapter folders at build time.
+
+#### Adapter Structure
+
+Create a new folder under `adapters/`:
+
+```
+adapters/your-adapter/
+├── manifest.yaml        # Capabilities, edges, engine requirements
+├── params.schema.json   # UI form is auto-generated from this schema
+├── adapter.py           # The conversion/tool logic
+├── tests/               # Adapter-specific tests
+└── README.md            # What it does, known limits, engine, license
+```
+
+#### Key Rules
+
+- The folder name **must** match the `id` in `manifest.yaml`
+- The manifest is validated against `adapters/manifest.schema.json`
+- Warning codes must be from the catalog in the protocol schema
+- Required engines must be listed in `engines/engines.yaml`
+- A **conversion** adapter declares `edges` in the format graph
+- An **operation** adapter (merge, split, etc.) declares `inputs`, `outputs`, and `fidelity`
+- Set `devOnly: true` for test/development adapters
+
+#### Validate Your Adapter
+
+```bash
+pnpm registry
+```
+
+This regenerates the registry and validates all manifests. The conformance test kit in `workers/conformance/` provides standard tests.
+
+For complete details, see the [Adapters README](adapters/README.md).
+
+### Other Contributions
+
+- **Rust core** (`crates/`): Bug fixes, performance improvements, new platform sandbox support
+- **Frontend** (`apps/desktop/`): UI improvements, accessibility, new tool interfaces
+- **CLI** (`apps/cli/`): New commands, output format improvements
+- **Documentation** (`docs/`): Corrections, clarifications, new guides
+
+## Code Style
+
+### Rust
+
+- Format with `cargo fmt`
+- Lint with `cargo clippy -- -D warnings`
+- All warnings are treated as errors in CI
+
+### Python
+
+- Lint with [Ruff](https://docs.astral.sh/ruff/)
+- Follow the existing adapter patterns in `adapters/`
+
+### TypeScript / JavaScript
+
+- Follow the project `tsconfig.json` settings
+- Type checking enforced via `pnpm typecheck`
+
+## Commit Messages
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+```
+
+**Types:**
+
+| Type | Use For |
+|---|---|
+| `feat` | New feature or adapter |
+| `fix` | Bug fix |
+| `docs` | Documentation changes |
+| `test` | Adding or updating tests |
+| `refactor` | Code restructuring without behavior change |
+| `perf` | Performance improvement |
+| `chore` | Build, CI, or tooling changes |
+
+**Examples:**
+
+```
+feat(adapter): add TIFF to PNG conversion adapter
+fix(sandbox): handle symlinks in job directory on Linux
+docs: clarify FFmpeg installation steps for Windows
+test(sniffer): add HEIC magic byte detection tests
+```
+
+## Pull Request Process
+
+1. **Fork** the repository and create a branch from `feat/app` (the active development branch)
+2. **Make your changes** — keep each PR focused on a single concern
+3. **Run `pnpm check`** and ensure all checks pass
+4. **Write a clear PR description** explaining what changed and why
+5. **Reference any related issues** using `Closes #123` or `Fixes #123`
+6. **Be responsive** to review feedback
+
+### What We Look For
+
+- All CI checks pass
+- Code follows the existing style and patterns
+- New adapters include tests, a manifest, parameter schema, and a README
+- Changes don't introduce network access or weaken sandbox isolation
+- Documentation is updated if behavior changes
+
+## License
+
+By contributing to this project, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (AGPL-3.0-only).
+
+---
+
+**Questions?** Open a [GitHub Discussion](https://github.com/shamith-s-poojari/Local-File-Conversion-Suite/discussions) or comment on a relevant issue. We're happy to help!
